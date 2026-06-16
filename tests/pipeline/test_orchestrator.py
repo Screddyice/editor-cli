@@ -1,0 +1,89 @@
+from pathlib import Path
+from types import SimpleNamespace
+
+from editor1.analysis.gemini import EvalResult
+from editor1.domain.edl import EDL, Segment
+from editor1.domain.style_profile import StyleProfile
+from editor1.pipeline.orchestrator import Deps, run_edit
+
+STYLE = StyleProfile.from_dict({
+    "pacing": {"cuts_per_min": 24.0, "avg_shot_len_s": 2.5},
+    "transitions": ["hard cut"],
+    "automations": [],
+    "color": {"description": "warm", "lut": None},
+    "captions": {"style": "bold", "position": "lower", "font": None},
+    "sound": {"name": None, "energy": "high", "genre": "edm", "bpm": 120},
+    "vibe": "punchy",
+})
+
+
+def _footage(tmp_path):
+    foot = tmp_path / "footage"
+    foot.mkdir()
+    (foot / "a.mp4").write_bytes(b"x")
+    return foot
+
+
+def _deps(counter, scorer):
+    def reason(*args):
+        counter["n"] += 1
+        return EDL(fps=30.0, resolution=(1080, 1920),
+                   segments=[Segment(src="a.mp4", in_=0.0, out=2.0)])
+
+    def render(edl, out, preview):
+        Path(out).write_bytes(b"video")
+        return out
+
+    return Deps(
+        resolve_reference=lambda ref, od: ref,
+        analyze_style=lambda files: STYLE,
+        probe=lambda f: {"format": {"duration": "5.0"}},
+        transcribe=lambda f: SimpleNamespace(text="words"),
+        reason_edl=reason,
+        render_edl=render,
+        edl_to_fcpxml=lambda e, n, d: "<fcpxml/>",
+        evaluate=scorer,
+    )
+
+
+def test_run_edit_stops_when_score_passes(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    deps = _deps(counter, scorer=lambda *a: EvalResult(0.9, []))
+    res = run_edit(str(foot), "make it punchy", [], str(out), deps)
+    assert res.passes == 1 and counter["n"] == 1
+    assert res.score == 0.9
+    assert (out / "final.mp4").exists()
+    assert (out / "timeline.fcpxml").exists()
+
+
+def test_run_edit_loops_until_threshold(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    scores = iter([0.4, 0.6, 0.95])
+    deps = _deps(counter, scorer=lambda *a: EvalResult(next(scores), ["fix it"]))
+    res = run_edit(str(foot), "p", [], str(out), deps, max_eval=3, threshold=0.8)
+    assert res.passes == 3 and counter["n"] == 3
+    assert res.score == 0.95
+
+
+def test_run_edit_caps_at_max_eval(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    deps = _deps(counter, scorer=lambda *a: EvalResult(0.3, ["still bad"]))
+    res = run_edit(str(foot), "p", [], str(out), deps, max_eval=2, threshold=0.8)
+    assert res.passes == 2 and counter["n"] == 2
+    assert res.score == 0.3
+
+
+def test_no_fcpxml_when_disabled(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    deps = _deps(counter, scorer=lambda *a: EvalResult(0.9, []))
+    res = run_edit(str(foot), "p", [], str(out), deps, fcpxml=False)
+    assert res.fcpxml is None
+    assert not (out / "timeline.fcpxml").exists()

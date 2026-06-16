@@ -46,9 +46,11 @@ def load_config(
     dotenv_start: Optional[Path] = None,
 ) -> Config:
     if env is None:
+        # Merge .env then process env, but never let an empty value clobber a
+        # good one (a shell that exports KEY="" must not mask the .env value).
         src: dict[str, str] = {}
-        src.update(_parse_dotenv(dotenv_start))
-        src.update(os.environ)
+        src.update({k: v for k, v in _parse_dotenv(dotenv_start).items() if v})
+        src.update({k: v for k, v in os.environ.items() if v})
     else:
         src = dict(env)
 
