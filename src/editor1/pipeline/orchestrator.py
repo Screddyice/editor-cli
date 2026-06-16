@@ -110,7 +110,7 @@ def run_edit(
     return EditResult(final_mp4=final_mp4, fcpxml=fcpxml_path, passes=passes, score=score)
 
 
-def build_deps(cfg: Any, out_dir: str) -> Deps:
+def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
     """Construct real bindings from a Config."""
     from editor1.acquire import resolve_reference
     from editor1.acquire.discover import discover_genre, fetch_sound_meta
@@ -121,7 +121,7 @@ def build_deps(cfg: Any, out_dir: str) -> Deps:
 
     gemini = GeminiClient(make_gemini_generate(cfg.gemini_api_key, cfg.gemini_model))
     return Deps(
-        resolve_reference=lambda ref, od: resolve_reference(ref, od),
+        resolve_reference=lambda ref, od: resolve_reference(ref, od, opts=fetch_opts),
         analyze_style=gemini.analyze_style,
         probe=ffmpeg.probe,
         transcribe=lambda f: transcribe(f, cfg.elevenlabs_api_key, out_dir),
