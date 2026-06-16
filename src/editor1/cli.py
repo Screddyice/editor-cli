@@ -64,5 +64,34 @@ def edit(
         typer.echo(f"  FCP timeline: {result.fcpxml}")
 
 
+@app.command()
+def style(
+    refs: list[str] = typer.Argument(..., help="Reference video(s): local path or URL."),
+    out: str = typer.Option("style_refs", "--out", help="Download dir for URL refs."),
+    cookies_from_browser: str = typer.Option(
+        None, "--cookies-from-browser", help="Browser cookies for IG/TikTok refs."
+    ),
+) -> None:
+    """Analyze the editing style of reference video(s) → StyleProfile JSON."""
+    from editor1.acquire import FetchOptions, resolve_reference
+    from editor1.analysis.gemini import GeminiClient, make_gemini_generate
+    from editor1.config import ConfigError, load_config
+
+    try:
+        cfg = load_config(require_elevenlabs=False)
+    except ConfigError as exc:
+        typer.secho(f"Config error: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    opts = FetchOptions(cookies_from_browser=cookies_from_browser)
+    files = [resolve_reference(r, out, opts=opts) for r in refs]
+    typer.secho(
+        f"Analyzing style of {len(files)} reference(s) with {cfg.gemini_model} …",
+        fg=typer.colors.CYAN, err=True,
+    )
+    gemini = GeminiClient(make_gemini_generate(cfg.gemini_api_key, cfg.gemini_model))
+    typer.echo(gemini.analyze_style(files).to_json())
+
+
 if __name__ == "__main__":
     app()
