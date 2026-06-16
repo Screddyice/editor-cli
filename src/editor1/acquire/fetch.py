@@ -27,6 +27,8 @@ class FetchOptions:
     cookies_from_browser: Optional[str] = None  # e.g. "chrome", "safari", "firefox"
     cookies_file: Optional[str] = None
     retries: int = 2
+    max_height: Optional[int] = None  # cap download resolution (e.g. 720)
+    section: Optional[str] = None  # yt-dlp download-sections spec, e.g. "*0:00-4:00"
 
 
 def _is_url(ref: str) -> bool:
@@ -52,6 +54,15 @@ def _cookie_args(opts: FetchOptions) -> list[str]:
     return []
 
 
+def _quality_args(opts: FetchOptions) -> list[str]:
+    args: list[str] = []
+    if opts.max_height:
+        args += ["-S", f"res:{opts.max_height}"]
+    if opts.section:
+        args += ["--download-sections", opts.section, "--force-keyframes-at-cuts"]
+    return args
+
+
 def download(
     url: str,
     out_dir: str,
@@ -64,7 +75,7 @@ def download(
     template = os.path.join(out_dir, "%(id)s.%(ext)s")
     cmd = [
         "yt-dlp", "--no-progress", "--print", "after_move:filepath",
-        *_cookie_args(opts), "-o", template, url,
+        *_cookie_args(opts), *_quality_args(opts), "-o", template, url,
     ]
     last_err: Any = None
     for _ in range(opts.retries + 1):

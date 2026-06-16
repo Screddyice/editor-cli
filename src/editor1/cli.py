@@ -49,7 +49,12 @@ def edit(
         raise typer.Exit(1)
 
     typer.echo(f"Editing {footage_dir} → {out} …")
-    fetch_opts = FetchOptions(cookies_from_browser=cookies_from_browser, cookies_file=cookies)
+    # References are fetched only to learn style → cap resolution and sample so
+    # a long/4K reference URL doesn't break the Gemini upload. Footage is local.
+    fetch_opts = FetchOptions(
+        cookies_from_browser=cookies_from_browser, cookies_file=cookies,
+        max_height=720, section="*0:00-240",
+    )
     deps = build_deps(cfg, out, fetch_opts=fetch_opts)
     result = run_edit(
         footage_dir, prompt, ref or [], out, deps,
@@ -71,6 +76,11 @@ def style(
     cookies_from_browser: str = typer.Option(
         None, "--cookies-from-browser", help="Browser cookies for IG/TikTok refs."
     ),
+    max_height: int = typer.Option(720, "--max-height", help="Cap reference download resolution."),
+    sample_seconds: int = typer.Option(
+        240, "--sample-seconds",
+        help="Analyze only the first N seconds (0 = full video). Long videos break the upload.",
+    ),
 ) -> None:
     """Analyze the editing style of reference video(s) → StyleProfile JSON."""
     from editor1.acquire import FetchOptions, resolve_reference
@@ -83,7 +93,10 @@ def style(
         typer.secho(f"Config error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    opts = FetchOptions(cookies_from_browser=cookies_from_browser)
+    section = f"*0:00-{sample_seconds}" if sample_seconds and sample_seconds > 0 else None
+    opts = FetchOptions(
+        cookies_from_browser=cookies_from_browser, max_height=max_height, section=section
+    )
     files = [resolve_reference(r, out, opts=opts) for r in refs]
     typer.secho(
         f"Analyzing style of {len(files)} reference(s) with {cfg.gemini_model} …",
