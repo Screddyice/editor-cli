@@ -13,8 +13,10 @@ One corrective retry is attempted on malformed JSON before raising.
 from __future__ import annotations
 
 import json
+import os
 import re
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -137,20 +139,111 @@ class GeminiClient:
         )
 
 
-def make_gemini_generate(api_key: str, model: str = "gemini-2.5-pro") -> GenerateFn:
+@dataclass
+class _Cached:
+    handle: Any
+    sig: tuple[int, int]  # (size, mtime_ns) — re-render of an output path invalidates
+
+
+class FileUploader:
+    """Upload media to the Gemini File API once, concurrently, with a hard cap.
+
+    The Gemini files endpoint has a large fixed per-upload latency on this key
+    (~50-70s regardless of size), and the orchestrator re-asks the model about
+    the same footage on every eval pass. So we:
+
+    - **cache** by ``(abspath, size, mtime_ns)`` — footage uploads once across
+      the whole run; a re-rendered ``final.mp4`` (new mtime) correctly re-uploads;
+    - upload distinct files **concurrently** to hide the fixed latency;
+    - poll for ACTIVE with a **wall-clock timeout** and raise on **FAILED** so a
+      stuck file can never hang the pipeline forever.
+
+    All I/O is injected so the logic is unit-testable without the network.
+    """
+
+    def __init__(
+        self,
+        upload: Callable[[str], Any],
+        get: Callable[[str], Any],
+        *,
+        poll_timeout: float = 180.0,
+        poll_interval: float = 2.0,
+        max_workers: int = 4,
+        sleep: Callable[[float], None] = time.sleep,
+        now: Callable[[], float] = time.monotonic,
+        stat: Callable[[str], os.stat_result] = os.stat,
+    ) -> None:
+        self._upload = upload
+        self._get = get
+        self._poll_timeout = poll_timeout
+        self._poll_interval = poll_interval
+        self._max_workers = max_workers
+        self._sleep = sleep
+        self._now = now
+        self._stat = stat
+        self._cache: dict[str, _Cached] = {}
+
+    def _signature(self, path: str) -> tuple[int, int]:
+        st = self._stat(path)
+        return (st.st_size, st.st_mtime_ns)
+
+    def _await_active(self, handle: Any, path: str) -> Any:
+        start = self._now()
+        while handle.state and "PROCESSING" in str(handle.state):
+            if self._now() - start > self._poll_timeout:
+                raise TimeoutError(
+                    f"Gemini file processing exceeded {self._poll_timeout:.0f}s for {path}"
+                )
+            self._sleep(self._poll_interval)
+            handle = self._get(handle.name)
+        if handle.state and "FAILED" in str(handle.state):
+            raise RuntimeError(f"Gemini could not process {path} (state={handle.state})")
+        return handle
+
+    def _upload_one(self, path: str) -> Any:
+        key = os.path.abspath(path)
+        sig = self._signature(path)
+        cached = self._cache.get(key)
+        if cached is not None and cached.sig == sig:
+            return cached.handle
+        handle = self._await_active(self._upload(path), path)
+        self._cache[key] = _Cached(handle, sig)
+        return handle
+
+    def upload_all(self, paths: list[str]) -> list[Any]:
+        """Return file handles for ``paths`` (order preserved), uploading the
+        distinct uncached ones concurrently."""
+        pending = [p for p in dict.fromkeys(os.path.abspath(p) for p in paths)
+                   if self._cache.get(p) is None
+                   or self._cache[p].sig != self._signature(p)]
+        if pending:
+            workers = min(self._max_workers, len(pending))
+            with ThreadPoolExecutor(max_workers=workers) as pool:
+                # _upload_one writes the cache; collecting forces completion.
+                list(pool.map(self._upload_one, pending))
+        return [self._upload_one(p) for p in paths]
+
+
+def make_gemini_generate(
+    api_key: str,
+    model: str = "gemini-2.5-pro",
+    *,
+    poll_timeout: float = 180.0,
+    max_workers: int = 4,
+) -> GenerateFn:
     """Build the real google-genai generate fn (uploads videos, waits for ACTIVE)."""
     from google import genai
 
     client = genai.Client(api_key=api_key)
+    uploader = FileUploader(
+        upload=lambda p: _retry(lambda: client.files.upload(file=p)),
+        get=lambda name: client.files.get(name=name),
+        poll_timeout=poll_timeout,
+        max_workers=max_workers,
+    )
 
     def generate(prompt: str, files: list[str]) -> str:
-        contents: list[Any] = []
-        for path in files:
-            uploaded = _retry(lambda p=path: client.files.upload(file=p))
-            while uploaded.state and "PROCESSING" in str(uploaded.state):
-                time.sleep(2)
-                uploaded = client.files.get(name=uploaded.name)
-            contents.append(uploaded)
+        contents: list[Any] = list(uploader.upload_all(files))
         contents.append(prompt)
         resp = _retry(lambda: client.models.generate_content(model=model, contents=contents))
         return resp.text or ""
