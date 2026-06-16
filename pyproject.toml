@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "AI video editor CLI — Final Cut Pro + Gemini"
 requires-python = ">=3.10"
 dependencies = [
+    "google-genai>=2.8.0",
     "typer>=0.12",
 ]
 
