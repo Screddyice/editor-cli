@@ -31,8 +31,14 @@ def edit(
         None, "--genre", "-g", help="Discover trending reference videos for this genre/query."
     ),
     trend_count: int = typer.Option(5, "--trend-count", help="How many trend refs to discover."),
+    cookies_from_browser: str = typer.Option(
+        None, "--cookies-from-browser",
+        help="Read cookies from this browser for IG/TikTok refs (chrome, safari, firefox).",
+    ),
+    cookies: str = typer.Option(None, "--cookies", help="Path to a cookies.txt file."),
 ) -> None:
     """Edit footage into final.mp4 + timeline.fcpxml."""
+    from editor1.acquire import FetchOptions
     from editor1.config import ConfigError, load_config
     from editor1.pipeline.orchestrator import build_deps, run_edit
 
@@ -43,7 +49,8 @@ def edit(
         raise typer.Exit(1)
 
     typer.echo(f"Editing {footage_dir} → {out} …")
-    deps = build_deps(cfg, out)
+    fetch_opts = FetchOptions(cookies_from_browser=cookies_from_browser, cookies_file=cookies)
+    deps = build_deps(cfg, out, fetch_opts=fetch_opts)
     result = run_edit(
         footage_dir, prompt, ref or [], out, deps,
         max_eval=max_eval, fcpxml=not no_fcpxml, preview=preview,

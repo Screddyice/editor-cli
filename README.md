@@ -24,11 +24,15 @@ decision remains hand-tweakable — not locked inside a flattened render.
 
 ## Status
 
-**Phase 1 spine: built + unit-tested (28 tests).** The full pipeline is wired —
-acquire → Gemini style → transcribe/probe → reason EDL → ffmpeg mp4 + FCPXML →
-Gemini eval loop. The EDL→FCPXML output is validated against FCP 12.2's own
-**v1.14 DTD**. Phases 2 (HyperCrawl genre/trend) and 3 (Instagram/TikTok) are
-next.
+**Phases 1–3 built + unit-tested (40 tests).**
+- **Phase 1 — spine:** acquire → Gemini style → transcribe/probe → reason EDL →
+  ffmpeg mp4 + FCPXML → Gemini eval loop. EDL→FCPXML validated against FCP 12.2's
+  own **v1.14 DTD**.
+- **Phase 2 — discovery:** `--genre "<query>"` finds trending comparable videos
+  (yt-dlp search), extracts sound/title metadata, feeds them as extra Gemini
+  references + trend context.
+- **Phase 3 — social:** Instagram/TikTok reference URLs via yt-dlp cookie auth
+  (`--cookies-from-browser` / `--cookies`), retry hardening, actionable errors.
 
 Two gates remain before a live run:
 1. **API keys required** — set `GEMINI_API_KEY` (or `CLIQK_GEMINI_API_KEY`) and
@@ -54,6 +58,13 @@ uv run editor1 edit ./footage \
     --ref https://youtu.be/SOME_ID \
     --ref ./refs/style.mp4 \
     --out edit/
+
+# Learn the style from trending videos in a genre (auto-discovered):
+uv run editor1 edit ./footage --prompt "..." --genre "tech product launch reel" --trend-count 5
+
+# Instagram/TikTok reference (reads your browser login cookies):
+uv run editor1 edit ./footage --prompt "..." \
+    --ref "https://www.instagram.com/reel/SOME_ID/" --cookies-from-browser chrome
 
 # Outputs: edit/final.mp4 (ffmpeg) and edit/timeline.fcpxml (import into FCP).
 ```
