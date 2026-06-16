@@ -18,6 +18,8 @@ src/editor1/analysis/transcribe.py
 src/editor1/domain/__init__.py
 src/editor1/domain/edl.py
 src/editor1/domain/style_profile.py
+src/editor1/pipeline/__init__.py
+src/editor1/pipeline/orchestrator.py
 src/editor1/render/__init__.py
 src/editor1/render/fcpxml.py
 src/editor1/render/ffmpeg.py

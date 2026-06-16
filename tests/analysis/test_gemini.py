@@ -33,6 +33,18 @@ def test_analyze_style_parses_into_domain():
     assert sp.vibe == "punchy"
 
 
+def test_analyze_style_injects_context_into_prompt():
+    seen = {}
+
+    def gen(p, f):
+        seen["prompt"] = p
+        return json.dumps(STYLE_JSON)
+
+    gc = GeminiClient(generate=gen)
+    gc.analyze_style(["r.mp4"], context="TREND: fast cuts, EDM drop")
+    assert "TREND: fast cuts, EDM drop" in seen["prompt"]
+
+
 def test_reason_edl_parses_into_domain():
     gc = GeminiClient(generate=lambda p, f: json.dumps(EDL_JSON))
     edl = gc.reason_edl("manifest", "transcript", _style(), "make it punchy")

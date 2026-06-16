@@ -27,6 +27,10 @@ def edit(
     max_eval: int = typer.Option(3, "--max-eval", help="Max eval/iteration passes."),
     preview: bool = typer.Option(False, "--preview", help="Fast 720p render."),
     no_fcpxml: bool = typer.Option(False, "--no-fcpxml", help="Skip FCPXML output."),
+    genre: str = typer.Option(
+        None, "--genre", "-g", help="Discover trending reference videos for this genre/query."
+    ),
+    trend_count: int = typer.Option(5, "--trend-count", help="How many trend refs to discover."),
 ) -> None:
     """Edit footage into final.mp4 + timeline.fcpxml."""
     from editor1.config import ConfigError, load_config
@@ -43,6 +47,7 @@ def edit(
     result = run_edit(
         footage_dir, prompt, ref or [], out, deps,
         max_eval=max_eval, fcpxml=not no_fcpxml, preview=preview,
+        genre=genre, trend_count=trend_count,
     )
     typer.secho(
         f"✓ {result.final_mp4}  (score {result.score:.2f}, {result.passes} pass(es))",
