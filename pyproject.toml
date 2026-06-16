@@ -1,0 +1,24 @@
+[project]
+name = "editor1"
+version = "0.1.0"
+description = "AI video editor CLI — Final Cut Pro + Gemini"
+requires-python = ">=3.10"
+dependencies = [
+    "typer>=0.12",
+]
+
+[project.optional-dependencies]
+dev = ["pytest>=8"]
+
+[project.scripts]
+editor1 = "editor1.cli:app"
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+package-dir = { "" = "src" }
+
+[tool.setuptools.packages.find]
+where = ["src"]
