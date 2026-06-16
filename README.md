@@ -24,7 +24,39 @@ decision remains hand-tweakable — not locked inside a flattened render.
 
 ## Status
 
-🚧 Early scaffold. Architecture under design (`DESIGN.md` to follow).
+**Phase 1 spine: built + unit-tested (28 tests).** The full pipeline is wired —
+acquire → Gemini style → transcribe/probe → reason EDL → ffmpeg mp4 + FCPXML →
+Gemini eval loop. The EDL→FCPXML output is validated against FCP 12.2's own
+**v1.14 DTD**. Phases 2 (HyperCrawl genre/trend) and 3 (Instagram/TikTok) are
+next.
+
+Two gates remain before a live run:
+1. **API keys required** — set `GEMINI_API_KEY` (or `CLIQK_GEMINI_API_KEY`) and
+   `ELEVENLABS_API_KEY`. They are currently empty in `~/projects/.env`.
+2. **Manual FCP import** — import a generated `timeline.fcpxml` into FCP 12.2
+   once to confirm it opens with media linked (DTD-valid, GUI-import pending).
+
+## Setup
+
+```bash
+uv sync --extra dev            # install deps + dev tools
+export GEMINI_API_KEY=...      # or CLIQK_GEMINI_API_KEY
+export ELEVENLABS_API_KEY=...  # https://elevenlabs.io/app/settings/api-keys
+uv run pytest -q               # 28 passing
+```
+
+## Usage
+
+```bash
+# Edit a folder of footage in the style of a reference video (local or YouTube URL):
+uv run editor1 edit ./footage \
+    --prompt "punchy 30s launch teaser" \
+    --ref https://youtu.be/SOME_ID \
+    --ref ./refs/style.mp4 \
+    --out edit/
+
+# Outputs: edit/final.mp4 (ffmpeg) and edit/timeline.fcpxml (import into FCP).
+```
 
 ## Stack (proposed — not yet finalized)
 
