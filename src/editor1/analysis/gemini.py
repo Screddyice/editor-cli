@@ -64,6 +64,37 @@ def _extract_json(raw: str) -> dict[str, Any]:
     return json.loads(text)
 
 
+_RETRYABLE_CODES = {429, 500, 502, 503, 504}
+_RETRYABLE_NAMES = {"ServerError", "ResourceExhausted", "ServiceUnavailable"}
+
+
+def _is_retryable(exc: BaseException) -> bool:
+    code = getattr(exc, "code", None) or getattr(exc, "status_code", None)
+    if code in _RETRYABLE_CODES:
+        return True
+    return type(exc).__name__ in _RETRYABLE_NAMES
+
+
+def _retry(
+    call: Callable[[], Any],
+    attempts: int = 4,
+    base_delay: float = 1.0,
+    sleep: Callable[[float], None] = time.sleep,
+) -> Any:
+    """Retry a call on transient (5xx / 429) errors with exponential backoff."""
+    last: BaseException | None = None
+    for i in range(attempts):
+        try:
+            return call()
+        except Exception as exc:  # noqa: BLE001
+            if not _is_retryable(exc) or i == attempts - 1:
+                raise
+            last = exc
+            sleep(base_delay * (2 ** i))
+    assert last is not None
+    raise last
+
+
 class GeminiClient:
     def __init__(self, generate: GenerateFn):
         self._generate = generate
@@ -115,13 +146,13 @@ def make_gemini_generate(api_key: str, model: str = "gemini-2.5-pro") -> Generat
     def generate(prompt: str, files: list[str]) -> str:
         contents: list[Any] = []
         for path in files:
-            uploaded = client.files.upload(file=path)
+            uploaded = _retry(lambda p=path: client.files.upload(file=p))
             while uploaded.state and "PROCESSING" in str(uploaded.state):
                 time.sleep(2)
                 uploaded = client.files.get(name=uploaded.name)
             contents.append(uploaded)
         contents.append(prompt)
-        resp = client.models.generate_content(model=model, contents=contents)
+        resp = _retry(lambda: client.models.generate_content(model=model, contents=contents))
         return resp.text or ""
 
     return generate
