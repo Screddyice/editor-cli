@@ -76,8 +76,11 @@ class GeminiClient:
             raw = self._generate(prompt + _RETRY_SUFFIX, files)
             return parse(_extract_json(raw))
 
-    def analyze_style(self, refs: list[str]) -> StyleProfile:
-        return self._json(_STYLE_PROMPT, refs, StyleProfile.from_dict)
+    def analyze_style(self, refs: list[str], context: str = "") -> StyleProfile:
+        prompt = _STYLE_PROMPT
+        if context:
+            prompt = f"{_STYLE_PROMPT}\n\nADDITIONAL CONTEXT:\n{context}"
+        return self._json(prompt, refs, StyleProfile.from_dict)
 
     def reason_edl(
         self,

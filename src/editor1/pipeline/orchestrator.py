@@ -10,6 +10,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
+from editor1.acquire.discover import trend_summary
 from editor1.domain.edl import EDL
 from editor1.domain.style_profile import StyleProfile
 
@@ -19,13 +20,15 @@ VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm"}
 @dataclass
 class Deps:
     resolve_reference: Callable[[str, str], str]
-    analyze_style: Callable[[list[str]], StyleProfile]
+    analyze_style: Callable[..., StyleProfile]  # (refs, context="") -> StyleProfile
     probe: Callable[[str], dict]
     transcribe: Callable[[str], Any]  # -> object with .text
     reason_edl: Callable[..., EDL]
     render_edl: Callable[[EDL, str, bool], str]
     edl_to_fcpxml: Callable[[EDL, str, dict], str]
     evaluate: Callable[[str, StyleProfile, str], Any]  # -> object with .score, .issues
+    discover: Optional[Callable[[str, int], list[str]]] = None
+    sound_meta: Optional[Callable[[str], Any]] = None
 
 
 @dataclass
@@ -62,12 +65,21 @@ def run_edit(
     threshold: float = 0.8,
     fcpxml: bool = True,
     preview: bool = False,
+    genre: Optional[str] = None,
+    trend_count: int = 5,
 ) -> EditResult:
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
 
+    trend_context = ""
+    if genre and deps.discover is not None:
+        discovered = deps.discover(genre, trend_count)
+        refs = list(refs) + discovered
+        if deps.sound_meta is not None:
+            trend_context = trend_summary([deps.sound_meta(u) for u in discovered])
+
     ref_files = [deps.resolve_reference(r, str(out_dir / "refs")) for r in refs]
-    style = deps.analyze_style(ref_files)
+    style = deps.analyze_style(ref_files, trend_context)
 
     footage = _footage_files(footage_dir)
     if not footage:
@@ -101,6 +113,7 @@ def run_edit(
 def build_deps(cfg: Any, out_dir: str) -> Deps:
     """Construct real bindings from a Config."""
     from editor1.acquire import resolve_reference
+    from editor1.acquire.discover import discover_genre, fetch_sound_meta
     from editor1.analysis.gemini import GeminiClient, make_gemini_generate
     from editor1.analysis.transcribe import transcribe
     from editor1.render import ffmpeg
@@ -116,4 +129,6 @@ def build_deps(cfg: Any, out_dir: str) -> Deps:
         render_edl=ffmpeg.render_edl,
         edl_to_fcpxml=edl_to_fcpxml,
         evaluate=gemini.evaluate,
+        discover=discover_genre,
+        sound_meta=fetch_sound_meta,
     )

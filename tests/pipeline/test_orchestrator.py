@@ -36,7 +36,7 @@ def _deps(counter, scorer):
 
     return Deps(
         resolve_reference=lambda ref, od: ref,
-        analyze_style=lambda files: STYLE,
+        analyze_style=lambda files, context="": STYLE,
         probe=lambda f: {"format": {"duration": "5.0"}},
         transcribe=lambda f: SimpleNamespace(text="words"),
         reason_edl=reason,
@@ -77,6 +77,30 @@ def test_run_edit_caps_at_max_eval(tmp_path):
     res = run_edit(str(foot), "p", [], str(out), deps, max_eval=2, threshold=0.8)
     assert res.passes == 2 and counter["n"] == 2
     assert res.score == 0.3
+
+
+def test_genre_discovery_adds_refs_and_trend_context(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    seen = {}
+
+    def analyze(files, context=""):
+        seen["files"] = list(files)
+        seen["context"] = context
+        return STYLE
+
+    deps = _deps(counter, scorer=lambda *a: EvalResult(0.9, []))
+    deps.analyze_style = analyze
+    deps.discover = lambda q, n: ["https://youtu.be/x", "https://youtu.be/y"]
+    deps.sound_meta = lambda u: SimpleNamespace(title="T", track="S", artist="A", url=u)
+
+    run_edit(str(foot), "p", ["local.mp4"], str(out), deps,
+             genre="edm reels", trend_count=2)
+
+    assert "https://youtu.be/x" in seen["files"]
+    assert "local.mp4" in seen["files"]
+    assert "GENRE TREND REFERENCES" in seen["context"]
 
 
 def test_no_fcpxml_when_disabled(tmp_path):
