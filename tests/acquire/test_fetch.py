@@ -53,6 +53,20 @@ def test_cookies_file_added_to_command(tmp_path):
     assert "/tmp/c.txt" in captured["cmd"]
 
 
+def test_quality_and_section_args(tmp_path):
+    captured = {}
+
+    def runner(cmd, **kwargs):
+        captured["cmd"] = cmd
+        return _Res(str(tmp_path / "ID.mp4"))
+
+    download("https://youtu.be/ID", str(tmp_path), runner=runner,
+             opts=FetchOptions(max_height=720, section="*0:00-180"))
+    assert "-S" in captured["cmd"] and "res:720" in captured["cmd"]
+    assert "--download-sections" in captured["cmd"]
+    assert "*0:00-180" in captured["cmd"]
+
+
 def test_retries_then_succeeds(tmp_path):
     calls = {"n": 0}
 

@@ -44,6 +44,7 @@ def _parse_dotenv(start: Optional[Path] = None) -> dict[str, str]:
 def load_config(
     env: Optional[dict[str, str]] = None,
     dotenv_start: Optional[Path] = None,
+    require_elevenlabs: bool = True,
 ) -> Config:
     if env is None:
         # Merge .env then process env, but never let an empty value clobber a
@@ -59,8 +60,10 @@ def load_config(
         raise ConfigError("Missing GEMINI_API_KEY (or CLIQK_GEMINI_API_KEY)")
 
     elevenlabs = src.get("ELEVENLABS_API_KEY")
-    if not elevenlabs:
+    if not elevenlabs and require_elevenlabs:
         raise ConfigError("Missing ELEVENLABS_API_KEY")
 
     model = src.get("EDITOR1_GEMINI_MODEL", "gemini-2.5-pro")
-    return Config(gemini_api_key=gemini, elevenlabs_api_key=elevenlabs, gemini_model=model)
+    return Config(
+        gemini_api_key=gemini, elevenlabs_api_key=elevenlabs or "", gemini_model=model
+    )
