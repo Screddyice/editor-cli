@@ -1,8 +1,15 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
-from editor1.analysis.gemini import EvalResult, GeminiClient, _is_retryable, _retry
+from editor1.analysis.gemini import (
+    EvalResult,
+    FileUploader,
+    GeminiClient,
+    _is_retryable,
+    _retry,
+)
 from editor1.domain.edl import EDL
 from editor1.domain.style_profile import StyleProfile
 
@@ -119,3 +126,93 @@ def test_retry_non_retryable_raises_immediately():
     with pytest.raises(_Permanent):
         _retry(call, attempts=4, sleep=lambda s: None)
     assert calls["n"] == 1
+
+
+# --- FileUploader -----------------------------------------------------------
+
+def _fake_files(seqs, uploaded):
+    """Fake Gemini files API. ``seqs`` maps a path/name to a list of states the
+    handle reports across upload() then successive get() calls."""
+    pos: dict[str, int] = {}
+
+    def upload(path):
+        uploaded.append(path)
+        seq = seqs.get(path, ["ACTIVE"])
+        pos[path] = 0
+        return SimpleNamespace(state=seq[0], name=path)
+
+    def get(name):
+        seq = seqs.get(name, ["ACTIVE"])
+        pos[name] = min(pos.get(name, 0) + 1, len(seq) - 1)
+        return SimpleNamespace(state=seq[pos[name]], name=name)
+
+    return upload, get
+
+
+def _stat_from(table):
+    def stat(path):
+        size, mtime = table[path]
+        return SimpleNamespace(st_size=size, st_mtime_ns=mtime)
+    return stat
+
+
+def _uploader(seqs, uploaded, table, **kw):
+    upload, get = _fake_files(seqs, uploaded)
+    kw.setdefault("sleep", lambda _s: None)
+    return FileUploader(upload, get, stat=_stat_from(table), **kw)
+
+
+def test_uploader_caches_repeated_paths_within_and_across_calls():
+    uploaded: list[str] = []
+    up = _uploader({}, uploaded, {"/x/a.mp4": (10, 1)})
+    up.upload_all(["/x/a.mp4", "/x/a.mp4"])
+    up.upload_all(["/x/a.mp4"])
+    assert uploaded == ["/x/a.mp4"]  # uploaded exactly once
+
+
+def test_uploader_reuploads_when_file_changes():
+    uploaded: list[str] = []
+    table = {"/x/out.mp4": (10, 1)}
+    up = _uploader({}, uploaded, table)
+    up.upload_all(["/x/out.mp4"])
+    table["/x/out.mp4"] = (20, 2)  # re-rendered → new size/mtime
+    up.upload_all(["/x/out.mp4"])
+    assert uploaded == ["/x/out.mp4", "/x/out.mp4"]
+
+
+def test_uploader_distinct_paths_each_uploaded_in_order():
+    uploaded: list[str] = []
+    up = _uploader({}, uploaded, {"/x/a.mp4": (1, 1), "/x/b.mp4": (2, 2)})
+    handles = up.upload_all(["/x/a.mp4", "/x/b.mp4"])
+    assert sorted(uploaded) == ["/x/a.mp4", "/x/b.mp4"]
+    assert [h.name for h in handles] == ["/x/a.mp4", "/x/b.mp4"]
+
+
+def test_uploader_waits_for_active():
+    uploaded: list[str] = []
+    up = _uploader({"/x/a.mp4": ["PROCESSING", "PROCESSING", "ACTIVE"]},
+                   uploaded, {"/x/a.mp4": (1, 1)})
+    handles = up.upload_all(["/x/a.mp4"])
+    assert handles[0].state == "ACTIVE"
+
+
+def test_uploader_poll_timeout_raises():
+    uploaded: list[str] = []
+    clock = {"v": 0.0}
+
+    def now():
+        v = clock["v"]
+        clock["v"] += 100.0
+        return v
+
+    up = _uploader({"/x/a.mp4": ["PROCESSING"]}, uploaded, {"/x/a.mp4": (1, 1)},
+                   poll_timeout=180.0, now=now)
+    with pytest.raises(TimeoutError):
+        up.upload_all(["/x/a.mp4"])
+
+
+def test_uploader_failed_state_raises():
+    uploaded: list[str] = []
+    up = _uploader({"/x/a.mp4": ["FAILED"]}, uploaded, {"/x/a.mp4": (1, 1)})
+    with pytest.raises(RuntimeError):
+        up.upload_all(["/x/a.mp4"])
