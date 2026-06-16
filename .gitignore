@@ -1,0 +1,31 @@
+# envs / deps
+.venv/
+venv/
+__pycache__/
+*.pyc
+.env
+node_modules/
+
+# vendored reference repos (track their own upstreams, not here)
+references/
+
+# media & renders
+*.mp4
+*.mov
+*.m4v
+*.wav
+*.aac
+*.mp3
+/media/
+/edit/
+/out/
+/renders/
+
+# fcp interchange artifacts (generated)
+*.fcpxmld/
+/timelines/
+
+# os / tooling
+.DS_Store
+.legion/
+legion.toml
