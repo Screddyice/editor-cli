@@ -1,6 +1,6 @@
 import pytest
 
-from editor1.domain.edl import EDL, Segment
+from editor_cli.domain.edl import EDL, Segment
 
 
 def test_edl_roundtrip():

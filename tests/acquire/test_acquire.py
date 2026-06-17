@@ -1,6 +1,6 @@
 import pytest
 
-from editor1.acquire import resolve_reference
+from editor_cli.acquire import resolve_reference
 
 
 def test_local_passthrough(tmp_path):

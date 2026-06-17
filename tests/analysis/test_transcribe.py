@@ -1,6 +1,6 @@
 import json
 
-from editor1.analysis.transcribe import Transcript, transcribe
+from editor_cli.analysis.transcribe import Transcript, transcribe
 
 
 class _FakeResp:

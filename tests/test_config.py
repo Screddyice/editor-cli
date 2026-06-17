@@ -1,6 +1,6 @@
 import pytest
 
-from editor1.config import Config, ConfigError, load_config
+from editor_cli.config import Config, ConfigError, load_config
 
 
 def test_load_config_reads_keys():

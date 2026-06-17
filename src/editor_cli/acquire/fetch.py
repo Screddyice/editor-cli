@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from editor1.acquire import local
+from editor_cli.acquire import local
 
 RunnerFn = Callable[..., Any]
 

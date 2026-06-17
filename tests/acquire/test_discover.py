@@ -1,6 +1,6 @@
 import json
 
-from editor1.acquire.discover import (
+from editor_cli.acquire.discover import (
     SoundMeta,
     discover_genre,
     fetch_sound_meta,

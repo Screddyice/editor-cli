@@ -38,9 +38,9 @@ def edit(
     cookies: str = typer.Option(None, "--cookies", help="Path to a cookies.txt file."),
 ) -> None:
     """Edit footage into final.mp4 + timeline.fcpxml."""
-    from editor1.acquire import FetchOptions
-    from editor1.config import ConfigError, load_config
-    from editor1.pipeline.orchestrator import build_deps, run_edit
+    from editor_cli.acquire import FetchOptions
+    from editor_cli.config import ConfigError, load_config
+    from editor_cli.pipeline.orchestrator import build_deps, run_edit
 
     try:
         cfg = load_config()
@@ -83,9 +83,9 @@ def style(
     ),
 ) -> None:
     """Analyze the editing style of reference video(s) → StyleProfile JSON."""
-    from editor1.acquire import FetchOptions, resolve_reference
-    from editor1.analysis.gemini import GeminiClient, make_gemini_generate
-    from editor1.config import ConfigError, load_config
+    from editor_cli.acquire import FetchOptions, resolve_reference
+    from editor_cli.analysis.gemini import GeminiClient, make_gemini_generate
+    from editor_cli.config import ConfigError, load_config
 
     try:
         cfg = load_config(require_elevenlabs=False)

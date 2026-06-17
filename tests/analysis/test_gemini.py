@@ -3,15 +3,15 @@ from types import SimpleNamespace
 
 import pytest
 
-from editor1.analysis.gemini import (
+from editor_cli.analysis.gemini import (
     EvalResult,
     FileUploader,
     GeminiClient,
     _is_retryable,
     _retry,
 )
-from editor1.domain.edl import EDL
-from editor1.domain.style_profile import StyleProfile
+from editor_cli.domain.edl import EDL
+from editor_cli.domain.style_profile import StyleProfile
 
 STYLE_JSON = {
     "pacing": {"cuts_per_min": 24.0, "avg_shot_len_s": 2.5},

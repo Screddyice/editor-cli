@@ -11,7 +11,7 @@ import os
 import subprocess
 import tempfile
 
-from editor1.domain.edl import EDL
+from editor_cli.domain.edl import EDL
 
 
 class RenderError(RuntimeError):
@@ -41,7 +41,7 @@ def duration_of(path: str) -> float:
 def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
     fps = edl.fps
     tw, th = (1280, 720) if preview else edl.resolution
-    tmp = tempfile.mkdtemp(prefix="editor1_render_")
+    tmp = tempfile.mkdtemp(prefix="editor_cli_render_")
     parts: list[str] = []
     for i, seg in enumerate(edl.segments):
         part = os.path.join(tmp, f"part{i:04d}.mp4")

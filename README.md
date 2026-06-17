@@ -4,8 +4,6 @@ AI-assisted video editing where **Final Cut Pro is the editing engine** and the
 intelligence comes from an LLM orchestrator plus **Gemini's native video
 understanding**.
 
-> Run it as `editor-cli` (the legacy `editor1` command still works as an alias).
-
 ## Goal
 
 Given raw footage (imported into Final Cut Pro), an editing **prompt**, and

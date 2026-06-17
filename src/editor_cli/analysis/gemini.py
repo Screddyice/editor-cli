@@ -20,8 +20,8 @@ from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
 from typing import Any, Callable
 
-from editor1.domain.edl import EDL
-from editor1.domain.style_profile import StyleProfile
+from editor_cli.domain.edl import EDL
+from editor_cli.domain.style_profile import StyleProfile
 
 GenerateFn = Callable[[str, list[str]], str]
 

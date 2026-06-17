@@ -2,8 +2,8 @@ import subprocess
 
 import pytest
 
-from editor1.domain.edl import EDL, Segment
-from editor1.render.ffmpeg import duration_of, probe, render_edl
+from editor_cli.domain.edl import EDL, Segment
+from editor_cli.render.ffmpeg import duration_of, probe, render_edl
 
 
 def _make_clip(path, seconds=3):
