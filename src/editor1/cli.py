@@ -1,11 +1,11 @@
-"""Editor1 CLI — thin controllers that validate input and call the pipeline."""
+"""Editor CLI — thin controllers that validate input and call the pipeline."""
 
 from __future__ import annotations
 
 import typer
 
 app = typer.Typer(
-    help="Editor1 — AI video editor (Final Cut Pro + Gemini).",
+    help="Editor CLI — AI video editing (Final Cut Pro + Gemini).",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -13,7 +13,7 @@ app = typer.Typer(
 
 @app.callback()
 def _main() -> None:
-    """Editor1 — AI video editor (Final Cut Pro + Gemini)."""
+    """Editor CLI — AI video editing (Final Cut Pro + Gemini)."""
 
 
 @app.command()

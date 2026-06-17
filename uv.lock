@@ -306,7 +306,7 @@ wheels = [
 ]
 
 [[package]]
-name = "editor1"
+name = "editor-cli"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [

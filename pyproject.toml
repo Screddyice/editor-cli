@@ -1,19 +1,28 @@
 [project]
-name = "editor1"
+name = "editor-cli"
 version = "0.1.0"
-description = "AI video editor CLI — Final Cut Pro + Gemini"
+description = "Editor CLI — AI video editing where Final Cut Pro is the engine and Gemini is the visual brain"
+readme = "README.md"
+license = { file = "LICENSE" }
 requires-python = ">=3.10"
+authors = [{ name = "Screddyice" }]
+keywords = ["video-editing", "final-cut-pro", "fcpxml", "gemini", "cli"]
 dependencies = [
     "google-genai>=2.8.0",
     "typer>=0.12",
     "yt-dlp>=2026.6.9",
 ]
 
+[project.urls]
+Homepage = "https://github.com/Screddyice/editor-cli"
+Repository = "https://github.com/Screddyice/editor-cli"
+
 [project.optional-dependencies]
 dev = ["pytest>=8"]
 
 [project.scripts]
-editor1 = "editor1.cli:app"
+editor-cli = "editor1.cli:app"
+editor1 = "editor1.cli:app"  # backward-compatible alias
 
 [build-system]
 requires = ["setuptools>=61"]

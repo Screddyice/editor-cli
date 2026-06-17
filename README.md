@@ -1,8 +1,10 @@
-# Editor1
+# Editor CLI
 
 AI-assisted video editing where **Final Cut Pro is the editing engine** and the
 intelligence comes from an LLM orchestrator plus **Gemini's native video
 understanding**.
+
+> Run it as `editor-cli` (the legacy `editor1` command still works as an alias).
 
 ## Goal
 
@@ -24,7 +26,7 @@ decision remains hand-tweakable — not locked inside a flattened render.
 
 ## Status
 
-**Phases 1–3 built + unit-tested (40 tests).**
+**Phases 1–3 built + unit-tested (52 tests).**
 - **Phase 1 — spine:** acquire → Gemini style → transcribe/probe → reason EDL →
   ffmpeg mp4 + FCPXML → Gemini eval loop. EDL→FCPXML validated against FCP 12.2's
   own **v1.14 DTD**.
@@ -46,24 +48,24 @@ Two gates remain before a live run:
 uv sync --extra dev            # install deps + dev tools
 export GEMINI_API_KEY=...      # or CLIQK_GEMINI_API_KEY
 export ELEVENLABS_API_KEY=...  # https://elevenlabs.io/app/settings/api-keys
-uv run pytest -q               # 28 passing
+uv run pytest -q               # 52 passing
 ```
 
 ## Usage
 
 ```bash
 # Edit a folder of footage in the style of a reference video (local or YouTube URL):
-uv run editor1 edit ./footage \
+uv run editor-cli edit ./footage \
     --prompt "punchy 30s launch teaser" \
     --ref https://youtu.be/SOME_ID \
     --ref ./refs/style.mp4 \
     --out edit/
 
 # Learn the style from trending videos in a genre (auto-discovered):
-uv run editor1 edit ./footage --prompt "..." --genre "tech product launch reel" --trend-count 5
+uv run editor-cli edit ./footage --prompt "..." --genre "tech product launch reel" --trend-count 5
 
 # Instagram/TikTok reference (reads your browser login cookies):
-uv run editor1 edit ./footage --prompt "..." \
+uv run editor-cli edit ./footage --prompt "..." \
     --ref "https://www.instagram.com/reel/SOME_ID/" --cookies-from-browser chrome
 
 # Outputs: edit/final.mp4 (ffmpeg) and edit/timeline.fcpxml (import into FCP).
@@ -85,3 +87,7 @@ uv run editor1 edit ./footage --prompt "..." \
   bridge is new work here.
 - `references/hyperframes` — [heygen-com/hyperframes](https://github.com/heygen-com/hyperframes):
   HTML→video overlay engine for optional motion graphics.
+
+## License
+
+[MIT](LICENSE) © Screddyice
