@@ -29,3 +29,6 @@ references/
 .DS_Store
 .legion/
 legion.toml
+
+# build metadata
+*.egg-info/

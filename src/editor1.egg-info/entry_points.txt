@@ -1,2 +1,0 @@
-[console_scripts]
-editor1 = editor1.cli:app

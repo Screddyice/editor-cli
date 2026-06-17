@@ -100,7 +100,7 @@ def run_edit(
         edl = deps.reason_edl(manifest, transcript, style, prompt, footage, feedback)
         deps.render_edl(edl, final_mp4, preview)
         if fcpxml_path:
-            Path(fcpxml_path).write_text(deps.edl_to_fcpxml(edl, "Editor1", durations))
+            Path(fcpxml_path).write_text(deps.edl_to_fcpxml(edl, "Editor CLI", durations))
         result = deps.evaluate(final_mp4, style, prompt)
         score = result.score
         if score >= threshold or passes >= max_eval:

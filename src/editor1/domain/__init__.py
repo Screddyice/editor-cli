@@ -1,1 +1,1 @@
-"""Editor1 domain models — the contracts shared across pipeline stages."""
+"""Editor CLI domain models — the contracts shared across pipeline stages."""

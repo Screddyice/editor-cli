@@ -38,9 +38,9 @@ def _file_url(src: str) -> str:
 
 def edl_to_fcpxml(
     edl: EDL,
-    project_name: str = "Editor1",
+    project_name: str = "Editor CLI",
     asset_durations: dict[str, float] | None = None,
-    event_name: str = "Editor1",
+    event_name: str = "Editor CLI",
 ) -> str:
     fps = edl.fps
     width, height = edl.resolution
