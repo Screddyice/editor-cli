@@ -10,9 +10,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
 
-from editor1.acquire.discover import trend_summary
-from editor1.domain.edl import EDL
-from editor1.domain.style_profile import StyleProfile
+from editor_cli.acquire.discover import trend_summary
+from editor_cli.domain.edl import EDL
+from editor_cli.domain.style_profile import StyleProfile
 
 VIDEO_EXTS = {".mp4", ".mov", ".m4v", ".mkv", ".avi", ".webm"}
 
@@ -112,12 +112,12 @@ def run_edit(
 
 def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
     """Construct real bindings from a Config."""
-    from editor1.acquire import resolve_reference
-    from editor1.acquire.discover import discover_genre, fetch_sound_meta
-    from editor1.analysis.gemini import GeminiClient, make_gemini_generate
-    from editor1.analysis.transcribe import transcribe
-    from editor1.render import ffmpeg
-    from editor1.render.fcpxml import edl_to_fcpxml
+    from editor_cli.acquire import resolve_reference
+    from editor_cli.acquire.discover import discover_genre, fetch_sound_meta
+    from editor_cli.analysis.gemini import GeminiClient, make_gemini_generate
+    from editor_cli.analysis.transcribe import transcribe
+    from editor_cli.render import ffmpeg
+    from editor_cli.render.fcpxml import edl_to_fcpxml
 
     gemini = GeminiClient(make_gemini_generate(cfg.gemini_api_key, cfg.gemini_model))
     return Deps(

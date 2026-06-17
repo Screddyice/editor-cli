@@ -14,7 +14,7 @@ from __future__ import annotations
 from pathlib import Path
 from xml.sax.saxutils import quoteattr
 
-from editor1.domain.edl import EDL
+from editor_cli.domain.edl import EDL
 
 FCPXML_VERSION = "1.14"
 

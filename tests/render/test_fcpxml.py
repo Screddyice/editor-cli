@@ -4,8 +4,8 @@ from pathlib import Path
 
 import pytest
 
-from editor1.domain.edl import EDL, Segment
-from editor1.render.fcpxml import FCPXML_VERSION, edl_to_fcpxml
+from editor_cli.domain.edl import EDL, Segment
+from editor_cli.render.fcpxml import FCPXML_VERSION, edl_to_fcpxml
 
 DTD = (
     "/Applications/Final Cut Pro.app/Contents/Frameworks/Interchange.framework/"

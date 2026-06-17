@@ -2,7 +2,7 @@ import subprocess
 
 import pytest
 
-from editor1.acquire.fetch import (
+from editor_cli.acquire.fetch import (
     FetchError,
     FetchOptions,
     download,

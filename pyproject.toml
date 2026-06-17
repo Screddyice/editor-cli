@@ -21,8 +21,7 @@ Repository = "https://github.com/Screddyice/editor-cli"
 dev = ["pytest>=8"]
 
 [project.scripts]
-editor-cli = "editor1.cli:app"
-editor1 = "editor1.cli:app"  # backward-compatible alias
+editor-cli = "editor_cli.cli:app"
 
 [build-system]
 requires = ["setuptools>=61"]

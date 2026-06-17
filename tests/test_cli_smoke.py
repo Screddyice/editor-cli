@@ -1,6 +1,6 @@
 from typer.testing import CliRunner
 
-from editor1.cli import app
+from editor_cli.cli import app
 
 
 def test_help_lists_edit_command():

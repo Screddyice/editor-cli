@@ -1,10 +1,10 @@
 from pathlib import Path
 from types import SimpleNamespace
 
-from editor1.analysis.gemini import EvalResult
-from editor1.domain.edl import EDL, Segment
-from editor1.domain.style_profile import StyleProfile
-from editor1.pipeline.orchestrator import Deps, run_edit
+from editor_cli.analysis.gemini import EvalResult
+from editor_cli.domain.edl import EDL, Segment
+from editor_cli.domain.style_profile import StyleProfile
+from editor_cli.pipeline.orchestrator import Deps, run_edit
 
 STYLE = StyleProfile.from_dict({
     "pacing": {"cuts_per_min": 24.0, "avg_shot_len_s": 2.5},
