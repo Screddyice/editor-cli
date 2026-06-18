@@ -103,6 +103,46 @@ def test_genre_discovery_adds_refs_and_trend_context(tmp_path):
     assert "GENRE TREND REFERENCES" in seen["context"]
 
 
+def test_refine_shots_runs_between_reason_and_render(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    order = []
+
+    deps = _deps(counter, scorer=lambda *a: EvalResult(0.9, []))
+    reason, render = deps.reason_edl, deps.render_edl
+    deps.reason_edl = lambda *a: (order.append("reason"), reason(*a))[1]
+
+    def refine(edl, durations):
+        order.append("refine")
+        # durations come from the probe stub (5.0s) and reach the refiner
+        assert durations == {str(foot / "a.mp4"): 5.0}
+        return EDL(fps=edl.fps, resolution=edl.resolution,
+                   segments=[Segment("a.mp4", 1.0, 3.0)])
+
+    rendered = {}
+    def render_capture(edl, o, preview):
+        order.append("render")
+        rendered["seg"] = (edl.segments[0].in_, edl.segments[0].out)
+        return render(edl, o, preview)
+
+    deps.refine_shots = refine
+    deps.render_edl = render_capture
+
+    run_edit(str(foot), "p", [], str(out), deps)
+    assert order == ["reason", "refine", "render"]
+    assert rendered["seg"] == (1.0, 3.0)  # render saw the refined window
+
+
+def test_refine_shots_optional_when_unset(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    deps = _deps({"n": 0}, scorer=lambda *a: EvalResult(0.9, []))
+    assert deps.refine_shots is None  # default off — backward compatible
+    res = run_edit(str(foot), "p", [], str(out), deps)
+    assert res.passes == 1 and (out / "final.mp4").exists()
+
+
 def test_no_fcpxml_when_disabled(tmp_path):
     foot = _footage(tmp_path)
     out = tmp_path / "edit"

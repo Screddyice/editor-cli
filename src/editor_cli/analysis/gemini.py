@@ -249,3 +249,29 @@ def make_gemini_generate(
         return resp.text or ""
 
     return generate
+
+
+def make_vision_generate(api_key: str, model: str = "gemini-2.5-flash") -> GenerateFn:
+    """Build a vision generate fn that sends images **inline** (no Files API).
+
+    Frame selection asks about many small still images; the Files-API upload has
+    a large fixed per-file latency, so inlining the JPEG bytes (as the grading
+    pass does) is dramatically faster and avoids polling for ACTIVE. Returns the
+    same ``(prompt, image_paths) -> str`` contract the rest of the analysis layer
+    uses, so it drops straight into the shot-moment selector.
+    """
+    from google import genai
+    from google.genai import types
+
+    client = genai.Client(api_key=api_key)
+
+    def generate(prompt: str, files: list[str]) -> str:
+        contents: list[Any] = []
+        for path in files:
+            with open(path, "rb") as fh:
+                contents.append(types.Part.from_bytes(data=fh.read(), mime_type="image/jpeg"))
+        contents.append(prompt)
+        resp = _retry(lambda: client.models.generate_content(model=model, contents=contents))
+        return resp.text or ""
+
+    return generate

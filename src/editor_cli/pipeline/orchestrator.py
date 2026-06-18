@@ -29,6 +29,8 @@ class Deps:
     evaluate: Callable[[str, StyleProfile, str], Any]  # -> object with .score, .issues
     discover: Optional[Callable[[str, int], list[str]]] = None
     sound_meta: Optional[Callable[[str], Any]] = None
+    # (edl, durations) -> edl with each segment re-centered on its clip's best moment
+    refine_shots: Optional[Callable[[EDL, dict], EDL]] = None
 
 
 @dataclass
@@ -98,6 +100,8 @@ def run_edit(
     while True:
         passes += 1
         edl = deps.reason_edl(manifest, transcript, style, prompt, footage, feedback)
+        if deps.refine_shots is not None:
+            edl = deps.refine_shots(edl, durations)
         deps.render_edl(edl, final_mp4, preview)
         if fcpxml_path:
             Path(fcpxml_path).write_text(deps.edl_to_fcpxml(edl, "Editor CLI", durations))
@@ -114,12 +118,28 @@ def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
     """Construct real bindings from a Config."""
     from editor_cli.acquire import resolve_reference
     from editor_cli.acquire.discover import discover_genre, fetch_sound_meta
-    from editor_cli.analysis.gemini import GeminiClient, make_gemini_generate
+    from editor_cli.analysis import shot_select
+    from editor_cli.analysis.gemini import (
+        GeminiClient,
+        make_gemini_generate,
+        make_vision_generate,
+    )
     from editor_cli.analysis.transcribe import transcribe
     from editor_cli.render import ffmpeg
     from editor_cli.render.fcpxml import edl_to_fcpxml
 
     gemini = GeminiClient(make_gemini_generate(cfg.gemini_api_key, cfg.gemini_model))
+    vision = make_vision_generate(cfg.gemini_api_key)
+    frames_dir = str(Path(out_dir) / "frames")
+
+    def refine_shots(edl: EDL, durations: dict) -> EDL:
+        return shot_select.refine_windows(
+            edl,
+            lambda src, n: ffmpeg.sample_frames(src, n, frames_dir),
+            vision,
+            durations,
+        )
+
     return Deps(
         resolve_reference=lambda ref, od: resolve_reference(ref, od, opts=fetch_opts),
         analyze_style=gemini.analyze_style,
@@ -131,4 +151,5 @@ def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
         evaluate=gemini.evaluate,
         discover=discover_genre,
         sound_meta=fetch_sound_meta,
+        refine_shots=refine_shots,
     )
