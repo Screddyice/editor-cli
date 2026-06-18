@@ -4,7 +4,7 @@ Studying the reference reel frame-by-frame shows a deliberate two-typeface syste
 and the switch between them carries meaning:
 
 - **declarative** — the grounded, functional, "spoken" words ("POV: YOU LOCKED IN",
-  "i just", "push", "is hard"): a clean bold neo-grotesque, **Helvetica Neue Bold**,
+  "i just", "push", "is hard"): a clean neo-grotesque, **Helvetica Neue Medium**,
   letter-tracked, case preserved from the source (the hook reads as tracked caps).
 - **accent** — the emotional / aesthetic *payoff* words ("Heart", "Art", "Calm",
   "Run", "Laughed"): a formal English roundhand, **Snell Roundhand Bold**, larger,
@@ -34,10 +34,11 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Declarative: clean bold neo-grotesque, tracked. Matches the reference hook.
+# Declarative: clean neo-grotesque, tracked. The reference weight sits at Medium —
+# Bold reads too heavy against the soft shadow.
 SANS_FAMILY = "Helvetica Neue"
 SANS_FILE = "/System/Library/Fonts/HelveticaNeue.ttc"
-SANS_INDEX = 1  # Bold
+SANS_INDEX = 10  # Medium
 
 # Accent: formal English roundhand. The reference sets it at a refined Bold weight
 # with a SOFT shadow (no hard outline) — Black reads too heavy / cartoonish.
