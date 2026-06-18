@@ -4,8 +4,9 @@ Studying the reference reel frame-by-frame shows a deliberate two-typeface syste
 and the switch between them carries meaning:
 
 - **declarative** — the grounded, functional, "spoken" words ("POV: YOU LOCKED IN",
-  "i just", "push", "is hard"): a clean neo-grotesque, **Helvetica Neue Medium**,
-  letter-tracked, case preserved from the source (the hook reads as tracked caps).
+  "i just", "push", "is hard"): a clean **condensed** neo-grotesque, **Helvetica Neue
+  Condensed Bold**, lightly tracked, case preserved (the hook reads as tracked caps).
+  The narrow proportions give it character — a wide regular grotesque reads generic.
 - **accent** — the emotional / aesthetic *payoff* words ("Heart", "Art", "Calm",
   "Run", "Laughed"): a formal English roundhand, **Snell Roundhand Bold**, larger,
   with the reference's faint white→ice-blue vertical sheen.
@@ -34,11 +35,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Declarative: clean neo-grotesque, tracked. The reference weight sits at Medium —
-# Bold reads too heavy against the soft shadow.
+# Declarative: the reference sans is CONDENSED, not the wide default — a regular
+# Helvetica reads generic against the cinematic frames. Condensed Bold matches its
+# narrow proportions while staying clean (not the heavy/cartoonish Condensed Black).
 SANS_FAMILY = "Helvetica Neue"
 SANS_FILE = "/System/Library/Fonts/HelveticaNeue.ttc"
-SANS_INDEX = 10  # Medium
+SANS_INDEX = 4  # Condensed Bold
 
 # Accent: formal English roundhand. The reference sets it at a refined Bold weight
 # with a SOFT shadow (no hard outline) — Black reads too heavy / cartoonish.
@@ -67,7 +69,7 @@ class TitleStyle:
 
 DECLARATIVE = TitleStyle(
     emphasis="declarative", family=SANS_FAMILY, font_file=SANS_FILE,
-    face_index=SANS_INDEX, uppercase=False, tracking=0.10, gradient=False,
+    face_index=SANS_INDEX, uppercase=False, tracking=0.07, gradient=False,
 )
 ACCENT = TitleStyle(
     emphasis="accent", family=SCRIPT_FAMILY, font_file=SCRIPT_FILE,
