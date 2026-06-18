@@ -11,6 +11,33 @@ the call site.
 from __future__ import annotations
 
 
+def quantize_to_beats(
+    durations: list[float], beats: list[float], *, end: float | None = None
+) -> list[float]:
+    """Lay shots on a beat grid: each duration becomes a whole number of beats and
+    every cut lands on an exact beat time.
+
+    Returns the cut boundaries ``[0, t1, ..., end]``. Each shot consumes
+    ``round(dur / median_beat_period)`` beats (>=1); the cursor walks the beat list
+    so cuts sit on real beats even when the grid isn't perfectly even. The final
+    boundary is ``end`` (e.g. the track length) so the last shot runs to the music.
+    Snapping irregular durations to beat *multiples* gives a cleaner on-beat cadence
+    than nudging each arbitrary cut to its nearest beat.
+    """
+    if not beats or not durations:
+        return [0.0, end if end is not None else sum(durations)]
+    beats = sorted(beats)
+    diffs = [b - a for a, b in zip(beats, beats[1:])] or [beats[0] or 1.0]
+    period = sorted(diffs)[len(diffs) // 2]
+    out, idx = [0.0], 0
+    for i, d in enumerate(durations):
+        idx = min(idx + max(1, round(d / period)), len(beats) - 1)
+        t = end if (end is not None and i == len(durations) - 1) else beats[idx]
+        if t > out[-1] + 1e-6:
+            out.append(round(t, 3))
+    return out
+
+
 def snap_cuts(boundaries: list[float], beats: list[float]) -> list[float]:
     """Return ``boundaries`` with each internal cut moved to its nearest beat.
 

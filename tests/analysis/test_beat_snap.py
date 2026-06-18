@@ -1,7 +1,23 @@
-from editor_cli.analysis.beat_snap import snap_cuts
+from editor_cli.analysis.beat_snap import quantize_to_beats, snap_cuts
 
 
 BEATS = [0.0, 0.4, 0.8, 1.2, 1.6, 2.0, 2.4, 2.8]
+
+
+def test_quantize_rounds_durations_to_beat_multiples_on_grid():
+    # 0.5->1 beat, 0.9->2 beats, 0.3->1 beat; cuts land on exact beats; end honored
+    out = quantize_to_beats([0.5, 0.9, 0.3], BEATS, end=2.8)
+    assert out == [0.0, 0.4, 1.2, 2.8]
+
+
+def test_quantize_every_cut_is_a_beat_or_end():
+    out = quantize_to_beats([0.4, 0.4, 0.8, 0.4], BEATS, end=2.8)
+    assert all(t in BEATS or t == 2.8 for t in out)
+
+
+def test_quantize_minimum_one_beat_per_shot():
+    out = quantize_to_beats([0.05, 0.05], BEATS, end=2.8)
+    assert out[1] == 0.4   # tiny shot still advances a full beat
 
 
 def test_internal_cuts_snap_to_nearest_beat():
