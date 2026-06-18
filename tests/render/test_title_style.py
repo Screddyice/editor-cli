@@ -52,4 +52,4 @@ def test_both_faces_load_with_expected_family():
     sans = ImageFont.truetype(ts.SANS_FILE, 80, index=ts.SANS_INDEX)
     script = ImageFont.truetype(ts.SCRIPT_FILE, 80, index=ts.SCRIPT_INDEX)
     assert sans.getname()[0] == ts.SANS_FAMILY
-    assert script.getname()[0] == ts.SCRIPT_FAMILY
+    assert script.getname() == (ts.SCRIPT_FAMILY, "Bold")  # refined Bold, not Black

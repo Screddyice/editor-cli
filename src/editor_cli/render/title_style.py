@@ -7,8 +7,12 @@ and the switch between them carries meaning:
   "i just", "push", "is hard"): a clean bold neo-grotesque, **Helvetica Neue Bold**,
   letter-tracked, case preserved from the source (the hook reads as tracked caps).
 - **accent** — the emotional / aesthetic *payoff* words ("Heart", "Art", "Calm",
-  "Run", "Laughed"): a formal English roundhand, **Snell Roundhand Black**, larger,
+  "Run", "Laughed"): a formal English roundhand, **Snell Roundhand Bold**, larger,
   with the reference's faint white→ice-blue vertical sheen.
+
+Both treatments are clean white with a SOFT drop shadow for legibility — the
+reference uses **no hard outline**; a thick black stroke reads as cartoonish, which
+is the look to avoid. The renderer owns the shadow; this module owns font identity.
 
 Why two fonts and not one family (the v4 mistake): the reference's whole device is
 the *tension* between a utilitarian grotesque and a luxurious script — hustle vs.
@@ -35,10 +39,11 @@ SANS_FAMILY = "Helvetica Neue"
 SANS_FILE = "/System/Library/Fonts/HelveticaNeue.ttc"
 SANS_INDEX = 1  # Bold
 
-# Accent: formal English roundhand, heavy contrast. Matches the reference script.
+# Accent: formal English roundhand. The reference sets it at a refined Bold weight
+# with a SOFT shadow (no hard outline) — Black reads too heavy / cartoonish.
 SCRIPT_FAMILY = "Snell Roundhand"
 SCRIPT_FILE = "/System/Library/Fonts/Supplemental/SnellRoundhand.ttc"
-SCRIPT_INDEX = 2  # Black
+SCRIPT_INDEX = 1  # Bold
 
 # Substrings marking a label as the *accent* (script) treatment; everything else
 # is declarative. "cursive"/"script" are how the reference-style analysis tags the
