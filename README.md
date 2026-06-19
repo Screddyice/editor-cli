@@ -92,6 +92,22 @@ uv run editor-cli edit ./footage --prompt "..." \
   agentic video-production system, included as a git submodule and invoked as a
   **separate tool/process**. Fetch it with `git submodule update --init`.
 
+### Motion-graphics overlays (OpenMontage / HyperFrames)
+
+editor-cli drives OpenMontage's HyperFrames engine **at arm's length** (a
+subprocess — never imported, so the repo stays MIT) to render animated overlays
+(titles, lower-thirds, audio-reactive captions), then composites them onto
+footage with ffmpeg.
+
+```bash
+editor-cli motion-doctor                 # check the runtime (Node >= 22, ffmpeg, hyperframes)
+npx hyperframes --version                # warm the hyperframes CLI on first use
+editor-cli overlay clip.mp4 title.mov -o out.mp4 --x 40 --y 40 --start 1.0
+```
+
+The bridge lives in `editor_cli/render/overlays.py` (subprocess only) and the
+compositor is `ffmpeg.overlay_onto`. Both are our own MIT code.
+
 ## License
 
 `editor-cli`'s own code is [MIT](LICENSE) © Screddyice.

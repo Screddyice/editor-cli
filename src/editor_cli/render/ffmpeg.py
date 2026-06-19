@@ -278,3 +278,42 @@ def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
             fh.write(f"file '{p}'\n")
     _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out])
     return out
+
+
+def overlay_onto(
+    base: str,
+    overlay: str,
+    out: str,
+    *,
+    x: str = "0",
+    y: str = "0",
+    start: float = 0.0,
+    preview: bool = False,
+) -> str:
+    """Composite an (alpha) overlay clip onto base footage.
+
+    The overlay is delayed to appear at ``start`` seconds (transparent before
+    that) and removed when it ends, with the base continuing underneath. Base
+    audio is preserved. This is how HyperFrames-rendered motion graphics (see
+    editor_cli.render.overlays) get laid onto footage — ffmpeg-only, MIT.
+    """
+    venc = (
+        ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+        if preview
+        else ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+    )
+    # delay the overlay's own timeline to `start`; format=auto keeps alpha;
+    # eof_action=pass lets the base run on after the overlay ends.
+    fc = (
+        f"[1:v]setpts=PTS+{start:.6g}/TB[ov];"
+        f"[0:v][ov]overlay={x}:{y}:eof_action=pass:format=auto[v]"
+    )
+    _run([
+        "ffmpeg", "-y", "-i", base, "-i", overlay,
+        "-filter_complex", fc,
+        "-map", "[v]", "-map", "0:a?",
+        *venc, "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ac", "2", "-ar", "48000",
+        out,
+    ])
+    return out

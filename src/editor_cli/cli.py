@@ -110,5 +110,45 @@ def style(
     typer.echo(gemini.analyze_style(files).to_json())
 
 
+@app.command("motion-doctor")
+def motion_doctor() -> None:
+    """Check the OpenMontage / HyperFrames overlay runtime (Node, ffmpeg, hyperframes)."""
+    from editor_cli.render import overlays
+
+    try:
+        root = overlays.submodule_root()
+        typer.echo(f"  submodule: {root}")
+    except overlays.OverlayError as exc:
+        typer.secho(f"  ✗ {exc}", fg=typer.colors.YELLOW)
+    st = overlays.runtime_status()
+    for key in ("node", "ffmpeg", "npx", "hyperframes"):
+        val = st[key]
+        typer.echo(f"  {'✓' if val else '✗'} {key}: {val if val else 'missing'}")
+    if st["ok"]:
+        typer.secho("✓ HyperFrames overlay runtime ready.", fg=typer.colors.GREEN)
+    else:
+        typer.secho(
+            "✗ Overlay runtime incomplete — need Node >= 22 + ffmpeg + hyperframes CLI.",
+            fg=typer.colors.YELLOW,
+        )
+
+
+@app.command()
+def overlay(
+    base: str = typer.Argument(..., help="Base footage clip."),
+    clip: str = typer.Argument(..., metavar="OVERLAY", help="Overlay clip (with alpha)."),
+    out: str = typer.Option("overlayed.mp4", "--out", "-o", help="Output path."),
+    x: str = typer.Option("0", "--x", help="Overlay x position (px or ffmpeg expr)."),
+    y: str = typer.Option("0", "--y", help="Overlay y position (px or ffmpeg expr)."),
+    start: float = typer.Option(0.0, "--start", help="When the overlay appears (seconds)."),
+    preview: bool = typer.Option(False, "--preview", help="Fast encode."),
+) -> None:
+    """Composite a motion-graphics overlay (e.g. a HyperFrames render) onto footage."""
+    from editor_cli.render.ffmpeg import overlay_onto
+
+    overlay_onto(base, clip, out, x=x, y=y, start=start, preview=preview)
+    typer.secho(f"✓ {out}", fg=typer.colors.GREEN)
+
+
 if __name__ == "__main__":
     app()
