@@ -71,8 +71,9 @@ def test_titles_are_applied_automatically_after_render(tmp_path):
     )
     seen = {}
 
-    def fake_apply(video, titles, out_path, preview):
+    def fake_apply(video, titles, out_path, preview, engine="auto"):
         seen["titles"] = titles
+        seen["engine"] = engine
         Path(out_path).write_bytes(b"titled")
         return out_path
 
@@ -88,7 +89,7 @@ def test_titles_skipped_when_edl_has_none(tmp_path):
     out = tmp_path / "edit"
     deps = _deps({"n": 0}, scorer=lambda *a: EvalResult(0.9, []))
     called = {"n": 0}
-    deps.apply_titles = lambda *a: called.__setitem__("n", called["n"] + 1)
+    deps.apply_titles = lambda *a, **k: called.__setitem__("n", called["n"] + 1)
     run_edit(str(foot), "p", [], str(out), deps)  # default EDL has no titles
     assert called["n"] == 0
 

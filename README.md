@@ -108,6 +108,19 @@ editor-cli overlay clip.mp4 title.mov -o out.mp4 --x 40 --y 40 --start 1.0
 The bridge lives in `editor_cli/render/overlays.py` (subprocess only) and the
 compositor is `ffmpeg.overlay_onto`. Both are our own MIT code.
 
+**Titles are applied automatically during `edit`** (from the EDL — no manual
+step). Pick the engine with `--titles`:
+
+```bash
+editor-cli edit ./footage -p "..." --titles auto         # HyperFrames if warm, else Pillow (default)
+editor-cli edit ./footage -p "..." --titles hyperframes  # force rich animated overlays
+editor-cli edit ./footage -p "..." --titles pillow       # force the portable path
+```
+
+`hyperframes`/`auto` author a transparent HyperFrames composition, render it to
+an alpha webm (`npx hyperframes render --format webm`), and composite it onto
+the cut. `pillow` renders text PNGs + ffmpeg overlay and works without Node.
+
 ## License
 
 `editor-cli`'s own code is [MIT](LICENSE) © Screddyice.
