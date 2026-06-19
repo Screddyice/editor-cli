@@ -32,3 +32,9 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.pytest.ini_options]
+# Only our own tests — never recurse into the vendored OpenMontage submodule,
+# which ships its own (differently-configured) test suite.
+testpaths = ["tests"]
+norecursedirs = ["vendor", ".venv", "references"]

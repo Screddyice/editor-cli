@@ -86,6 +86,20 @@ uv run editor-cli edit ./footage --prompt "..." \
 - `references/hyperframes` — [heygen-com/hyperframes](https://github.com/heygen-com/hyperframes):
   HTML→video overlay engine for optional motion graphics.
 
+## Bundled tools (git submodule)
+
+- `vendor/OpenMontage` — [calesthio/OpenMontage](https://github.com/calesthio/OpenMontage):
+  agentic video-production system, included as a git submodule and invoked as a
+  **separate tool/process**. Fetch it with `git submodule update --init`.
+
 ## License
 
-[MIT](LICENSE) © Screddyice
+`editor-cli`'s own code is [MIT](LICENSE) © Screddyice.
+
+`vendor/OpenMontage` is a git submodule that **remains under its own
+[AGPL-3.0](https://github.com/calesthio/OpenMontage/blob/main/LICENSE)** license.
+It is bundled as a separate, independently-licensed program (mere aggregation)
+and is **not** linked into or imported by editor-cli's code — so it does not
+change editor-cli's MIT license. If you ever import OpenMontage as a library
+rather than shelling out to it, AGPL's copyleft would extend to the combined
+work; keep the boundary at the process level to stay MIT.
