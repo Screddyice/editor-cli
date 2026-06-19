@@ -59,6 +59,59 @@ def test_reason_edl_parses_into_domain():
     assert len(edl.segments) == 1
 
 
+class _Capture:
+    """Records the prompt passed to generate; returns a fixed EDL."""
+
+    def __init__(self, payload=None):
+        self.prompt = None
+        self._payload = payload or EDL_JSON
+
+    def __call__(self, prompt, files):
+        self.prompt = prompt
+        return json.dumps(self._payload)
+
+
+def test_reason_edl_offers_effects_subtle_by_default():
+    cap = _Capture()
+    GeminiClient(generate=cap).reason_edl("m", "t", _style(), "edit it")
+    assert "motion" in cap.prompt and "transition" in cap.prompt
+    assert "ken_burns" in cap.prompt and "crossfade" in cap.prompt
+    assert "subtle" in cap.prompt and "restraint" in cap.prompt
+
+
+def test_reason_edl_punchy_intensity():
+    cap = _Capture()
+    GeminiClient(generate=cap).reason_edl(
+        "m", "t", _style(), "hype it", effects_intensity="punchy"
+    )
+    assert "punchy" in cap.prompt and "lean into motion" in cap.prompt.lower()
+
+
+def test_reason_edl_none_intensity_suppresses_effects():
+    cap = _Capture()
+    GeminiClient(generate=cap).reason_edl(
+        "m", "t", _style(), "clean cuts", effects_intensity="none"
+    )
+    assert "hard cuts only" in cap.prompt.lower()
+    assert "ken_burns" not in cap.prompt  # spec omitted entirely
+
+
+def test_reason_edl_parses_model_chosen_effects():
+    payload = {
+        "fps": 30.0,
+        "resolution": [1080, 1920],
+        "segments": [
+            {"src": "a.mp4", "in": 0.0, "out": 2.0,
+             "motion": {"type": "ken_burns", "zoom": 1.1, "direction": "in"},
+             "transition": {"crossfade": 0.5, "crossfade_style": "fade"}},
+        ],
+    }
+    edl = GeminiClient(generate=_Capture(payload)).reason_edl("m", "t", _style(), "go")
+    seg = edl.segments[0]
+    assert seg.motion == {"type": "ken_burns", "zoom": 1.1, "direction": "in"}
+    assert seg.transition == {"crossfade": 0.5, "crossfade_style": "fade"}
+
+
 def test_evaluate_parses_score_and_issues():
     gc = GeminiClient(generate=lambda p, f: json.dumps({"score": 0.8, "issues": ["x"]}))
     res = gc.evaluate("out.mp4", _style(), "prompt")

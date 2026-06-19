@@ -31,6 +31,10 @@ def edit(
         None, "--genre", "-g", help="Discover trending reference videos for this genre/query."
     ),
     trend_count: int = typer.Option(5, "--trend-count", help="How many trend refs to discover."),
+    effects: str = typer.Option(
+        "subtle", "--effects",
+        help="Motion-graphics intensity the editor may apply: none | subtle | punchy.",
+    ),
     cookies_from_browser: str = typer.Option(
         None, "--cookies-from-browser",
         help="Read cookies from this browser for IG/TikTok refs (chrome, safari, firefox).",
@@ -59,7 +63,7 @@ def edit(
     result = run_edit(
         footage_dir, prompt, ref or [], out, deps,
         max_eval=max_eval, fcpxml=not no_fcpxml, preview=preview,
-        genre=genre, trend_count=trend_count,
+        genre=genre, trend_count=trend_count, effects_intensity=effects,
     )
     typer.secho(
         f"✓ {result.final_mp4}  (score {result.score:.2f}, {result.passes} pass(es))",
