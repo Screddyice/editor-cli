@@ -38,6 +38,30 @@ def duration_of(path: str) -> float:
     return float(probe(path)["format"]["duration"])
 
 
+def sample_frames(src: str, n: int, out_dir: str) -> list[tuple[float, str]]:
+    """Extract ``n`` JPEG frames sampled evenly across ``src``.
+
+    Returns ``[(timestamp_seconds, image_path), ...]`` in time order — the input
+    the shot-moment selector needs to choose the most engaging in-point. Samples
+    span the inner 5–95% of the clip so we never land on a black lead frame or a
+    trailing fade.
+    """
+    if n < 1:
+        return []
+    dur = duration_of(src)
+    os.makedirs(out_dir, exist_ok=True)
+    stem = os.path.splitext(os.path.basename(src))[0]
+    span = dur * 0.90
+    frames: list[tuple[float, str]] = []
+    for i in range(n):
+        t = dur * 0.05 + (span * i / (n - 1) if n > 1 else span / 2)
+        img = os.path.join(out_dir, f"{stem}_{i:02d}.jpg")
+        _run(["ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", src,
+              "-frames:v", "1", "-q:v", "3", img])
+        frames.append((t, img))
+    return frames
+
+
 def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
     fps = edl.fps
     tw, th = (1280, 720) if preview else edl.resolution
