@@ -39,12 +39,38 @@ _STYLE_PROMPT = (
 _EDL_PROMPT = (
     "You are a video editor. Using the footage manifest, transcript, target style "
     "profile, and the user's intent, produce ONLY a JSON EDL with keys: fps, "
-    "resolution[w,h], segments[{{src, in, out, grade, overlays}}], titles[], "
-    "subtitles(bool), music. Cut filler/dead-air, tighten, and order to match the "
-    "style. Times are seconds.\n\n"
+    "resolution[w,h], segments[{{src, in, out, grade, overlays, motion, "
+    "transition}}], titles[], subtitles(bool), music. Cut filler/dead-air, "
+    "tighten, and order to match the style. Times are seconds.\n\n"
+    "{effects}\n\n"
     "STYLE:\n{style}\n\nMANIFEST:\n{manifest}\n\nTRANSCRIPT:\n{transcript}\n\n"
     "INTENT:\n{prompt}\n{feedback}"
 )
+
+# Per-segment motion-graphics the renderer understands. Single (literal) braces —
+# this is substituted into _EDL_PROMPT as a value, not re-formatted.
+_EFFECTS_SPEC = (
+    "Segments MAY include motion graphics, but ONLY where they serve the moment "
+    "— never gratuitously:\n"
+    '  "motion": {"type":"ken_burns","zoom":1.05-1.2,"direction":"in"|"out"} for '
+    'static/holding shots, OR {"type":"speed","factor":N} (N>1 to trim dead time, '
+    "N<1 slow-mo to emphasize a beat).\n"
+    '  "transition": {"crossfade":0.3-0.8,"crossfade_style":"fade"|"wipeleft"|'
+    '"dissolve"} to blend clearly-related shots, OR {"fade_in":sec} / '
+    '{"fade_out":sec} to open/close. Omit transition entirely for a hard cut.'
+)
+_EFFECTS_INTENSITY = {
+    "none": "EFFECTS: Do NOT add any motion or transitions — hard cuts only.",
+    "subtle": (
+        "EFFECTS (subtle — default to restraint): most cuts stay hard cuts. Reach "
+        "for ken_burns only on long static holds, a gentle crossfade only between "
+        "clearly related shots, and speed only to trim obvious dead-air."
+    ),
+    "punchy": (
+        "EFFECTS (punchy): lean into motion — frequent ken_burns, speed ramps, and "
+        "crossfades/wipes between scene changes for energetic, dynamic pacing."
+    ),
+}
 
 _EVAL_PROMPT = (
     "Watch the rendered edit and score how well it matches the target style and "
@@ -123,11 +149,20 @@ class GeminiClient:
         prompt: str,
         footage: list[str] | None = None,
         feedback: str = "",
+        effects_intensity: str = "subtle",
     ) -> EDL:
         fb = f"\nPREVIOUS-ISSUES TO FIX:\n{feedback}" if feedback else ""
+        guidance = _EFFECTS_INTENSITY.get(
+            effects_intensity, _EFFECTS_INTENSITY["subtle"]
+        )
+        effects = (
+            guidance
+            if effects_intensity == "none"
+            else f"{_EFFECTS_SPEC}\n{guidance}"
+        )
         p = _EDL_PROMPT.format(
             style=style.to_json(), manifest=manifest, transcript=transcript,
-            prompt=prompt, feedback=fb,
+            prompt=prompt, feedback=fb, effects=effects,
         )
         return self._json(p, footage or [], EDL.from_dict)
 

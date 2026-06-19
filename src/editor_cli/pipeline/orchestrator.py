@@ -69,6 +69,7 @@ def run_edit(
     preview: bool = False,
     genre: Optional[str] = None,
     trend_count: int = 5,
+    effects_intensity: str = "subtle",
 ) -> EditResult:
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -99,7 +100,9 @@ def run_edit(
     score = 0.0
     while True:
         passes += 1
-        edl = deps.reason_edl(manifest, transcript, style, prompt, footage, feedback)
+        edl = deps.reason_edl(
+            manifest, transcript, style, prompt, footage, feedback, effects_intensity
+        )
         if deps.refine_shots is not None:
             edl = deps.refine_shots(edl, durations)
         deps.render_edl(edl, final_mp4, preview)
