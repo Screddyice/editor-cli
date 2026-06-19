@@ -18,6 +18,12 @@ class Segment:
     out: float
     grade: Optional[str] = None
     overlays: Optional[list[dict[str, Any]]] = None
+    # Per-segment camera motion, one of:
+    #   {"type": "ken_burns", "zoom": 1.12, "direction": "in"|"out"}
+    #   {"type": "speed", "factor": 2.0}  # >1 faster, <1 slow-mo
+    motion: Optional[dict[str, Any]] = None
+    # Per-segment fades: {"fade_in": seconds, "fade_out": seconds} (either key optional)
+    transition: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         if self.out <= self.in_:
@@ -35,6 +41,10 @@ class Segment:
             d["grade"] = self.grade
         if self.overlays is not None:
             d["overlays"] = self.overlays
+        if self.motion is not None:
+            d["motion"] = self.motion
+        if self.transition is not None:
+            d["transition"] = self.transition
         return d
 
     @classmethod
@@ -45,6 +55,8 @@ class Segment:
             out=d["out"],
             grade=d.get("grade"),
             overlays=d.get("overlays"),
+            motion=d.get("motion"),
+            transition=d.get("transition"),
         )
 
 

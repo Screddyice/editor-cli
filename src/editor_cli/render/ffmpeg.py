@@ -93,16 +93,78 @@ def _target_resolution(edl: EDL, preview: bool) -> tuple[int, int]:
     return _even(sw), _even(sh)
 
 
+def _atempo_chain(factor: float) -> str:
+    """ffmpeg's atempo only accepts 0.5–2.0; chain steps for anything outside."""
+    parts: list[str] = []
+    f = factor
+    while f > 2.0:
+        parts.append("atempo=2.0")
+        f /= 2.0
+    while f < 0.5:
+        parts.append("atempo=0.5")
+        f /= 0.5
+    parts.append(f"atempo={f:.6g}")
+    return ",".join(parts)
+
+
+def _segment_filters(
+    seg: Segment, tw: int, th: int, fps: float
+) -> tuple[str, str | None]:
+    """Per-segment (video_filter, audio_filter|None).
+
+    Base = aspect-preserving scale+pad (never stretches; letterbox a mismatched
+    AR). Layered on top, all opt-in and ffmpeg-only:
+      - motion ken_burns: slow zoompan push/pull
+      - motion speed: setpts + tempo-matched audio (>1 faster, <1 slow-mo)
+      - transition fade_in/fade_out: matched video + audio fades
+    A segment with no motion/transition yields exactly the base filter.
+    """
+    vparts = [
+        f"scale={tw}:{th}:force_original_aspect_ratio=decrease",
+        f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black",
+    ]
+    aparts: list[str] = []
+    out_dur = seg.duration
+
+    motion = seg.motion or {}
+    mtype = motion.get("type")
+    if mtype == "ken_burns":
+        zoom = float(motion.get("zoom", 1.12))
+        n = max(1, round(seg.duration * fps))
+        if motion.get("direction") == "out":
+            z = f"max({zoom}-({zoom}-1)*on/{n},1)"
+        else:
+            z = f"min(1+({zoom}-1)*on/{n},{zoom})"
+        vparts.append(
+            f"zoompan=z='{z}':d=1:"
+            "x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':"
+            f"s={tw}x{th}:fps={fps:.6g}"
+        )
+    elif mtype == "speed":
+        factor = float(motion.get("factor", 1.0))
+        if factor <= 0:
+            raise RenderError(f"speed factor must be > 0, got {factor}")
+        vparts.append(f"setpts={1.0 / factor:.6g}*PTS")
+        aparts.append(_atempo_chain(factor))
+        out_dur = seg.duration / factor
+
+    transition = seg.transition or {}
+    fin = transition.get("fade_in")
+    fout = transition.get("fade_out")
+    if fin:
+        vparts.append(f"fade=t=in:st=0:d={float(fin):.6g}")
+        aparts.append(f"afade=t=in:st=0:d={float(fin):.6g}")
+    if fout:
+        st = max(0.0, out_dur - float(fout))
+        vparts.append(f"fade=t=out:st={st:.6g}:d={float(fout):.6g}")
+        aparts.append(f"afade=t=out:st={st:.6g}:d={float(fout):.6g}")
+
+    return ",".join(vparts), (",".join(aparts) if aparts else None)
+
+
 def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
     fps = edl.fps
     tw, th = _target_resolution(edl, preview)
-    # Fit each segment inside the frame preserving its own aspect ratio, then
-    # letterbox-pad the remainder. A clip whose AR differs from the frame is
-    # never stretched; mixed-AR edits get bars, not distortion.
-    vf = (
-        f"scale={tw}:{th}:force_original_aspect_ratio=decrease,"
-        f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black"
-    )
     # Preview trades quality for speed; final encodes near-visually-lossless so
     # the output matches the source clips.
     if preview:
@@ -113,14 +175,20 @@ def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
     parts: list[str] = []
     for i, seg in enumerate(edl.segments):
         part = os.path.join(tmp, f"part{i:04d}.mp4")
-        _run(
-            ["ffmpeg", "-y",
-             "-ss", str(seg.in_), "-i", seg.src, "-t", str(seg.duration),
-             "-vf", vf, "-r", str(fps),
-             *venc, "-pix_fmt", "yuv420p",
-             "-c:a", "aac", "-ac", "2", "-ar", "48000",
-             part]
-        )
+        vf, af = _segment_filters(seg, tw, th, fps)
+        cmd = [
+            # input-side trim so motion filters (e.g. speed/setpts) re-time the
+            # output freely instead of -t clamping it as an output limit
+            "ffmpeg", "-y",
+            "-ss", str(seg.in_), "-t", str(seg.duration), "-i", seg.src,
+            "-vf", vf, "-r", str(fps),
+            *venc, "-pix_fmt", "yuv420p",
+            "-c:a", "aac", "-ac", "2", "-ar", "48000",
+        ]
+        if af:
+            cmd += ["-af", af]
+        cmd.append(part)
+        _run(cmd)
         parts.append(part)
     list_file = os.path.join(tmp, "concat.txt")
     with open(list_file, "w") as fh:
