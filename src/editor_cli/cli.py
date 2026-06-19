@@ -35,6 +35,11 @@ def edit(
         "subtle", "--effects",
         help="Motion-graphics intensity the editor may apply: none | subtle | punchy.",
     ),
+    titles: str = typer.Option(
+        "auto", "--titles",
+        help="Title overlay engine: auto | pillow | hyperframes "
+             "(auto uses HyperFrames when its runtime is ready, else Pillow).",
+    ),
     cookies_from_browser: str = typer.Option(
         None, "--cookies-from-browser",
         help="Read cookies from this browser for IG/TikTok refs (chrome, safari, firefox).",
@@ -64,6 +69,7 @@ def edit(
         footage_dir, prompt, ref or [], out, deps,
         max_eval=max_eval, fcpxml=not no_fcpxml, preview=preview,
         genre=genre, trend_count=trend_count, effects_intensity=effects,
+        titles_engine=titles,
     )
     typer.secho(
         f"✓ {result.final_mp4}  (score {result.score:.2f}, {result.passes} pass(es))",

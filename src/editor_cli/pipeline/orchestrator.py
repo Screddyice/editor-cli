@@ -73,6 +73,7 @@ def run_edit(
     genre: Optional[str] = None,
     trend_count: int = 5,
     effects_intensity: str = "subtle",
+    titles_engine: str = "auto",
 ) -> EditResult:
     out_dir = Path(out)
     out_dir.mkdir(parents=True, exist_ok=True)
@@ -113,7 +114,7 @@ def run_edit(
         # by the EDL, not a manual overlay step.
         if edl.titles and deps.apply_titles is not None:
             titled = str(out_dir / "final_titled.mp4")
-            deps.apply_titles(final_mp4, edl.titles, titled, preview)
+            deps.apply_titles(final_mp4, edl.titles, titled, preview, engine=titles_engine)
             os.replace(titled, final_mp4)
         if fcpxml_path:
             Path(fcpxml_path).write_text(deps.edl_to_fcpxml(edl, "Editor CLI", durations))
@@ -137,7 +138,7 @@ def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
         make_vision_generate,
     )
     from editor_cli.analysis.transcribe import transcribe
-    from editor_cli.render import ffmpeg
+    from editor_cli.render import ffmpeg, titles
     from editor_cli.render.fcpxml import edl_to_fcpxml
 
     gemini = GeminiClient(make_gemini_generate(cfg.gemini_api_key, cfg.gemini_model))
@@ -160,7 +161,7 @@ def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
         reason_edl=gemini.reason_edl,
         render_edl=ffmpeg.render_edl,
         edl_to_fcpxml=edl_to_fcpxml,
-        apply_titles=ffmpeg.apply_titles,
+        apply_titles=titles.render,
         evaluate=gemini.evaluate,
         discover=discover_genre,
         sound_meta=fetch_sound_meta,
