@@ -58,6 +58,41 @@ def test_run_edit_stops_when_score_passes(tmp_path):
     assert (out / "timeline.fcpxml").exists()
 
 
+def test_titles_are_applied_automatically_after_render(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    counter = {"n": 0}
+    deps = _deps(counter, scorer=lambda *a: EvalResult(0.9, []))
+    # editor decides on a title
+    deps.reason_edl = lambda *a: EDL(
+        fps=30.0, resolution=(1080, 1920),
+        segments=[Segment(src="a.mp4", in_=0.0, out=2.0)],
+        titles=[{"text": "Hello", "start": 0.0, "end": 1.0}],
+    )
+    seen = {}
+
+    def fake_apply(video, titles, out_path, preview):
+        seen["titles"] = titles
+        Path(out_path).write_bytes(b"titled")
+        return out_path
+
+    deps.apply_titles = fake_apply
+    run_edit(str(foot), "p", [], str(out), deps)
+    # the pipeline applied the editor's titles without any manual step
+    assert seen["titles"] == [{"text": "Hello", "start": 0.0, "end": 1.0}]
+    assert (out / "final.mp4").exists()
+
+
+def test_titles_skipped_when_edl_has_none(tmp_path):
+    foot = _footage(tmp_path)
+    out = tmp_path / "edit"
+    deps = _deps({"n": 0}, scorer=lambda *a: EvalResult(0.9, []))
+    called = {"n": 0}
+    deps.apply_titles = lambda *a: called.__setitem__("n", called["n"] + 1)
+    run_edit(str(foot), "p", [], str(out), deps)  # default EDL has no titles
+    assert called["n"] == 0
+
+
 def test_run_edit_loops_until_threshold(tmp_path):
     foot = _footage(tmp_path)
     out = tmp_path / "edit"

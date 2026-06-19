@@ -278,3 +278,170 @@ def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
             fh.write(f"file '{p}'\n")
     _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out])
     return out
+
+
+_FALLBACK_FONTS = (
+    "/System/Library/Fonts/Supplemental/Arial.ttf",
+    "/System/Library/Fonts/Helvetica.ttc",
+    "/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf",
+    "/Library/Fonts/Arial.ttf",
+)
+
+
+def _title_layout(title: dict) -> dict | None:
+    """Normalize a title dict (or None if it has no text).
+
+    Tolerant of the shape Gemini emits: text|label|content, start, end|duration,
+    position (top|center|bottom).
+    """
+    text = (title.get("text") or title.get("label") or title.get("content") or "").strip()
+    if not text:
+        return None
+    start = float(title.get("start", 0.0) or 0.0)
+    if title.get("end") is not None:
+        end = float(title["end"])
+    else:
+        end = start + float(title.get("duration", 3.0) or 3.0)
+    if end <= start:
+        end = start + 3.0
+    pos = str(title.get("position") or "bottom").lower()
+    region = "top" if "top" in pos else ("center" if ("cent" in pos or "mid" in pos) else "bottom")
+    return {"text": text, "start": start, "end": end, "region": region, "style": title.get("style")}
+
+
+def _load_font(style, size: int):
+    from PIL import ImageFont
+
+    for path, idx in [(style.font_file, style.face_index), *((f, 0) for f in _FALLBACK_FONTS)]:
+        if os.path.exists(path):
+            try:
+                return ImageFont.truetype(path, size, index=idx)
+            except OSError:
+                continue
+    return ImageFont.load_default(size)
+
+
+def _render_title_png(layout: dict, w: int, h: int, out_png: str) -> None:
+    """Render one title to a full-frame transparent PNG (Pillow).
+
+    Used instead of ffmpeg's drawtext, which isn't in every ffmpeg build — Pillow
+    + ffmpeg ``overlay`` is portable. White text, dark stroke for legibility.
+    """
+    from PIL import Image, ImageDraw
+
+    from editor_cli.render import title_style
+
+    style = title_style.resolve(layout["style"])
+    text = layout["text"].upper() if style.uppercase else layout["text"]
+    size = max(18, round(h / 16))
+    font = _load_font(style, size)
+    stroke = max(2, size // 10)
+
+    img = Image.new("RGBA", (w, h), (0, 0, 0, 0))
+    draw = ImageDraw.Draw(img)
+    bbox = draw.textbbox((0, 0), text, font=font, stroke_width=stroke)
+    tw, th = bbox[2] - bbox[0], bbox[3] - bbox[1]
+    x = (w - tw) // 2 - bbox[0]
+    if layout["region"] == "top":
+        y = round(h * 0.08) - bbox[1]
+    elif layout["region"] == "center":
+        y = (h - th) // 2 - bbox[1]
+    else:
+        y = h - th - round(h * 0.10) - bbox[1]
+    draw.text(
+        (x, y), text, font=font, fill=(255, 255, 255, 255),
+        stroke_width=stroke, stroke_fill=(0, 0, 0, 210),
+    )
+    img.save(out_png)
+
+
+def apply_titles(
+    video: str, titles: list[dict], out: str, *, preview: bool = False
+) -> str:
+    """Burn the EDL's titles onto a rendered video as timed, fading overlays.
+
+    Called automatically by the edit pipeline (not a manual step) so titles the
+    editor decides on actually appear. Each title is a Pillow-rendered PNG
+    composited with ffmpeg ``overlay`` + an alpha fade. ffmpeg-only/Pillow, MIT;
+    for richer animated overlays the OpenMontage/HyperFrames bridge is used
+    instead. No drawable titles -> the video passes through unchanged.
+    """
+    w, h = _stream_dims(video)
+    layouts = [lay for t in (titles or []) if (lay := _title_layout(t)) is not None]
+    if not layouts:
+        _run(["ffmpeg", "-y", "-i", video, "-c", "copy", out])
+        return out
+
+    dur = duration_of(video)
+    tmp = tempfile.mkdtemp(prefix="editor_cli_titles_")
+    inputs = ["-i", video]
+    chains: list[str] = []
+    cur = "[0:v]"
+    for i, lay in enumerate(layouts, start=1):
+        png = os.path.join(tmp, f"title_{i:03d}.png")
+        _render_title_png(lay, w, h, png)
+        inputs += ["-loop", "1", "-t", f"{dur:.3f}", "-i", png]
+        s, e = lay["start"], lay["end"]
+        f = min(0.4, (e - s) / 3.0)
+        chains.append(
+            f"[{i}:v]format=rgba,"
+            f"fade=t=in:st={s:.6g}:d={f:.6g}:alpha=1,"
+            f"fade=t=out:st={e - f:.6g}:d={f:.6g}:alpha=1[t{i}]"
+        )
+        nv = f"[v{i}]"
+        chains.append(
+            f"{cur}[t{i}]overlay=0:0:enable='between(t,{s:.6g},{e:.6g})':format=auto{nv}"
+        )
+        cur = nv
+
+    venc = (
+        ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+        if preview
+        else ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+    )
+    _run([
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", ";".join(chains),
+        "-map", cur, "-map", "0:a?",
+        *venc, "-pix_fmt", "yuv420p", "-c:a", "copy", out,
+    ])
+    return out
+
+
+def overlay_onto(
+    base: str,
+    overlay: str,
+    out: str,
+    *,
+    x: str = "0",
+    y: str = "0",
+    start: float = 0.0,
+    preview: bool = False,
+) -> str:
+    """Composite an (alpha) overlay clip onto base footage.
+
+    The overlay is delayed to appear at ``start`` seconds (transparent before
+    that) and removed when it ends, with the base continuing underneath. Base
+    audio is preserved. This is how HyperFrames-rendered motion graphics (see
+    editor_cli.render.overlays) get laid onto footage — ffmpeg-only, MIT.
+    """
+    venc = (
+        ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
+        if preview
+        else ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+    )
+    # delay the overlay's own timeline to `start`; format=auto keeps alpha;
+    # eof_action=pass lets the base run on after the overlay ends.
+    fc = (
+        f"[1:v]setpts=PTS+{start:.6g}/TB[ov];"
+        f"[0:v][ov]overlay={x}:{y}:eof_action=pass:format=auto[v]"
+    )
+    _run([
+        "ffmpeg", "-y", "-i", base, "-i", overlay,
+        "-filter_complex", fc,
+        "-map", "[v]", "-map", "0:a?",
+        *venc, "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ac", "2", "-ar", "48000",
+        out,
+    ])
+    return out
