@@ -24,7 +24,7 @@ def test_two_contrasting_families_not_one():
     # The reference's device is the tension between a grotesque and a script —
     # they must be *different* families (the v4 one-family collapse was wrong).
     assert ts.DECLARATIVE.family != ts.ACCENT.family
-    assert ts.DECLARATIVE.family == "Helvetica Neue"
+    assert ts.DECLARATIVE.family == "Futura"
     assert ts.ACCENT.family == "Snell Roundhand"
 
 

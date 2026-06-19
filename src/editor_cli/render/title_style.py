@@ -4,9 +4,9 @@ Studying the reference reel frame-by-frame shows a deliberate two-typeface syste
 and the switch between them carries meaning:
 
 - **declarative** — the grounded, functional, "spoken" words ("POV: YOU LOCKED IN",
-  "i just", "push", "is hard"): a clean **condensed** neo-grotesque, **Helvetica Neue
-  Condensed Bold**, lightly tracked, case preserved (the hook reads as tracked caps).
-  The narrow proportions give it character — a wide regular grotesque reads generic.
+  "i just", "push", "is hard"): **Futura Condensed ExtraBold** — a geometric,
+  fashion/luxury display face, lightly tracked, case preserved (hook reads as caps).
+  Condensed + geometric gives it character; a wide regular grotesque reads generic.
 - **accent** — the emotional / aesthetic *payoff* words ("Heart", "Art", "Calm",
   "Run", "Laughed"): a formal English roundhand, **Snell Roundhand Bold**, larger,
   with the reference's faint white→ice-blue vertical sheen.
@@ -35,12 +35,12 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
-# Declarative: the reference sans is CONDENSED, not the wide default — a regular
-# Helvetica reads generic against the cinematic frames. Condensed Bold matches its
-# narrow proportions while staying clean (not the heavy/cartoonish Condensed Black).
-SANS_FAMILY = "Helvetica Neue"
-SANS_FILE = "/System/Library/Fonts/HelveticaNeue.ttc"
-SANS_INDEX = 4  # Condensed Bold
+# Declarative: Futura Condensed ExtraBold — geometric, confident, fashion/luxury
+# (a luxury-brand staple) and condensed so it reads distinctive against the
+# cinematic frames rather than like a generic default grotesque.
+SANS_FAMILY = "Futura"
+SANS_FILE = "/System/Library/Fonts/Supplemental/Futura.ttc"
+SANS_INDEX = 4  # Condensed ExtraBold
 
 # Accent: formal English roundhand. The reference sets it at a refined Bold weight
 # with a SOFT shadow (no hard outline) — Black reads too heavy / cartoonish.
@@ -69,7 +69,7 @@ class TitleStyle:
 
 DECLARATIVE = TitleStyle(
     emphasis="declarative", family=SANS_FAMILY, font_file=SANS_FILE,
-    face_index=SANS_INDEX, uppercase=False, tracking=0.07, gradient=False,
+    face_index=SANS_INDEX, uppercase=False, tracking=0.04, gradient=False,
 )
 ACCENT = TitleStyle(
     emphasis="accent", family=SCRIPT_FAMILY, font_file=SCRIPT_FILE,
