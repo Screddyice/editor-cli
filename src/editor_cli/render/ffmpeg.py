@@ -107,6 +107,27 @@ def _atempo_chain(factor: float) -> str:
     return ",".join(parts)
 
 
+def _out_duration(seg: Segment) -> float:
+    """Timeline duration of a segment after its own motion (speed) is applied."""
+    motion = seg.motion or {}
+    if motion.get("type") == "speed":
+        factor = float(motion.get("factor", 1.0))
+        if factor > 0:
+            return seg.duration / factor
+    return seg.duration
+
+
+def _crossfade(seg: Segment) -> tuple[float, str]:
+    """(duration_seconds, xfade_style) for a segment's crossfade INTO it from the
+    previous segment. (0.0, ...) means a hard cut. Style is any ffmpeg xfade
+    transition name (fade, wipeleft, slideup, dissolve, ...)."""
+    t = seg.transition or {}
+    c = t.get("crossfade")
+    if not c:
+        return 0.0, "fade"
+    return float(c), str(t.get("crossfade_style", "fade"))
+
+
 def _segment_filters(
     seg: Segment, tw: int, th: int, fps: float
 ) -> tuple[str, str | None]:
@@ -124,7 +145,7 @@ def _segment_filters(
         f"pad={tw}:{th}:(ow-iw)/2:(oh-ih)/2:color=black",
     ]
     aparts: list[str] = []
-    out_dur = seg.duration
+    out_dur = _out_duration(seg)
 
     motion = seg.motion or {}
     mtype = motion.get("type")
@@ -146,7 +167,6 @@ def _segment_filters(
             raise RenderError(f"speed factor must be > 0, got {factor}")
         vparts.append(f"setpts={1.0 / factor:.6g}*PTS")
         aparts.append(_atempo_chain(factor))
-        out_dur = seg.duration / factor
 
     transition = seg.transition or {}
     fin = transition.get("fade_in")
@@ -162,6 +182,64 @@ def _segment_filters(
     return ",".join(vparts), (",".join(aparts) if aparts else None)
 
 
+def _render_with_transitions(
+    edl: EDL, out: str, tw: int, th: int, fps: float, venc: list[str]
+) -> str:
+    """Single-graph render for edits that use crossfades. Segments overlap in
+    time, so they can't be encoded independently and concat-copied — the whole
+    timeline is built in one filter_complex (xfade for video, acrossfade for
+    audio; hard-cut boundaries use concat). Per-segment motion/fades still apply
+    to each input before it joins the graph.
+    """
+    segs = edl.segments
+    inputs: list[str] = []
+    for seg in segs:
+        inputs += ["-ss", str(seg.in_), "-t", str(seg.duration), "-i", seg.src]
+
+    chains: list[str] = []
+    for j, seg in enumerate(segs):
+        vf, af = _segment_filters(seg, tw, th, fps)
+        # normalize fps/format/SAR so xfade & concat see uniform inputs
+        chains.append(f"[{j}:v]{vf},fps={fps:.6g},format=yuv420p,setsar=1[v{j}]")
+        a = f"[{j}:a]" + (f"{af}," if af else "")
+        chains.append(a + f"aformat=channel_layouts=stereo:sample_rates=48000[a{j}]")
+
+    cur_v, cur_a = "[v0]", "[a0]"
+    timeline = _out_duration(segs[0])
+    prev_d = timeline
+    for j in range(1, len(segs)):
+        d = _out_duration(segs[j])
+        c, style = _crossfade(segs[j])
+        # clamp overlap so it never exceeds either clip (no negative offset)
+        c = min(c, prev_d * 0.9, d * 0.9) if c > 0 else 0.0
+        if c > 0:
+            offset = timeline - c
+            nv, na = f"[vx{j}]", f"[ax{j}]"
+            chains.append(
+                f"{cur_v}[v{j}]xfade=transition={style}:"
+                f"duration={c:.6g}:offset={offset:.6g}{nv}"
+            )
+            chains.append(f"{cur_a}[a{j}]acrossfade=d={c:.6g}{na}")
+            timeline += d - c
+        else:
+            nv, na = f"[vc{j}]", f"[ac{j}]"
+            chains.append(f"{cur_v}[v{j}]concat=n=2:v=1:a=0{nv}")
+            chains.append(f"{cur_a}[a{j}]concat=n=2:v=0:a=1{na}")
+            timeline += d
+        cur_v, cur_a = nv, na
+        prev_d = d
+
+    _run([
+        "ffmpeg", "-y", *inputs,
+        "-filter_complex", ";".join(chains),
+        "-map", cur_v, "-map", cur_a,
+        *venc, "-pix_fmt", "yuv420p",
+        "-c:a", "aac", "-ac", "2", "-ar", "48000",
+        out,
+    ])
+    return out
+
+
 def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
     fps = edl.fps
     tw, th = _target_resolution(edl, preview)
@@ -171,6 +249,10 @@ def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
         venc = ["-c:v", "libx264", "-preset", "ultrafast", "-crf", "28"]
     else:
         venc = ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
+    # Crossfades need overlapping segments -> single filter_complex graph.
+    # Hard-cut-only edits keep the proven encode-per-part + concat-copy path.
+    if any(_crossfade(s)[0] > 0 for s in edl.segments[1:]):
+        return _render_with_transitions(edl, out, tw, th, fps, venc)
     tmp = tempfile.mkdtemp(prefix="editor_cli_render_")
     parts: list[str] = []
     for i, seg in enumerate(edl.segments):

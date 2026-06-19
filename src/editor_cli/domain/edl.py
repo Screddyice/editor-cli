@@ -22,7 +22,11 @@ class Segment:
     #   {"type": "ken_burns", "zoom": 1.12, "direction": "in"|"out"}
     #   {"type": "speed", "factor": 2.0}  # >1 faster, <1 slow-mo
     motion: Optional[dict[str, Any]] = None
-    # Per-segment fades: {"fade_in": seconds, "fade_out": seconds} (either key optional)
+    # Per-segment transition dict, any of:
+    #   {"fade_in": seconds, "fade_out": seconds}     # fade to/from black
+    #   {"crossfade": seconds, "crossfade_style": "fade"|"wipeleft"|...}
+    #       # blend INTO this segment from the previous one (xfade); ignored on
+    #       # the first segment
     transition: Optional[dict[str, Any]] = None
 
     def __post_init__(self) -> None:
