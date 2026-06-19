@@ -6,6 +6,7 @@ fully unit-testable with fakes; ``build_deps`` constructs the real bindings.
 
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Optional
@@ -31,6 +32,8 @@ class Deps:
     sound_meta: Optional[Callable[[str], Any]] = None
     # (edl, durations) -> edl with each segment re-centered on its clip's best moment
     refine_shots: Optional[Callable[[EDL, dict], EDL]] = None
+    # (video, titles, out, preview) -> out with the EDL's titles burned in
+    apply_titles: Optional[Callable[..., str]] = None
 
 
 @dataclass
@@ -106,6 +109,12 @@ def run_edit(
         if deps.refine_shots is not None:
             edl = deps.refine_shots(edl, durations)
         deps.render_edl(edl, final_mp4, preview)
+        # Burn the editor's chosen titles onto the render automatically — driven
+        # by the EDL, not a manual overlay step.
+        if edl.titles and deps.apply_titles is not None:
+            titled = str(out_dir / "final_titled.mp4")
+            deps.apply_titles(final_mp4, edl.titles, titled, preview)
+            os.replace(titled, final_mp4)
         if fcpxml_path:
             Path(fcpxml_path).write_text(deps.edl_to_fcpxml(edl, "Editor CLI", durations))
         result = deps.evaluate(final_mp4, style, prompt)
@@ -151,6 +160,7 @@ def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:
         reason_edl=gemini.reason_edl,
         render_edl=ffmpeg.render_edl,
         edl_to_fcpxml=edl_to_fcpxml,
+        apply_titles=ffmpeg.apply_titles,
         evaluate=gemini.evaluate,
         discover=discover_genre,
         sound_meta=fetch_sound_meta,
