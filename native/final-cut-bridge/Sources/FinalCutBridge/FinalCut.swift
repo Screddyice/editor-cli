@@ -55,12 +55,39 @@ protocol FinalCutAutomationTransport {
   ) throws -> [String]
 }
 
+protocol TimedFinalCutAutomationTransport: FinalCutAutomationTransport {
+  func readLibraryNames(
+    processIdentifier: pid_t,
+    eventClass: AEEventClass,
+    eventID: AEEventID,
+    askUserIfNeeded: Bool,
+    sendOptions: NSAppleEventDescriptor.SendOptions,
+    timeout: TimeInterval
+  ) throws -> [String]
+}
+
 struct FinalCutAutomationReader<Transport: FinalCutAutomationTransport> {
   let transport: Transport
 
   func readLibraryNames(processIdentifier: pid_t) throws -> [String] {
+    try readLibraryNames(processIdentifier: processIdentifier, timeout: 5)
+  }
+
+  func readLibraryNames(
+    processIdentifier: pid_t, timeout: TimeInterval
+  ) throws -> [String] {
     let baseOptions = UInt(kAEWaitReply | kAENeverInteract)
     let noPromptOptions = baseOptions | UInt(kAEDoNotPromptForUserConsent)
+    if let timedTransport = transport as? any TimedFinalCutAutomationTransport {
+      return try timedTransport.readLibraryNames(
+        processIdentifier: processIdentifier,
+        eventClass: AEEventClass(kAECoreSuite),
+        eventID: AEEventID(kAEGetData),
+        askUserIfNeeded: false,
+        sendOptions: NSAppleEventDescriptor.SendOptions(rawValue: noPromptOptions),
+        timeout: timeout
+      )
+    }
     return try transport.readLibraryNames(
       processIdentifier: processIdentifier,
       eventClass: AEEventClass(kAECoreSuite),
@@ -110,10 +137,11 @@ struct FinalCutProbe<System: FinalCutSystem> {
     var blockingDialogs: [BlockingDialog] = []
     if let actionSystem = system as? any FinalCutActionSystem {
       if accessibilityTrusted && automationAuthorized {
-        activeProject = try? actionSystem.activeProject()
+        activeProject = try? actionSystem.activeProject(timeout: 5)
       }
       if accessibilityTrusted {
-        blockingDialogs = (try? actionSystem.blockingDialogs().map(sanitizedDialog)) ?? []
+        blockingDialogs =
+          (try? actionSystem.blockingDialogs(timeout: 5).map(sanitizedDialog)) ?? []
       }
     }
 
@@ -132,7 +160,7 @@ struct FinalCutProbe<System: FinalCutSystem> {
 
 final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
   let sessionRoot: String
-  private var expectedSheet: ExpectedSheet?
+  private var expectedSheet: FinalCutSheetStage?
 
   init(sessionRoot: String = "/tmp/editor-cli-probe") {
     self.sessionRoot = sessionRoot
@@ -165,62 +193,61 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
       .readLibraryNames(processIdentifier: processIdentifier)
   }
 
-  func activeProject() throws -> ProjectIdentity? {
-    let processIdentifier = try verifiedActionProcessIdentifier()
-    let status = try LiveFinalCutAX(processIdentifier: processIdentifier).activeTimelineStatus()
+  func activeProject(timeout: TimeInterval) throws -> ProjectIdentity? {
+    let deadline = try actionDeadline(timeout)
+    let processIdentifier = try verifiedActionProcessIdentifier(
+      timeout: remaining(before: deadline)
+    )
+    let status = try LiveFinalCutAX(processIdentifier: processIdentifier).activeTimelineStatus(
+      timeout: remaining(before: deadline)
+    )
     guard let status else {
       return nil
     }
-    let matches = try NativeFinalCutProjectReader().locations(processIdentifier: processIdentifier)
-      .filter { $0.project == status.project }
-    guard matches.count <= 1 else {
-      throw FinalCutActionError.ambiguousProject
-    }
-    guard let match = matches.first else {
-      return nil
-    }
-    return ProjectIdentity(
-      library: match.library,
-      event: match.event,
-      project: match.project,
-      duration: status.duration
+    let locations = try NativeFinalCutProjectReader().locations(
+      processIdentifier: processIdentifier, timeout: remaining(before: deadline)
     )
+    let identity = try ActiveProjectResolver.resolve(status: status, locations: locations)
+    _ = try remaining(before: deadline)
+    return identity
   }
 
-  func projectMatchCount(_ identity: ProjectIdentity) throws -> Int {
-    let processIdentifier = try verifiedActionProcessIdentifier()
-    return try NativeFinalCutProjectReader().locations(processIdentifier: processIdentifier)
-      .filter {
-        $0.library == identity.library && $0.event == identity.event
-          && $0.project == identity.project
-      }
-      .count
-  }
-
-  func activeProjectMatches(_ expected: ProjectIdentity) throws -> Bool {
-    let processIdentifier = try verifiedActionProcessIdentifier()
-    guard
-      let status = try LiveFinalCutAX(processIdentifier: processIdentifier)
-        .activeTimelineStatus(),
-      status.project == expected.project,
-      status.matches(duration: expected.duration)
-    else {
-      return false
+  func projectMatchCount(
+    _ identity: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Int {
+    let deadline = try actionDeadline(timeout)
+    let processIdentifier = try verifiedActionProcessIdentifier(
+      timeout: remaining(before: deadline)
+    )
+    let count = try NativeFinalCutProjectReader().locations(
+      processIdentifier: processIdentifier, timeout: remaining(before: deadline)
+    )
+    .filter {
+      $0.library == identity.library && $0.event == identity.event
+        && $0.project == identity.project
     }
-    let matches = try NativeFinalCutProjectReader().locations(processIdentifier: processIdentifier)
-      .filter {
-        $0.library == expected.library && $0.event == expected.event
-          && $0.project == expected.project
-      }
-    return matches.count == 1
+    .count
+    _ = try remaining(before: deadline)
+    return count
   }
 
-  func pressMenu(path: [String]) throws {
+  func activeProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool {
+    try activeProject(timeout: timeout) == expected
+  }
+
+  func pressMenu(path: [String], timeout: TimeInterval) throws {
     let allowed = [FinalCutMenu.duplicate, FinalCutMenu.exportXML, FinalCutMenu.share]
     guard allowed.contains(path) else {
       throw AccessibilityDiscoveryError.invalidPath
     }
-    try actionAccessibility(requireAutomation: true).pressMenu(path: path)
+    let deadline = try actionDeadline(timeout)
+    let accessibility = try actionAccessibility(
+      requireAutomation: true, timeout: remaining(before: deadline)
+    )
+    try accessibility.pressMenu(path: path, timeout: remaining(before: deadline))
+    _ = try remaining(before: deadline)
     if path == FinalCutMenu.duplicate {
       expectedSheet = .duplicate
     } else if path == FinalCutMenu.exportXML {
@@ -230,74 +257,101 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     }
   }
 
-  func setExpectedSheetValue(_ value: String) throws {
-    let button: String
-    switch expectedSheet {
-    case .duplicate:
-      button = "OK"
-    case .exportXML, .shareSave:
-      button = "Save"
-    default:
+  func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws {
+    guard let stage = expectedSheet else {
       throw AccessibilityDiscoveryError.noMatch
     }
-    try actionAccessibility(requireAutomation: true).setUniqueVisibleTextField(
-      value, expectedButton: button
+    switch stage {
+    case .duplicate, .exportXML, .shareSave:
+      break
+    case .shareSettings:
+      throw AccessibilityDiscoveryError.noMatch
+    }
+    let deadline = try actionDeadline(timeout)
+    let accessibility = try actionAccessibility(
+      requireAutomation: true, timeout: remaining(before: deadline)
     )
+    try accessibility.setUniqueVisibleTextField(
+      value, stage: stage, timeout: remaining(before: deadline)
+    )
+    _ = try remaining(before: deadline)
   }
 
-  func confirmExpectedSheet(_ confirmation: FinalCutConfirmation) throws {
-    let button: String
+  func confirmExpectedSheet(
+    _ confirmation: FinalCutConfirmation, timeout: TimeInterval
+  ) throws {
+    let stage: FinalCutSheetStage
     switch (expectedSheet, confirmation) {
     case (.duplicate, .duplicate):
-      button = "OK"
+      stage = .duplicate
       expectedSheet = nil
     case (.exportXML, .exportXML):
-      button = "Save"
+      stage = .exportXML
       expectedSheet = nil
     case (.shareSettings, .shareNext):
-      button = "Next..."
+      stage = .shareSettings
       expectedSheet = .shareSave
     case (.shareSave, .shareSave):
-      button = "Save"
+      stage = .shareSave
       expectedSheet = nil
     default:
       throw AccessibilityDiscoveryError.noMatch
     }
-    try actionAccessibility(requireAutomation: true).pressUniqueEnabledButton(title: button)
+    let deadline = try actionDeadline(timeout)
+    let accessibility = try actionAccessibility(
+      requireAutomation: true, timeout: remaining(before: deadline)
+    )
+    try accessibility.pressUniqueEnabledButton(
+      stage: stage, timeout: remaining(before: deadline)
+    )
+    _ = try remaining(before: deadline)
   }
 
-  func openDocument(_ path: String) throws {
-    _ = try verifiedActionProcessIdentifier()
+  func openDocument(_ path: String, timeout: TimeInterval) throws {
+    let deadline = try actionDeadline(timeout)
+    _ = try verifiedActionProcessIdentifier(timeout: remaining(before: deadline))
     guard NSWorkspace.shared.open(URL(fileURLWithPath: path)) else {
       throw FinalCutActionError.projectNotFound
     }
+    _ = try remaining(before: deadline)
   }
 
-  func selectProject(_ identity: ProjectIdentity) throws {
-    guard try projectMatchCount(identity) == 1 else {
+  func selectProject(_ identity: ProjectIdentity, timeout: TimeInterval) throws {
+    let deadline = try actionDeadline(timeout)
+    guard try projectMatchCount(identity, timeout: remaining(before: deadline)) == 1 else {
       throw FinalCutActionError.projectNotFound
     }
-    try actionAccessibility(requireAutomation: true).pressProjectRow(identity)
+    let accessibility = try actionAccessibility(
+      requireAutomation: true, timeout: remaining(before: deadline)
+    )
+    try accessibility.pressProjectRow(identity, timeout: remaining(before: deadline))
+    _ = try remaining(before: deadline)
   }
 
-  func fileSnapshot(_ path: String) throws -> ActionFileSnapshot? {
+  func fileSnapshot(_ path: String, timeout: TimeInterval) throws -> ActionFileSnapshot? {
+    let deadline = try actionDeadline(timeout)
     guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
       let fileType = attributes[.type] as? FileAttributeType,
       fileType == .typeRegular,
       let size = attributes[.size] as? NSNumber,
       let modified = attributes[.modificationDate] as? Date
     else {
+      _ = try remaining(before: deadline)
       return nil
     }
+    _ = try remaining(before: deadline)
     return ActionFileSnapshot(size: size.uint64Value, modifiedAt: modified.timeIntervalSince1970)
   }
 
   func identityOfExport(
-    at path: String, expected: ProjectIdentity
+    at path: String, expected: ProjectIdentity, timeout: TimeInterval
   ) throws -> ProjectIdentity? {
+    let deadline = try actionDeadline(timeout)
     guard let exported = try FCPXMLProjectReader().read(path: path) else {
+      _ = try remaining(before: deadline)
       return nil
     }
+    _ = try remaining(before: deadline)
     return ProjectIdentity(
       library: expected.library,
       event: expected.event,
@@ -306,20 +360,34 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     )
   }
 
-  func backgroundTasksComplete() throws -> Bool {
-    try actionAccessibility(requireAutomation: true).backgroundTasksComplete()
+  func backgroundTasksComplete(timeout: TimeInterval) throws -> Bool {
+    let deadline = try actionDeadline(timeout)
+    let accessibility = try actionAccessibility(
+      requireAutomation: true, timeout: remaining(before: deadline)
+    )
+    let complete = try accessibility.backgroundTasksComplete(
+      timeout: remaining(before: deadline)
+    )
+    _ = try remaining(before: deadline)
+    return complete
   }
 
-  func blockingDialogs() throws -> [BlockingDialog] {
-    try actionAccessibility(requireAutomation: false).blockingDialogs()
+  func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog] {
+    let deadline = try actionDeadline(timeout)
+    let accessibility = try actionAccessibility(
+      requireAutomation: false, timeout: remaining(before: deadline)
+    )
+    let dialogs = try accessibility.blockingDialogs(timeout: remaining(before: deadline))
+    _ = try remaining(before: deadline)
+    return dialogs
   }
 
   func monotonicTime() -> TimeInterval {
     ProcessInfo.processInfo.systemUptime
   }
 
-  func waitForPoll() {
-    Thread.sleep(forTimeInterval: 0.1)
+  func waitForPoll(maximum: TimeInterval) {
+    Thread.sleep(forTimeInterval: min(0.1, maximum))
   }
 
   private func verifiedProcessIdentifier() throws -> pid_t {
@@ -336,40 +404,87 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     return application.processIdentifier
   }
 
-  private func verifiedActionProcessIdentifier() throws -> pid_t {
+  private func verifiedActionProcessIdentifier(timeout: TimeInterval) throws -> pid_t {
+    let deadline = try actionDeadline(timeout)
     let processIdentifier = try verifiedProcessIdentifier()
     guard isAccessibilityTrusted() else {
       throw FinalCutActionError.accessibilityNotTrusted
     }
-    _ = try readLibraryNames(processIdentifier: processIdentifier)
+    _ = try FinalCutAutomationReader(transport: NativeFinalCutAutomationTransport())
+      .readLibraryNames(
+        processIdentifier: processIdentifier,
+        timeout: min(5, remaining(before: deadline))
+      )
+    _ = try remaining(before: deadline)
     return processIdentifier
   }
 
-  private func actionAccessibility(requireAutomation: Bool) throws -> LiveFinalCutAX {
+  private func actionAccessibility(
+    requireAutomation: Bool, timeout: TimeInterval
+  ) throws -> LiveFinalCutAX {
+    let deadline = try actionDeadline(timeout)
     let processIdentifier =
-      try requireAutomation ? verifiedActionProcessIdentifier() : verifiedProcessIdentifier()
+      try requireAutomation
+      ? verifiedActionProcessIdentifier(timeout: remaining(before: deadline))
+      : verifiedProcessIdentifier()
     guard isAccessibilityTrusted() else {
       throw FinalCutActionError.accessibilityNotTrusted
     }
+    _ = try remaining(before: deadline)
     return LiveFinalCutAX(processIdentifier: processIdentifier)
+  }
+
+  private func actionDeadline(_ timeout: TimeInterval) throws -> TimeInterval {
+    guard timeout.isFinite, timeout > 0 else {
+      throw FinalCutActionError.invalidTimeout
+    }
+    let now = monotonicTime()
+    let deadline = now + timeout
+    guard deadline.isFinite, deadline > now else {
+      throw FinalCutActionError.invalidTimeout
+    }
+    return deadline
+  }
+
+  private func remaining(before deadline: TimeInterval) throws -> TimeInterval {
+    let remaining = deadline - monotonicTime()
+    guard remaining > 0 else {
+      throw FinalCutActionError.timedOut
+    }
+    return remaining
   }
 }
 
-private enum ExpectedSheet {
-  case duplicate
-  case exportXML
-  case shareSettings
-  case shareSave
-}
-
-private struct FinalCutProjectLocation: Equatable {
+struct FinalCutProjectLocation: Equatable {
   let library: String
   let event: String
   let project: String
 }
 
+enum ActiveProjectResolver {
+  static func resolve(
+    status: LiveTimelineStatus, locations: [FinalCutProjectLocation]
+  ) throws -> ProjectIdentity? {
+    let namedLocations = locations.filter { $0.project == status.project }
+    guard namedLocations.count <= 1 else {
+      throw FinalCutActionError.ambiguousProject
+    }
+    guard let location = namedLocations.first, let duration = status.duration else {
+      return nil
+    }
+    return ProjectIdentity(
+      library: location.library,
+      event: location.event,
+      project: location.project,
+      duration: duration
+    )
+  }
+}
+
 private struct NativeFinalCutProjectReader {
-  func locations(processIdentifier: pid_t) throws -> [FinalCutProjectLocation] {
+  func locations(
+    processIdentifier: pid_t, timeout: TimeInterval
+  ) throws -> [FinalCutProjectLocation] {
     guard
       NSRunningApplication(processIdentifier: processIdentifier)?.bundleIdentifier
         == FinalCutProbe<LiveFinalCutSystem>.bundleIdentifier
@@ -412,7 +527,9 @@ private struct NativeFinalCutProjectReader {
       result.store(.success(output))
       completion.signal()
     }
-    guard completion.wait(timeout: .now() + 5) == .success else {
+    guard timeout.isFinite, timeout > 0,
+      completion.wait(timeout: .now() + min(5, timeout)) == .success
+    else {
       throw FinalCutAutomationError.eventFailed
     }
     let output = try result.load().get()
@@ -449,7 +566,7 @@ private final class FinalCutProjectReadResult: @unchecked Sendable {
   }
 }
 
-struct NativeFinalCutAutomationTransport: FinalCutAutomationTransport {
+struct NativeFinalCutAutomationTransport: TimedFinalCutAutomationTransport {
   func readLibraryNames(
     processIdentifier: pid_t,
     eventClass: AEEventClass,
@@ -457,6 +574,27 @@ struct NativeFinalCutAutomationTransport: FinalCutAutomationTransport {
     askUserIfNeeded: Bool,
     sendOptions: NSAppleEventDescriptor.SendOptions
   ) throws -> [String] {
+    try readLibraryNames(
+      processIdentifier: processIdentifier,
+      eventClass: eventClass,
+      eventID: eventID,
+      askUserIfNeeded: askUserIfNeeded,
+      sendOptions: sendOptions,
+      timeout: 5
+    )
+  }
+
+  func readLibraryNames(
+    processIdentifier: pid_t,
+    eventClass: AEEventClass,
+    eventID: AEEventID,
+    askUserIfNeeded: Bool,
+    sendOptions: NSAppleEventDescriptor.SendOptions,
+    timeout: TimeInterval
+  ) throws -> [String] {
+    guard timeout.isFinite, timeout > 0 else {
+      throw FinalCutAutomationError.eventFailed
+    }
     let target = NSAppleEventDescriptor(processIdentifier: processIdentifier)
     guard let targetDescription = target.aeDesc else {
       throw FinalCutAutomationError.invalidTarget
@@ -483,7 +621,7 @@ struct NativeFinalCutAutomationTransport: FinalCutAutomationTransport {
 
     let reply: NSAppleEventDescriptor
     do {
-      reply = try event.sendEvent(options: sendOptions, timeout: 5)
+      reply = try event.sendEvent(options: sendOptions, timeout: min(5, timeout))
     } catch {
       throw FinalCutAutomationError.eventFailed
     }

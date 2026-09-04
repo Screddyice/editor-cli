@@ -255,24 +255,28 @@ struct SessionPath {
 protocol FinalCutActionSystem {
   var sessionRoot: String { get }
 
-  func activeProject() throws -> ProjectIdentity?
-  func projectMatchCount(_ identity: ProjectIdentity) throws -> Int
-  func pressMenu(path: [String]) throws
-  func setExpectedSheetValue(_ value: String) throws
-  func confirmExpectedSheet(_ confirmation: FinalCutConfirmation) throws
-  func openDocument(_ path: String) throws
-  func selectProject(_ identity: ProjectIdentity) throws
-  func fileSnapshot(_ path: String) throws -> ActionFileSnapshot?
-  func identityOfExport(at path: String, expected: ProjectIdentity) throws -> ProjectIdentity?
-  func backgroundTasksComplete() throws -> Bool
-  func blockingDialogs() throws -> [BlockingDialog]
+  func activeProject(timeout: TimeInterval) throws -> ProjectIdentity?
+  func projectMatchCount(_ identity: ProjectIdentity, timeout: TimeInterval) throws -> Int
+  func pressMenu(path: [String], timeout: TimeInterval) throws
+  func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws
+  func confirmExpectedSheet(_ confirmation: FinalCutConfirmation, timeout: TimeInterval) throws
+  func openDocument(_ path: String, timeout: TimeInterval) throws
+  func selectProject(_ identity: ProjectIdentity, timeout: TimeInterval) throws
+  func fileSnapshot(_ path: String, timeout: TimeInterval) throws -> ActionFileSnapshot?
+  func identityOfExport(
+    at path: String, expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> ProjectIdentity?
+  func backgroundTasksComplete(timeout: TimeInterval) throws -> Bool
+  func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog]
   func monotonicTime() -> TimeInterval
-  func waitForPoll()
+  func waitForPoll(maximum: TimeInterval)
 }
 
 extension FinalCutActionSystem {
-  func activeProjectMatches(_ expected: ProjectIdentity) throws -> Bool {
-    try activeProject() == expected
+  func activeProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool {
+    try activeProject(timeout: timeout) == expected
   }
 }
 
@@ -288,17 +292,33 @@ struct Actions<System: FinalCutActionSystem> {
     name: String,
     timeout: TimeInterval
   ) throws -> ProjectIdentity {
+    let deadline = try makeDeadline(timeout)
     try validate(expected)
     try requireValidName(name)
-    try requireTimeout(timeout)
-    try requireActive(expected)
-
-    try system.pressMenu(path: FinalCutMenu.duplicate)
-    try system.setExpectedSheetValue(name)
-    try system.confirmExpectedSheet(.duplicate)
+    guard name != expected.project else {
+      throw FinalCutActionError.invalidName
+    }
+    try requireActive(expected, deadline: deadline)
 
     let duplicated = expected.withProject(name)
-    return try pollForProject(duplicated, timeout: timeout)
+    let existing = try perform(deadline: deadline) {
+      try system.projectMatchCount(duplicated, timeout: $0)
+    }
+    guard existing == 0 else {
+      throw FinalCutActionError.ambiguousProject
+    }
+
+    try perform(deadline: deadline) {
+      try system.pressMenu(path: FinalCutMenu.duplicate, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.setExpectedSheetValue(name, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.confirmExpectedSheet(.duplicate, timeout: $0)
+    }
+
+    return try pollForProject(duplicated, deadline: deadline)
   }
 
   func exportXML(
@@ -306,29 +326,47 @@ struct Actions<System: FinalCutActionSystem> {
     output: String,
     timeout: TimeInterval
   ) throws -> ExportReceipt {
+    let deadline = try makeDeadline(timeout)
     try validate(expected)
-    try requireTimeout(timeout)
-    try requireActive(expected)
+    try requireActive(expected, deadline: deadline)
     let destination = try SessionPath(root: system.sessionRoot).output(output)
     guard URL(fileURLWithPath: destination).pathExtension.lowercased() == "fcpxml" else {
       throw FinalCutActionError.invalidPath
     }
-    guard try system.fileSnapshot(destination) == nil else {
+    guard
+      try perform(
+        deadline: deadline,
+        {
+          try system.fileSnapshot(destination, timeout: $0)
+        }) == nil
+    else {
       throw FinalCutActionError.outputAlreadyExists
     }
 
-    try system.pressMenu(path: FinalCutMenu.exportXML)
-    try system.setExpectedSheetValue(destination)
-    try system.confirmExpectedSheet(.exportXML)
+    try perform(deadline: deadline) {
+      try system.pressMenu(path: FinalCutMenu.exportXML, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.setExpectedSheetValue(destination, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.confirmExpectedSheet(.exportXML, timeout: $0)
+    }
 
-    let receipt: ExportReceipt = try pollForStableFile(destination, timeout: timeout) {
-      guard let exported = try system.identityOfExport(at: destination, expected: expected) else {
+    let receipt: ExportReceipt = try pollForStableFile(destination, deadline: deadline) {
+      guard
+        let exported = try perform(
+          deadline: deadline,
+          {
+            try system.identityOfExport(at: destination, expected: expected, timeout: $0)
+          })
+      else {
         return nil
       }
       guard exported == expected else {
         throw FinalCutActionError.identityMismatch
       }
-      try requireActive(expected)
+      try requireActive(expected, deadline: deadline)
       return ExportReceipt(kind: "fcpxml_export", project: expected, output: destination)
     }
     return receipt
@@ -339,25 +377,29 @@ struct Actions<System: FinalCutActionSystem> {
     source: String,
     timeout: TimeInterval
   ) throws -> ProjectIdentity {
+    let deadline = try makeDeadline(timeout)
     try validate(expected)
-    try requireTimeout(timeout)
     let candidate = try SessionPath(root: system.sessionRoot).input(source)
     let suffix = URL(fileURLWithPath: candidate).pathExtension.lowercased()
     guard suffix == "fcpxml" || suffix == "fcpxmld" else {
       throw FinalCutActionError.invalidPath
     }
 
-    try system.openDocument(candidate)
-    return try pollForProject(expected, timeout: timeout, rejectMissingMedia: true)
+    try perform(deadline: deadline) {
+      try system.openDocument(candidate, timeout: $0)
+    }
+    return try pollForProject(expected, deadline: deadline, rejectMissingMedia: true)
   }
 
   func openProject(
     expected: ProjectIdentity,
     timeout: TimeInterval
   ) throws -> ProjectIdentity {
+    let deadline = try makeDeadline(timeout)
     try validate(expected)
-    try requireTimeout(timeout)
-    let count = try system.projectMatchCount(expected)
+    let count = try perform(deadline: deadline) {
+      try system.projectMatchCount(expected, timeout: $0)
+    }
     guard count > 0 else {
       throw FinalCutActionError.projectNotFound
     }
@@ -365,10 +407,16 @@ struct Actions<System: FinalCutActionSystem> {
       throw FinalCutActionError.ambiguousProject
     }
 
-    try system.selectProject(expected)
-    return try poll(timeout: timeout) {
-      try rejectBlockingDialogs()
-      return try system.activeProjectMatches(expected) ? expected : nil
+    try perform(deadline: deadline) {
+      try system.selectProject(expected, timeout: $0)
+    }
+    return try poll(deadline: deadline) {
+      try rejectBlockingDialogs(deadline: deadline)
+      return try perform(
+        deadline: deadline,
+        {
+          try system.activeProjectMatches(expected, timeout: $0)
+        }) ? expected : nil
     }
   }
 
@@ -377,72 +425,100 @@ struct Actions<System: FinalCutActionSystem> {
     output: String,
     timeout: TimeInterval
   ) throws -> ShareReceipt {
+    let deadline = try makeDeadline(timeout)
     try validate(expected)
-    try requireTimeout(timeout)
-    try requireActive(expected)
+    try requireActive(expected, deadline: deadline)
     let destination = try SessionPath(root: system.sessionRoot).output(output)
     let suffix = URL(fileURLWithPath: destination).pathExtension.lowercased()
     guard suffix == "mov" || suffix == "mp4" else {
       throw FinalCutActionError.invalidPath
     }
-    guard try system.fileSnapshot(destination) == nil else {
+    guard
+      try perform(
+        deadline: deadline,
+        {
+          try system.fileSnapshot(destination, timeout: $0)
+        }) == nil
+    else {
       throw FinalCutActionError.outputAlreadyExists
     }
 
-    try system.pressMenu(path: FinalCutMenu.share)
-    try system.confirmExpectedSheet(.shareNext)
-    try system.setExpectedSheetValue(destination)
-    try system.confirmExpectedSheet(.shareSave)
+    try perform(deadline: deadline) {
+      try system.pressMenu(path: FinalCutMenu.share, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.confirmExpectedSheet(.shareNext, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.setExpectedSheetValue(destination, timeout: $0)
+    }
+    try perform(deadline: deadline) {
+      try system.confirmExpectedSheet(.shareSave, timeout: $0)
+    }
 
     var previous: ActionFileSnapshot?
-    return try poll(timeout: timeout) {
-      try rejectBlockingDialogs()
-      let current = try system.fileSnapshot(destination)
-      let backgroundComplete = try system.backgroundTasksComplete()
+    return try poll(deadline: deadline) {
+      try rejectBlockingDialogs(deadline: deadline)
+      let current = try perform(deadline: deadline) {
+        try system.fileSnapshot(destination, timeout: $0)
+      }
+      let backgroundComplete = try perform(deadline: deadline) {
+        try system.backgroundTasksComplete(timeout: $0)
+      }
       defer { previous = current }
       guard let current, current.size > 0, current == previous, backgroundComplete else {
         return nil
       }
-      try requireActive(expected)
+      try requireActive(expected, deadline: deadline)
       return ShareReceipt(kind: "final_cut_share", project: expected, output: destination)
     }
   }
 
   func inspectDialogs() throws -> [BlockingDialog] {
-    try system.blockingDialogs().map(sanitizedDialog)
+    try system.blockingDialogs(timeout: 5).map(sanitizedDialog)
   }
 
   private func pollForProject(
     _ expected: ProjectIdentity,
-    timeout: TimeInterval,
+    deadline: TimeInterval,
     rejectMissingMedia: Bool = false
   ) throws -> ProjectIdentity {
-    try poll(timeout: timeout) {
-      let dialogs = try inspectDialogs()
+    try poll(deadline: deadline) {
+      let dialogs = try perform(deadline: deadline) {
+        try system.blockingDialogs(timeout: $0).map(sanitizedDialog)
+      }
       if rejectMissingMedia, dialogs.contains(where: isMissingMediaDialog) {
         throw FinalCutActionError.blockingDialog
       }
       guard dialogs.isEmpty else {
         throw FinalCutActionError.blockingDialog
       }
-      let count = try system.projectMatchCount(expected)
+      let count = try perform(deadline: deadline) {
+        try system.projectMatchCount(expected, timeout: $0)
+      }
       guard count < 2 else {
         throw FinalCutActionError.ambiguousProject
       }
       guard count == 1 else { return nil }
-      return try system.activeProjectMatches(expected) ? expected : nil
+      return try perform(
+        deadline: deadline,
+        {
+          try system.activeProjectMatches(expected, timeout: $0)
+        }) ? expected : nil
     }
   }
 
   private func pollForStableFile<Result>(
     _ path: String,
-    timeout: TimeInterval,
+    deadline: TimeInterval,
     completion: () throws -> Result?
   ) throws -> Result {
     var previous: ActionFileSnapshot?
-    return try poll(timeout: timeout) {
-      try rejectBlockingDialogs()
-      let current = try system.fileSnapshot(path)
+    return try poll(deadline: deadline) {
+      try rejectBlockingDialogs(deadline: deadline)
+      let current = try perform(deadline: deadline) {
+        try system.fileSnapshot(path, timeout: $0)
+      }
       defer { previous = current }
       guard let current, current.size > 0, current == previous else {
         return nil
@@ -452,31 +528,70 @@ struct Actions<System: FinalCutActionSystem> {
   }
 
   private func poll<Result>(
-    timeout: TimeInterval,
+    deadline: TimeInterval,
     condition: () throws -> Result?
   ) throws -> Result {
-    let deadline = system.monotonicTime() + timeout
     while true {
+      _ = try remaining(before: deadline)
       if let result = try condition() {
+        _ = try remaining(before: deadline)
         return result
       }
-      guard system.monotonicTime() < deadline else {
-        throw FinalCutActionError.timedOut
-      }
-      system.waitForPoll()
+      system.waitForPoll(maximum: try remaining(before: deadline))
+      _ = try remaining(before: deadline)
     }
   }
 
-  private func requireActive(_ expected: ProjectIdentity) throws {
-    guard try system.activeProjectMatches(expected) else {
+  private func requireActive(_ expected: ProjectIdentity, deadline: TimeInterval) throws {
+    guard
+      try perform(
+        deadline: deadline,
+        {
+          try system.activeProjectMatches(expected, timeout: $0)
+        })
+    else {
       throw FinalCutActionError.identityMismatch
     }
   }
 
-  private func rejectBlockingDialogs() throws {
-    guard try system.blockingDialogs().isEmpty else {
+  private func rejectBlockingDialogs(deadline: TimeInterval) throws {
+    guard
+      try perform(
+        deadline: deadline,
+        {
+          try system.blockingDialogs(timeout: $0)
+        }
+      ).isEmpty
+    else {
       throw FinalCutActionError.blockingDialog
     }
+  }
+
+  private func makeDeadline(_ timeout: TimeInterval) throws -> TimeInterval {
+    try requireTimeout(timeout)
+    let now = system.monotonicTime()
+    let deadline = now + timeout
+    guard deadline.isFinite, deadline > now else {
+      throw FinalCutActionError.invalidTimeout
+    }
+    return deadline
+  }
+
+  private func remaining(before deadline: TimeInterval) throws -> TimeInterval {
+    let remaining = deadline - system.monotonicTime()
+    guard remaining > 0 else {
+      throw FinalCutActionError.timedOut
+    }
+    return remaining
+  }
+
+  private func perform<Result>(
+    deadline: TimeInterval,
+    _ operation: (TimeInterval) throws -> Result
+  ) throws -> Result {
+    let result = try operation(remaining(before: deadline))
+    _ = try remaining(before: deadline)
+    return result
   }
 
   private func validate(_ identity: ProjectIdentity) throws {
@@ -513,43 +628,230 @@ struct Actions<System: FinalCutActionSystem> {
 
 }
 
+struct FinalCutTimebase: Equatable, Hashable {
+  let frameDurationNumerator: Int
+  let frameDurationDenominator: Int
+  let frameLimit: Int
+  let dropFramesPerMinute: Int?
+
+  init?(formatDescription: String) {
+    let pattern = #"(?:^|\s)(23\.98|24|25|29\.97|30|50|59\.94|60)[pi](?:\s|$)"#
+    guard let expression = try? NSRegularExpression(pattern: pattern),
+      let match = expression.firstMatch(
+        in: formatDescription,
+        range: NSRange(formatDescription.startIndex..., in: formatDescription)
+      ),
+      let range = Range(match.range(at: 1), in: formatDescription)
+    else {
+      return nil
+    }
+    switch String(formatDescription[range]) {
+    case "23.98":
+      self.init(
+        frameDurationNumerator: 1_001, frameDurationDenominator: 24_000,
+        frameLimit: 24, dropFramesPerMinute: nil
+      )
+    case "24":
+      self.init(
+        frameDurationNumerator: 1, frameDurationDenominator: 24,
+        frameLimit: 24, dropFramesPerMinute: nil
+      )
+    case "25":
+      self.init(
+        frameDurationNumerator: 1, frameDurationDenominator: 25,
+        frameLimit: 25, dropFramesPerMinute: nil
+      )
+    case "29.97":
+      self.init(
+        frameDurationNumerator: 1_001, frameDurationDenominator: 30_000,
+        frameLimit: 30, dropFramesPerMinute: 2
+      )
+    case "30":
+      self.init(
+        frameDurationNumerator: 1, frameDurationDenominator: 30,
+        frameLimit: 30, dropFramesPerMinute: nil
+      )
+    case "50":
+      self.init(
+        frameDurationNumerator: 1, frameDurationDenominator: 50,
+        frameLimit: 50, dropFramesPerMinute: nil
+      )
+    case "59.94":
+      self.init(
+        frameDurationNumerator: 1_001, frameDurationDenominator: 60_000,
+        frameLimit: 60, dropFramesPerMinute: 4
+      )
+    case "60":
+      self.init(
+        frameDurationNumerator: 1, frameDurationDenominator: 60,
+        frameLimit: 60, dropFramesPerMinute: nil
+      )
+    default:
+      return nil
+    }
+  }
+
+  private init(
+    frameDurationNumerator: Int, frameDurationDenominator: Int, frameLimit: Int,
+    dropFramesPerMinute: Int?
+  ) {
+    self.frameDurationNumerator = frameDurationNumerator
+    self.frameDurationDenominator = frameDurationDenominator
+    self.frameLimit = frameLimit
+    self.dropFramesPerMinute = dropFramesPerMinute
+  }
+
+  var frameDuration: TimeInterval {
+    TimeInterval(frameDurationNumerator) / TimeInterval(frameDurationDenominator)
+  }
+}
+
 struct LiveTimelineStatus: Equatable {
   let project: String
   let hours: Int
   let minutes: Int
   let seconds: Int
   let frames: Int
+  let timebase: FinalCutTimebase
+  let dropFrame: Bool
 
-  var duration: TimeInterval {
-    TimeInterval(hours * 3_600 + minutes * 60 + seconds) + TimeInterval(frames) / 25
+  init(
+    project: String, hours: Int, minutes: Int, seconds: Int, frames: Int,
+    timebase: FinalCutTimebase, dropFrame: Bool = false
+  ) {
+    self.project = project
+    self.hours = hours
+    self.minutes = minutes
+    self.seconds = seconds
+    self.frames = frames
+    self.timebase = timebase
+    self.dropFrame = dropFrame
+  }
+
+  var duration: TimeInterval? {
+    guard hours >= 0, (0...59).contains(minutes), (0...59).contains(seconds),
+      (0..<timebase.frameLimit).contains(frames)
+    else {
+      return nil
+    }
+    let nominalFrames =
+      (hours * 3_600 + minutes * 60 + seconds) * timebase.frameLimit + frames
+    let droppedFrames: Int
+    if dropFrame {
+      guard let dropFramesPerMinute = timebase.dropFramesPerMinute else {
+        return nil
+      }
+      let totalMinutes = hours * 60 + minutes
+      droppedFrames = dropFramesPerMinute * (totalMinutes - totalMinutes / 10)
+    } else {
+      droppedFrames = 0
+    }
+    return TimeInterval(nominalFrames - droppedFrames) * timebase.frameDuration
   }
 
   func matches(duration expected: TimeInterval) -> Bool {
-    guard hours >= 0, (0...59).contains(minutes), (0...59).contains(seconds), frames >= 0,
-      expected.isFinite
-    else {
+    guard let duration, expected.isFinite else {
       return false
     }
-    let wholeSeconds = TimeInterval(hours * 3_600 + minutes * 60 + seconds)
-    let formats: [(duration: TimeInterval, frameLimit: Int)] = [
-      (1 / 24, 24),
-      (1 / 25, 25),
-      (1 / 30, 30),
-      (1 / 50, 50),
-      (1 / 60, 60),
-      (1_001 / 24_000, 24),
-      (1_001 / 30_000, 30),
-      (1_001 / 60_000, 60),
-    ]
-    return formats.contains { format in
-      frames < format.frameLimit
-        && abs(wholeSeconds + TimeInterval(frames) * format.duration - expected) < 0.000_001
+    return abs(duration - expected) < 0.000_001
+  }
+}
+
+enum FinalCutAXIdentifier {
+  static let backgroundTaskProgress = "FFBackgroundTasksProgressIndicator"
+  static let shareWindowBackground = "PE Share WindowBackground"
+}
+
+enum FinalCutSheetStage {
+  case duplicate
+  case exportXML
+  case shareSettings
+  case shareSave
+
+  var buttonTitle: String {
+    switch self {
+    case .duplicate: "OK"
+    case .exportXML, .shareSave: "Save"
+    case .shareSettings: "Next..."
     }
   }
 }
 
+protocol FinalCutAXElement: AnyObject {
+  func accessibilityValue(for attribute: String) -> Any?
+  func accessibilityElement(for attribute: String) -> (any FinalCutAXElement)?
+  func accessibilityChildren() throws -> [any FinalCutAXElement]
+  func accessibilityPress() -> Bool
+  func accessibilitySetString(_ value: String, for attribute: String) -> Bool
+  func accessibilityAttributeIsSettable(_ attribute: String) -> Bool
+  func isSameElement(as other: any FinalCutAXElement) -> Bool
+}
+
+private struct ParsedTimelineTimecode {
+  let hours: Int
+  let minutes: Int
+  let seconds: Int
+  let frames: Int
+  let dropFrame: Bool
+}
+
+private final class NativeFinalCutAXElement: FinalCutAXElement {
+  let element: AXUIElement
+
+  init(_ element: AXUIElement) {
+    self.element = element
+  }
+
+  func accessibilityValue(for attribute: String) -> Any? {
+    var value: CFTypeRef?
+    guard AXUIElementCopyAttributeValue(element, attribute as CFString, &value) == .success else {
+      return nil
+    }
+    return value
+  }
+
+  func accessibilityElement(for attribute: String) -> (any FinalCutAXElement)? {
+    guard let value = accessibilityValue(for: attribute) as CFTypeRef?,
+      CFGetTypeID(value) == AXUIElementGetTypeID()
+    else {
+      return nil
+    }
+    let element = unsafeBitCast(value, to: AXUIElement.self)
+    return NativeFinalCutAXElement(element)
+  }
+
+  func accessibilityChildren() throws -> [any FinalCutAXElement] {
+    guard let value = accessibilityValue(for: kAXChildrenAttribute as String) else {
+      return []
+    }
+    guard let children = value as? [AXUIElement] else {
+      throw AccessibilityDiscoveryError.attributeUnavailable
+    }
+    return children.map(NativeFinalCutAXElement.init)
+  }
+
+  func accessibilityPress() -> Bool {
+    AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
+  }
+
+  func accessibilitySetString(_ value: String, for attribute: String) -> Bool {
+    AXUIElementSetAttributeValue(element, attribute as CFString, value as CFString) == .success
+  }
+
+  func accessibilityAttributeIsSettable(_ attribute: String) -> Bool {
+    var settable = DarwinBoolean(false)
+    return AXUIElementIsAttributeSettable(element, attribute as CFString, &settable) == .success
+      && settable.boolValue
+  }
+
+  func isSameElement(as other: any FinalCutAXElement) -> Bool {
+    guard let other = other as? NativeFinalCutAXElement else { return false }
+    return CFEqual(element, other.element)
+  }
+}
+
 final class LiveFinalCutAX {
-  private let root: AXUIElement
+  private let root: any FinalCutAXElement
   private let limits = AccessibilityTraversalLimits.default
   private let allowedRoles: Set<String> = [
     kAXApplicationRole as String,
@@ -579,100 +881,90 @@ final class LiveFinalCutAX {
   ]
 
   init(processIdentifier: pid_t) {
-    root = AXUIElementCreateApplication(processIdentifier)
+    root = NativeFinalCutAXElement(AXUIElementCreateApplication(processIdentifier))
   }
 
-  func pressMenu(path: [String]) throws {
+  init(root: any FinalCutAXElement) {
+    self.root = root
+  }
+
+  func pressMenu(path: [String], timeout: TimeInterval) throws {
     guard !path.isEmpty else {
       throw AccessibilityDiscoveryError.invalidPath
     }
-    var roots = [root]
+    let deadline = try deadline(after: timeout)
+    let menuBar = try pollUntil(deadline: deadline) {
+      try uniqueElement(
+        titled: nil, role: kAXMenuBarRole as String, beneath: root
+      )
+    }
+    var container = menuBar
     for (index, title) in path.enumerated() {
-      var visited = 0
-      var matches: [AXUIElement] = []
-      for searchRoot in roots {
-        try collectFirstMatches(
-          titled: title,
-          beneath: searchRoot,
-          depth: 0,
-          visited: &visited,
-          matches: &matches
-        )
+      let expectedRole = index == 0 ? kAXMenuBarItemRole as String : kAXMenuItemRole as String
+      let item = try pollUntil(deadline: deadline) {
+        try uniqueElement(titled: title, role: expectedRole, beneath: container)
       }
-      matches = unique(matches)
-      guard matches.count == 1, let match = matches.first else {
-        throw matches.isEmpty
-          ? AccessibilityDiscoveryError.noMatch : AccessibilityDiscoveryError.ambiguousMatch
-      }
-      let expectedRole = index == path.count - 1 ? kAXMenuItemRole as String : nil
-      if let expectedRole, try role(of: match) != expectedRole {
-        throw AccessibilityDiscoveryError.unexpectedFinalRole
-      }
-      try press(match)
-      Thread.sleep(forTimeInterval: 0.05)
-      roots = try children(of: match)
-      guard roots.count <= limits.maxChildrenPerNode else {
-        throw AccessibilityDiscoveryError.traversalLimitExceeded
+      try press(item)
+      try requireTime(before: deadline)
+      guard index < path.count - 1 else { continue }
+      container = try pollUntil(deadline: deadline) {
+        try uniqueElement(titled: nil, role: kAXMenuRole as String, beneath: item)
       }
     }
   }
 
-  func setUniqueVisibleTextField(_ value: String, expectedButton: String) throws {
-    let containers = try expectedContainers(buttonTitle: expectedButton)
-    guard containers.count == 1, let container = containers.first else {
-      throw containers.isEmpty
-        ? AccessibilityDiscoveryError.noMatch : AccessibilityDiscoveryError.ambiguousMatch
-    }
+  func setUniqueVisibleTextField(
+    _ value: String, stage: FinalCutSheetStage, timeout: TimeInterval
+  ) throws {
+    let deadline = try deadline(after: timeout)
+    let container = try expectedContainer(stage: stage, deadline: deadline)
     let fields = try allElements(beneath: container).filter {
       try role(of: $0) == kAXTextFieldRole as String && isVisible($0) && isEnabled($0)
     }
-    let uniqueFields = unique(fields)
-    guard uniqueFields.count == 1, let field = uniqueFields.first else {
-      throw uniqueFields.isEmpty
-        ? AccessibilityDiscoveryError.noMatch : AccessibilityDiscoveryError.ambiguousMatch
+    guard let field = try exactlyOne(fields) else {
+      throw AccessibilityDiscoveryError.noMatch
     }
-
-    var settable = DarwinBoolean(false)
-    let settableStatus = AXUIElementIsAttributeSettable(
-      field, kAXValueAttribute as CFString, &settable
-    )
-    guard settableStatus == .success, settable.boolValue else {
-      throw AccessibilityDiscoveryError.attributeUnavailable
-    }
-    guard
-      AXUIElementSetAttributeValue(
-        field, kAXValueAttribute as CFString, value as CFString
-      ) == .success
+    guard field.accessibilityAttributeIsSettable(kAXValueAttribute as String),
+      field.accessibilitySetString(value, for: kAXValueAttribute as String)
     else {
       throw AccessibilityDiscoveryError.attributeUnavailable
     }
+    try requireTime(before: deadline)
   }
 
-  func pressUniqueEnabledButton(title: String) throws {
-    let containers = try expectedContainers(buttonTitle: title)
-    let buttons = try containers.flatMap { container in
-      try allElements(beneath: container).filter {
-        try role(of: $0) == kAXButtonRole as String && self.title(of: $0) == title
-          && isVisible($0) && isEnabled($0)
-      }
+  func pressUniqueEnabledButton(
+    stage: FinalCutSheetStage, timeout: TimeInterval
+  ) throws {
+    let deadline = try deadline(after: timeout)
+    let container = try expectedContainer(stage: stage, deadline: deadline)
+    let buttons = try allElements(beneath: container).filter {
+      try role(of: $0) == kAXButtonRole as String && title(of: $0) == stage.buttonTitle
+        && isVisible($0) && isEnabled($0)
     }
-    let uniqueButtons = unique(buttons)
-    guard uniqueButtons.count == 1, let button = uniqueButtons.first else {
-      throw uniqueButtons.isEmpty
-        ? AccessibilityDiscoveryError.noMatch : AccessibilityDiscoveryError.ambiguousMatch
+    guard let button = try exactlyOne(buttons) else {
+      throw AccessibilityDiscoveryError.noMatch
     }
     try press(button)
-    Thread.sleep(forTimeInterval: 0.05)
+    try requireTime(before: deadline)
   }
 
-  func pressProjectRow(_ identity: ProjectIdentity) throws {
-    try pressUniqueEnabledRow(title: identity.library)
-    try pressUniqueEnabledRow(title: identity.event)
-    try pressUniqueEnabledRow(title: identity.project)
+  func pressProjectRow(_ identity: ProjectIdentity, timeout: TimeInterval) throws {
+    let deadline = try deadline(after: timeout)
+    var parent = root
+    for title in [identity.library, identity.event, identity.project] {
+      let row = try pollUntil(deadline: deadline) {
+        try uniqueElement(titled: title, role: kAXRowRole as String, beneath: parent)
+      }
+      try press(row)
+      try requireTime(before: deadline)
+      parent = row
+    }
   }
 
-  func activeTimelineStatus() throws -> LiveTimelineStatus? {
+  func activeTimelineStatus(timeout: TimeInterval) throws -> LiveTimelineStatus? {
+    let deadline = try deadline(after: timeout)
     let elements = try allElements(beneath: root)
+    try requireTime(before: deadline)
     let titleCandidates = elements.compactMap { element -> String? in
       guard
         let identifier = stringAttribute(kAXIdentifierAttribute as String, of: element)?
@@ -685,54 +977,66 @@ final class LiveFinalCutAX {
       }
       return title(of: element)
     }
-    let durationCandidates = elements.compactMap { element -> String? in
+    let durationCandidates = elements.compactMap { element -> ParsedTimelineTimecode? in
       guard
         let identifier = stringAttribute(kAXIdentifierAttribute as String, of: element)?
           .lowercased(),
         identifier.contains("duration"),
-        isVisible(element)
+        isVisible(element),
+        let value = title(of: element)
       else {
         return nil
       }
-      return title(of: element)
+      return parseTimecode(value)
     }
-    let uniqueTitles = Array(Set(titleCandidates.filter { !$0.isEmpty }))
-    let durations = durationCandidates.compactMap(parseTimecode)
-    guard !uniqueTitles.isEmpty || !durations.isEmpty else {
+    let timebases = Set(
+      elements.compactMap { element -> FinalCutTimebase? in
+        guard isVisible(element), let value = title(of: element) else { return nil }
+        return FinalCutTimebase(formatDescription: value)
+      })
+    let uniqueTitles = Set(titleCandidates.filter { !$0.isEmpty })
+    guard !uniqueTitles.isEmpty || !durationCandidates.isEmpty || !timebases.isEmpty else {
       return nil
     }
-    guard uniqueTitles.count == 1, durations.count == 1,
-      let project = uniqueTitles.first, let timecode = durations.first
+    guard uniqueTitles.count == 1, durationCandidates.count == 1, timebases.count == 1,
+      let project = uniqueTitles.first, let timecode = durationCandidates.first,
+      let timebase = timebases.first
     else {
       throw AccessibilityDiscoveryError.ambiguousMatch
     }
     return LiveTimelineStatus(
       project: project,
-      hours: timecode[0],
-      minutes: timecode[1],
-      seconds: timecode[2],
-      frames: timecode[3]
+      hours: timecode.hours,
+      minutes: timecode.minutes,
+      seconds: timecode.seconds,
+      frames: timecode.frames,
+      timebase: timebase,
+      dropFrame: timecode.dropFrame
     )
   }
 
-  func backgroundTasksComplete() throws -> Bool {
+  func backgroundTasksComplete(timeout: TimeInterval) throws -> Bool {
+    let deadline = try deadline(after: timeout)
     let indicators = try allElements(beneath: root).filter {
-      try role(of: $0) == kAXProgressIndicatorRole as String && isVisible($0)
+      try role(of: $0) == kAXProgressIndicatorRole as String
+        && stringAttribute(kAXIdentifierAttribute as String, of: $0)
+          == FinalCutAXIdentifier.backgroundTaskProgress
+        && isVisible($0)
     }
-    for indicator in indicators {
-      guard let value = numberAttribute(kAXValueAttribute as String, of: indicator) else {
-        return false
-      }
-      let maximum = numberAttribute(kAXMaxValueAttribute as String, of: indicator) ?? 1
-      if value < maximum {
-        return false
-      }
+    try requireTime(before: deadline)
+    guard indicators.count == 1, let indicator = indicators.first,
+      let value = numberAttribute(kAXValueAttribute as String, of: indicator),
+      let maximum = numberAttribute(kAXMaxValueAttribute as String, of: indicator),
+      value.isFinite, maximum.isFinite, maximum > 0
+    else {
+      return false
     }
-    return true
+    return value == maximum
   }
 
-  func blockingDialogs() throws -> [BlockingDialog] {
-    try allElements(beneath: root).compactMap { element in
+  func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog] {
+    let deadline = try deadline(after: timeout)
+    let dialogs = try allElements(beneath: root).compactMap { element -> BlockingDialog? in
       let elementRole = try role(of: element)
       guard elementRole == kAXSheetRole as String || elementRole == "AXDialog",
         isVisible(element)
@@ -741,61 +1045,130 @@ final class LiveFinalCutAX {
       }
       return BlockingDialog(role: elementRole, title: title(of: element) ?? "")
     }
+    try requireTime(before: deadline)
+    return dialogs
   }
 
-  private func expectedContainers(buttonTitle: String) throws -> [AXUIElement] {
-    let containers = try allElements(beneath: root).filter {
-      let elementRole = try role(of: $0)
-      return
-        (elementRole == kAXSheetRole as String || elementRole == "AXDialog"
-        || elementRole == kAXWindowRole as String) && isVisible($0)
+  private func expectedContainer(
+    stage: FinalCutSheetStage, deadline: TimeInterval
+  ) throws -> any FinalCutAXElement {
+    try pollUntil(deadline: deadline) {
+      let parent: any FinalCutAXElement
+      switch stage {
+      case .duplicate, .exportXML:
+        parent = try focusedMainWindow()
+      case .shareSettings:
+        parent = root
+      case .shareSave:
+        parent = try shareSettingsWindow()
+      }
+
+      let candidates: [any FinalCutAXElement]
+      switch stage {
+      case .duplicate:
+        candidates = try directChildren(of: parent).filter {
+          try role(of: $0) == kAXSheetRole as String
+            && stringAttribute(kAXTitleAttribute as String, of: $0) == "Duplicate Project As"
+            && isVisible($0)
+        }
+      case .exportXML:
+        candidates = try directChildren(of: parent).filter {
+          try role(of: $0) == kAXSheetRole as String
+            && stringAttribute(kAXTitleAttribute as String, of: $0) == "Export XML"
+            && isVisible($0)
+        }
+      case .shareSettings:
+        candidates = [try shareSettingsWindow()]
+      case .shareSave:
+        candidates = try directChildren(of: parent).filter {
+          try role(of: $0) == kAXSheetRole as String && isVisible($0)
+        }
+      }
+      guard let container = try exactlyOne(candidates) else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      let hasExpectedButton = try allElements(beneath: container).contains {
+        try role(of: $0) == kAXButtonRole as String && title(of: $0) == stage.buttonTitle
+          && isVisible($0) && isEnabled($0)
+      }
+      guard hasExpectedButton else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      return container
     }
-    let matching = try containers.filter { container in
-      try allElements(beneath: container).contains { element in
-        (try? role(of: element)) == kAXButtonRole as String && title(of: element) == buttonTitle
-          && isVisible(element) && isEnabled(element)
+  }
+
+  private func focusedMainWindow() throws -> any FinalCutAXElement {
+    guard let window = root.accessibilityElement(for: kAXFocusedWindowAttribute as String),
+      try role(of: window) == kAXWindowRole as String,
+      stringAttribute(kAXSubroleAttribute as String, of: window) == kAXStandardWindowSubrole
+        as String,
+      boolAttribute(kAXModalAttribute as String, of: window) != true,
+      isVisible(window)
+    else {
+      throw AccessibilityDiscoveryError.noMatch
+    }
+    return window
+  }
+
+  private func shareSettingsWindow() throws -> any FinalCutAXElement {
+    let candidates = try directChildren(of: root).filter { element in
+      guard try role(of: element) == kAXWindowRole as String,
+        stringAttribute(kAXSubroleAttribute as String, of: element) == "AXDialog",
+        boolAttribute(kAXModalAttribute as String, of: element) == true,
+        isVisible(element)
+      else {
+        return false
+      }
+      return try allElements(beneath: element).contains {
+        stringAttribute(kAXDescriptionAttribute as String, of: $0)
+          == FinalCutAXIdentifier.shareWindowBackground
       }
     }
-    let sheets = matching.filter {
-      (try? role(of: $0)) == kAXSheetRole as String || (try? role(of: $0)) == "AXDialog"
+    guard let window = try exactlyOne(candidates) else {
+      throw AccessibilityDiscoveryError.noMatch
     }
-    return unique(sheets.isEmpty ? matching : sheets)
+    return window
   }
 
-  private func pressUniqueEnabledRow(title: String) throws {
-    let rows = try allElements(beneath: root).filter {
-      try role(of: $0) == kAXRowRole as String && self.title(of: $0) == title
-        && isVisible($0) && isEnabled($0)
+  private func uniqueElement(
+    titled title: String?, role expectedRole: String, beneath parent: any FinalCutAXElement
+  ) throws -> any FinalCutAXElement {
+    let titled = try allElements(beneath: parent).filter {
+      title == nil || self.title(of: $0) == title
     }
-    let uniqueRows = unique(rows)
-    guard uniqueRows.count == 1, let row = uniqueRows.first else {
-      throw uniqueRows.isEmpty
-        ? AccessibilityDiscoveryError.noMatch : AccessibilityDiscoveryError.ambiguousMatch
+    let matches = try titled.filter {
+      try role(of: $0) == expectedRole && isVisible($0) && isEnabled($0)
     }
-    try press(row)
-    Thread.sleep(forTimeInterval: 0.05)
+    if matches.isEmpty, title != nil, !titled.isEmpty {
+      throw AccessibilityDiscoveryError.unexpectedFinalRole
+    }
+    guard let match = try exactlyOne(matches) else {
+      throw AccessibilityDiscoveryError.noMatch
+    }
+    return match
   }
 
-  private func press(_ element: AXUIElement) throws {
-    guard isVisible(element), isEnabled(element),
-      AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
-    else {
+  private func press(_ element: any FinalCutAXElement) throws {
+    guard isVisible(element), isEnabled(element), element.accessibilityPress() else {
       throw AccessibilityDiscoveryError.attributeUnavailable
     }
   }
 
-  private func allElements(beneath element: AXUIElement) throws -> [AXUIElement] {
-    var elements: [AXUIElement] = []
+  private func allElements(
+    beneath element: any FinalCutAXElement
+  ) throws -> [any FinalCutAXElement] {
+    var elements: [any FinalCutAXElement] = []
     var visited = 0
     try collect(element, depth: 0, visited: &visited, elements: &elements)
     return elements
   }
 
   private func collect(
-    _ element: AXUIElement,
+    _ element: any FinalCutAXElement,
     depth: Int,
     visited: inout Int,
-    elements: inout [AXUIElement]
+    elements: inout [any FinalCutAXElement]
   ) throws {
     guard depth <= limits.maxDepth else {
       throw AccessibilityDiscoveryError.traversalLimitExceeded
@@ -809,60 +1182,30 @@ final class LiveFinalCutAX {
       return
     }
     elements.append(element)
-    let elementChildren = try children(of: element)
-    guard elementChildren.count <= limits.maxChildrenPerNode else {
-      throw AccessibilityDiscoveryError.traversalLimitExceeded
-    }
-    for child in elementChildren {
+    let children = try directChildren(of: element)
+    for child in children {
       try collect(child, depth: depth + 1, visited: &visited, elements: &elements)
     }
   }
 
-  private func collectFirstMatches(
-    titled title: String,
-    beneath element: AXUIElement,
-    depth: Int,
-    visited: inout Int,
-    matches: inout [AXUIElement]
-  ) throws {
-    guard depth <= limits.maxDepth else {
+  private func directChildren(
+    of element: any FinalCutAXElement
+  ) throws -> [any FinalCutAXElement] {
+    let children = try element.accessibilityChildren()
+    guard children.count <= limits.maxChildrenPerNode else {
       throw AccessibilityDiscoveryError.traversalLimitExceeded
     }
-    visited += 1
-    guard visited <= limits.maxVisitedNodes else {
-      throw AccessibilityDiscoveryError.traversalLimitExceeded
-    }
-    let elementRole = try role(of: element)
-    guard allowedRoles.contains(elementRole) else {
-      return
-    }
-    if self.title(of: element) == title {
-      matches.append(element)
-      return
-    }
-    let elementChildren = try children(of: element)
-    guard elementChildren.count <= limits.maxChildrenPerNode else {
-      throw AccessibilityDiscoveryError.traversalLimitExceeded
-    }
-    for child in elementChildren {
-      try collectFirstMatches(
-        titled: title,
-        beneath: child,
-        depth: depth + 1,
-        visited: &visited,
-        matches: &matches
-      )
-    }
+    return children
   }
 
-  private func role(of element: AXUIElement) throws -> String {
+  private func role(of element: any FinalCutAXElement) throws -> String {
     guard let value = stringAttribute(kAXRoleAttribute as String, of: element) else {
       throw AccessibilityDiscoveryError.attributeUnavailable
     }
     return value
   }
 
-  private func title(of element: AXUIElement) -> String? {
+  private func title(of element: any FinalCutAXElement) -> String? {
     for attributeName in [
       kAXTitleAttribute as String,
       kAXValueAttribute as String,
@@ -875,68 +1218,101 @@ final class LiveFinalCutAX {
     return nil
   }
 
-  private func children(of element: AXUIElement) throws -> [AXUIElement] {
-    guard let value = attribute(kAXChildrenAttribute as String, of: element) else {
-      return []
-    }
-    guard let children = value as? [AXUIElement] else {
-      throw AccessibilityDiscoveryError.attributeUnavailable
-    }
-    return children
-  }
-
-  private func isEnabled(_ element: AXUIElement) -> Bool {
+  private func isEnabled(_ element: any FinalCutAXElement) -> Bool {
     boolAttribute(kAXEnabledAttribute as String, of: element) ?? false
   }
 
-  private func isVisible(_ element: AXUIElement) -> Bool {
+  private func isVisible(_ element: any FinalCutAXElement) -> Bool {
     !(boolAttribute(kAXHiddenAttribute as String, of: element) ?? false)
   }
 
-  private func stringAttribute(_ name: String, of element: AXUIElement) -> String? {
-    attribute(name, of: element) as? String
+  private func stringAttribute(
+    _ name: String, of element: any FinalCutAXElement
+  ) -> String? {
+    element.accessibilityValue(for: name) as? String
   }
 
-  private func boolAttribute(_ name: String, of element: AXUIElement) -> Bool? {
-    (attribute(name, of: element) as? NSNumber)?.boolValue
+  private func boolAttribute(
+    _ name: String, of element: any FinalCutAXElement
+  ) -> Bool? {
+    (element.accessibilityValue(for: name) as? NSNumber)?.boolValue
   }
 
-  private func numberAttribute(_ name: String, of element: AXUIElement) -> Double? {
-    (attribute(name, of: element) as? NSNumber)?.doubleValue
+  private func numberAttribute(
+    _ name: String, of element: any FinalCutAXElement
+  ) -> Double? {
+    (element.accessibilityValue(for: name) as? NSNumber)?.doubleValue
   }
 
-  private func attribute(_ name: String, of element: AXUIElement) -> CFTypeRef? {
-    var value: CFTypeRef?
-    guard AXUIElementCopyAttributeValue(element, name as CFString, &value) == .success else {
-      return nil
-    }
-    return value
-  }
-
-  private func unique(_ elements: [AXUIElement]) -> [AXUIElement] {
-    elements.reduce(into: []) { result, element in
-      if !result.contains(where: { CFEqual($0, element) }) {
+  private func exactlyOne(
+    _ elements: [any FinalCutAXElement]
+  ) throws -> (any FinalCutAXElement)? {
+    let unique = elements.reduce(into: [any FinalCutAXElement]()) { result, element in
+      if !result.contains(where: { $0.isSameElement(as: element) }) {
         result.append(element)
+      }
+    }
+    guard unique.count <= 1 else {
+      throw AccessibilityDiscoveryError.ambiguousMatch
+    }
+    return unique.first
+  }
+
+  private func deadline(after timeout: TimeInterval) throws -> TimeInterval {
+    guard timeout.isFinite, timeout > 0 else {
+      throw FinalCutActionError.invalidTimeout
+    }
+    return ProcessInfo.processInfo.systemUptime + timeout
+  }
+
+  private func requireTime(before deadline: TimeInterval) throws {
+    guard ProcessInfo.processInfo.systemUptime < deadline else {
+      throw FinalCutActionError.timedOut
+    }
+  }
+
+  private func pollUntil<Result>(
+    deadline: TimeInterval, operation: () throws -> Result
+  ) throws -> Result {
+    while true {
+      try requireTime(before: deadline)
+      do {
+        let result = try operation()
+        try requireTime(before: deadline)
+        return result
+      } catch AccessibilityDiscoveryError.noMatch {
+        let remaining = deadline - ProcessInfo.processInfo.systemUptime
+        guard remaining > 0 else {
+          throw FinalCutActionError.timedOut
+        }
+        Thread.sleep(forTimeInterval: min(0.05, remaining))
       }
     }
   }
 
-  private func parseTimecode(_ value: String) -> [Int]? {
-    let pattern = #"(\d+):(\d+):(\d+)[:;](\d+)"#
+  private func parseTimecode(_ value: String) -> ParsedTimelineTimecode? {
+    let pattern = #"(\d+):(\d+):(\d+)([:;])(\d+)"#
     guard let expression = try? NSRegularExpression(pattern: pattern),
       let match = expression.matches(
         in: value, range: NSRange(value.startIndex..., in: value)
       ).last,
-      match.numberOfRanges == 5
+      match.numberOfRanges == 6
     else {
       return nil
     }
-    let numbers = (1..<5).compactMap { index -> Int? in
+    let numbers = [1, 2, 3, 5].compactMap { index -> Int? in
       guard let range = Range(match.range(at: index), in: value) else { return nil }
       return Int(value[range])
     }
     guard numbers.count == 4 else { return nil }
-    return numbers
+    guard let separatorRange = Range(match.range(at: 4), in: value) else { return nil }
+    return ParsedTimelineTimecode(
+      hours: numbers[0],
+      minutes: numbers[1],
+      seconds: numbers[2],
+      frames: numbers[3],
+      dropFrame: value[separatorRange] == ";"
+    )
   }
 }
 
