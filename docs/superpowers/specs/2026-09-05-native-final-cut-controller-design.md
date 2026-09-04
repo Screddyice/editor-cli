@@ -1,7 +1,7 @@
 # Native Final Cut Controller Design
 
 **Date:** 2026-09-05
-**Status:** Approved direction; awaiting written-spec review
+**Status:** Approved for implementation
 **Owner:** Shawn
 **Target:** Final Cut Pro Creator Studio 12.3 on Apple silicon
 
