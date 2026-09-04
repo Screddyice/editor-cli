@@ -8,5 +8,23 @@
     "reaction_insert_visible",
     "preview_rendered",
     "preview_watched"
-  ]
+  ],
+  "passing_result": {
+    "source_unchanged": true,
+    "gap_removed": true,
+    "title_visible": true,
+    "transition_visible": true,
+    "reaction_insert_visible": true,
+    "preview_rendered": true,
+    "preview_watched": true
+  },
+  "failure_cases": {
+    "wrong_offsets": {"title_offset": "5s"},
+    "wrong_durations": {"reaction_duration": "2s"},
+    "wrong_transition_placement": {"transition_offset": "4s"},
+    "wrong_transition_type": {"transition_name": "Fade"},
+    "missing_changed_range_frames": {"timestamps": [1.5, 3.0]},
+    "unreadable_preview": {"preview_bytes": "not a video", "technical": false},
+    "stale_preview": {"preview_sha256": "0"}
+  }
 }

@@ -35,6 +35,13 @@ EXPECTED_CHECKS = (
     "preview_watched",
 )
 
+_FRAME_TARGETS = {
+    "title_visible": (1.5, "title"),
+    "transition_visible": (3.0, "transition"),
+    "reaction_insert_visible": (5.5, "reaction"),
+}
+_FRAME_TOLERANCE_SECONDS = 0.25
+
 
 @dataclass(frozen=True)
 class CanaryWorkspace:
@@ -263,6 +270,163 @@ def validate_fcpxml(path: Path) -> None:
         raise RuntimeError("Canary FCPXML must have an eight-second timeline")
 
 
+def _fcpxml_seconds(value: str | None) -> float | None:
+    if not isinstance(value, str) or not value.endswith("s"):
+        return None
+    try:
+        numerator = value[:-1]
+        if "/" in numerator:
+            top, bottom = numerator.split("/", 1)
+            return int(top) / int(bottom)
+        return float(numerator)
+    except (TypeError, ValueError, ZeroDivisionError):
+        return None
+
+
+def _has_exact_clip(
+    tree: ET.ElementTree,
+    *,
+    ref: str,
+    offset_seconds: float,
+    duration_seconds: float,
+    lane: int,
+) -> bool:
+    for clip in tree.getroot().findall(".//asset-clip"):
+        if clip.get("ref") != ref or clip.get("lane") != str(lane):
+            continue
+        if (
+            _fcpxml_seconds(clip.get("offset")) == offset_seconds
+            and _fcpxml_seconds(clip.get("duration")) == duration_seconds
+        ):
+            return True
+    return False
+
+
+def _is_cross_dissolve(transition: ET.Element) -> bool:
+    name = " ".join(transition.get("name", "").lower().replace("-", " ").split())
+    return name == "cross dissolve"
+
+
+def candidate_structure_checks(path: Path) -> dict[str, bool]:
+    """Verify the candidate carries the exact canary edits in its FCPXML."""
+    validate_fcpxml(path)
+    tree = ET.parse(path)
+    transitions = tree.getroot().findall(".//transition")
+    return {
+        "gap_removed": not tree.getroot().findall(".//gap"),
+        "title_visible": _has_exact_clip(
+            tree, ref="r4", offset_seconds=1.0, duration_seconds=2.0, lane=1
+        ),
+        "transition_visible": any(
+            _is_cross_dissolve(transition)
+            and _fcpxml_seconds(transition.get("offset")) == 3.0
+            and _fcpxml_seconds(transition.get("duration")) == 0.5
+            for transition in transitions
+        ),
+        "reaction_insert_visible": _has_exact_clip(
+            tree, ref="r5", offset_seconds=5.0, duration_seconds=1.0, lane=2
+        ),
+    }
+
+
+def _file_sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for block in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _frame_matches(path: Path, kind: str) -> bool:
+    try:
+        with Image.open(path) as image:
+            pixels = list(image.convert("RGB").resize((64, 36)).get_flattened_data())
+    except (OSError, ValueError):
+        return False
+    total = len(pixels)
+    if not total:
+        return False
+    if kind == "title":
+        dark = sum(max(red, green, blue) <= 64 for red, green, blue in pixels)
+        bright = sum(min(red, green, blue) >= 200 for red, green, blue in pixels)
+        return dark / total >= 0.8 and bright > 0
+    if kind == "transition":
+        blended = sum(
+            red >= 50 and blue >= 50 and green <= 80 for red, green, blue in pixels
+        )
+        return blended / total >= 0.8
+    if kind == "reaction":
+        purple = sum(
+            red >= 75 and blue >= 75 and green <= 100 for red, green, blue in pixels
+        )
+        return purple / total >= 0.8
+    raise ValueError(f"Unsupported canary frame kind: {kind}")
+
+
+def rendered_watch_checks(
+    manifest_path: Path,
+    preview_path: Path,
+    changed_ranges: tuple[tuple[float, float], ...],
+) -> dict[str, bool]:
+    """Require fresh preview evidence and visible canary content at fixed times."""
+    checks = {
+        "title_visible": False,
+        "transition_visible": False,
+        "reaction_insert_visible": False,
+        "preview_watched": False,
+        "preview_fresh": False,
+    }
+    try:
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        preview = manifest["preview"]
+        frames = manifest["frames"]
+        evidence_ranges = tuple(
+            (float(start), float(end)) for start, end in manifest["changed_ranges"]
+        )
+        if (
+            not isinstance(preview, dict)
+            or not isinstance(frames, list)
+            or evidence_ranges != changed_ranges
+        ):
+            return checks
+        resolved_preview = preview_path.resolve()
+        if (
+            Path(preview["path"]).resolve() != resolved_preview
+            or not resolved_preview.is_file()
+            or preview["sha256"] != _file_sha256(resolved_preview)
+        ):
+            return checks
+        checks["preview_fresh"] = True
+        evidence_root = manifest_path.parent.resolve()
+        normalized_frames = []
+        for frame in frames:
+            path = Path(frame["path"]).resolve()
+            timestamp = float(frame["timestamp_seconds"])
+            if not path.is_file() or not path.is_relative_to(evidence_root):
+                return checks
+            normalized_frames.append((timestamp, path))
+    except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError):
+        return checks
+
+    range_coverage = all(
+        any(start <= timestamp <= end for timestamp, _path in normalized_frames)
+        for start, end in changed_ranges
+    )
+    for name, (target, kind) in _FRAME_TARGETS.items():
+        matching = [
+            path
+            for timestamp, path in normalized_frames
+            if abs(timestamp - target) <= _FRAME_TOLERANCE_SECONDS
+        ]
+        checks[name] = bool(matching) and any(
+            _frame_matches(path, kind) for path in matching
+        )
+    checks["preview_watched"] = range_coverage and all(
+        checks[name] for name in _FRAME_TARGETS
+    )
+    return checks
+
+
 def canary_program() -> EditProgram:
     return EditProgram(
         operations=(
@@ -325,7 +489,11 @@ async def _wait_for_project(control, library: Path, timeout_seconds: int = 60) -
 
 
 async def run_canary(
-    workspace: CanaryWorkspace, report: dict, source_xml: Path, program: EditProgram
+    workspace: CanaryWorkspace,
+    report: dict,
+    source_xml: Path,
+    program: EditProgram,
+    source_hashes: str,
 ) -> dict:
     config = ControllerConfig(session_root=workspace.sessions)
     services = build_services(config, doctor=lambda: report)
@@ -358,13 +526,7 @@ async def run_canary(
         )
     )
     candidate = await controller.apply(session.id, program)
-    validate_fcpxml(candidate.fcpxml_path)
-    tree = ET.parse(candidate.fcpxml_path)
-    connected_refs = {
-        item.get("ref")
-        for item in tree.getroot().findall(".//asset-clip")
-        if item.get("lane")
-    }
+    structure = candidate_structure_checks(candidate.fcpxml_path)
     technical = inspect_preview(
         candidate.preview_path,
         expected_duration=8.0,
@@ -374,15 +536,19 @@ async def run_canary(
         expected_audio=True,
     )
     manifest = json.loads(candidate.evidence_manifest.read_text(encoding="utf-8"))
+    watched = rendered_watch_checks(
+        candidate.evidence_manifest, candidate.preview_path, program.changed_ranges
+    )
     required = {
-        "source_unchanged": False,
-        "gap_removed": not tree.getroot().findall(".//gap"),
-        "title_visible": "r4" in connected_refs and technical.verified,
-        "transition_visible": bool(tree.getroot().findall(".//transition"))
-        and technical.verified,
-        "reaction_insert_visible": "r5" in connected_refs and technical.verified,
-        "preview_rendered": technical.verified,
-        "preview_watched": bool(manifest.get("frames")),
+        "source_unchanged": source_hashes == hash_tree(workspace.source),
+        "gap_removed": structure["gap_removed"],
+        "title_visible": structure["title_visible"] and watched["title_visible"],
+        "transition_visible": structure["transition_visible"]
+        and watched["transition_visible"],
+        "reaction_insert_visible": structure["reaction_insert_visible"]
+        and watched["reaction_insert_visible"],
+        "preview_rendered": technical.verified and watched["preview_fresh"],
+        "preview_watched": watched["preview_watched"],
     }
     result = await controller.record_review(
         session.id,
@@ -426,6 +592,7 @@ def _all_required_checks_pass(result: dict) -> bool:
     return (
         isinstance(checks, dict)
         and set(checks) == set(EXPECTED_CHECKS)
+        and all(type(value) is bool for value in checks.values())
         and all(checks.values())
         and result.get("state") == "ready"
     )
@@ -447,9 +614,8 @@ def main(argv: list[str] | None = None) -> int:
         program = canary_program()
         program.validate_for({"duration_seconds": 8.0})
         source_hashes = hash_tree(workspace.source)
-        result = asyncio.run(run_canary(workspace, report, source_xml, program))
-        result["required_checks"]["source_unchanged"] = source_hashes == hash_tree(
-            workspace.source
+        result = asyncio.run(
+            run_canary(workspace, report, source_xml, program, source_hashes)
         )
         result["source_tree_sha256"] = source_hashes
         write_result(workspace.result_path, result)
