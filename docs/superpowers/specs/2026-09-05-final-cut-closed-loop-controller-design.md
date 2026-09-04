@@ -142,9 +142,11 @@ The Final Cut adapter presents a small internal interface:
 
 CommandPost drives the Final Cut UI for active-project selection, menu actions,
 project duplication, XML export, opening a working project, installed-asset
-discovery, and preview sharing. Editor CLI will use a dedicated CommandPost
-plugin or local bridge with a narrow command allowlist. It will not expose a
-general Lua or keystroke execution endpoint to agents.
+discovery, and preview sharing. Editor CLI will connect to CommandPost 2.1's
+built-in WebSocket control surface through a narrow command allowlist. The
+setup doctor must prove that the listener binds only to loopback before it
+sends a command. Editor CLI will not expose a general Lua or keystroke
+execution endpoint to agents.
 
 FCPXML MCP parses, validates, edits, journals, diffs, and imports timeline XML.
 It provides rational time arithmetic and the timeline operations that the
@@ -368,8 +370,9 @@ The first implementation target pins these reviewed upstream releases:
 | `CommandPost/CommandPost` | 2.1.0 | Final Cut UI control and installed-asset access |
 
 All three projects use the MIT license. The setup path verifies release hashes,
-the CommandPost code signature, and adapter contract tests before enabling live
-control. Dependency upgrades require the same checks and the live canary.
+the CommandPost code signature, a loopback-only WebSocket listener, and adapter
+contract tests before enabling live control. Dependency upgrades require the
+same checks and the live canary.
 
 The implementation will provide an idempotent setup command that:
 
@@ -378,7 +381,7 @@ The implementation will provide an idempotent setup command that:
 3. installs and pins the FCPXML MCP dependency in the project environment;
 4. installs the `watch` skill for Claude Code and Codex from
    `bradautomates/claude-video`;
-5. installs the narrow CommandPost bridge;
+5. enables CommandPost's built-in WebSocket control surface on loopback;
 6. configures the Editor CLI MCP server for both agent hosts;
 7. creates the session root with restrictive permissions; and
 8. reports the macOS Automation and Accessibility permissions that need user
@@ -405,7 +408,7 @@ same effective configuration.
 
 - pinned FCPXML MCP tool schemas and representative responses;
 - `watch` evidence-manifest parsing;
-- CommandPost bridge request authentication and command allowlist;
+- CommandPost loopback binding and command allowlist;
 - installed-asset catalog normalization; and
 - preview-render completion and identity matching.
 
@@ -459,7 +462,7 @@ The project will not claim device readiness until this live canary passes.
 1. Add session contracts, storage, allowlist enforcement, and the state
    machine.
 2. Integrate FCPXML MCP behind a pinned adapter.
-3. Build and live-test the narrow CommandPost bridge on Final Cut 12.3.
+3. Build and live-test the narrow CommandPost adapter on Final Cut 12.3.
 4. Install and integrate the shared `watch` skill.
 5. Add media acquisition and provenance.
 6. Add the Final Cut preview and visual correction loop.
