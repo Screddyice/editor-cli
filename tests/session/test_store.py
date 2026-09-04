@@ -43,9 +43,42 @@ def test_pending_external_action_survives_restart(tmp_path):
 
 def test_completed_external_action_is_not_pending(tmp_path):
     store = SessionStore(tmp_path)
-    token = store.begin_external_action("finalcut.export", {"project": "Demo"})
+    token = store.begin_external_action(
+        "finalcut.export",
+        {"project": "Demo"},
+        expected={"identity": {"project": "Demo"}, "idempotency": {"pass": 1}},
+    )
     store.complete_external_action(token, {"path": "active-source.fcpxml"})
     assert store.pending_actions() == []
+
+
+def test_external_action_rejects_missing_expectations_and_malformed_rows(tmp_path):
+    store = SessionStore(tmp_path)
+    with pytest.raises(ValueError, match="identity"):
+        store.begin_external_action(
+            "finalcut.export",
+            {"project": "Demo"},
+            expected={"idempotency": {"pass": 1}},
+        )
+    with pytest.raises(ValueError, match="idempotency"):
+        store.begin_external_action(
+            "finalcut.export",
+            {"project": "Demo"},
+            expected={"identity": {"project": "Demo"}},
+        )
+
+    store.append(
+        "external_action",
+        {
+            "token": "malformed",
+            "action": "finalcut.export",
+            "arguments": {},
+            "expected": {},
+            "status": "pending",
+        },
+    )
+    with pytest.raises(ValueError, match="Malformed external action"):
+        store.pending_actions()
 
 
 def test_state_compare_and_swap_rejects_stale_version(tmp_path):
@@ -56,6 +89,19 @@ def test_state_compare_and_swap_rejects_stale_version(tmp_path):
         store.compare_and_swap(0, {"version": 1, "state": "preserve"})
 
     assert store.load_state()["state"] == "capture"
+
+
+def test_state_compare_and_swap_increments_once_without_mutating_input(tmp_path):
+    store = SessionStore(tmp_path)
+    initial = {"state": "capture"}
+    store.save_state(initial)
+    replacement = {"state": "preserve", "version": 99}
+
+    store.compare_and_swap(1, replacement)
+
+    assert initial == {"state": "capture"}
+    assert replacement == {"state": "preserve", "version": 99}
+    assert store.load_state() == {"state": "preserve", "version": 2}
 
 
 def test_session_lock_excludes_a_second_writer(tmp_path):

@@ -4,11 +4,105 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from copy import deepcopy
 from dataclasses import dataclass
 from enum import Enum
+from itertools import pairwise
+from math import isfinite
 from pathlib import Path
 from typing import Any, Literal
+
+
+class FrozenDict(dict[str, Any]):
+    """A JSON-compatible mapping that cannot change after construction."""
+
+    def __init__(self, value: dict[str, Any] | None = None, /, **kwargs: Any) -> None:
+        source = dict(value or {}, **kwargs)
+        if any(not isinstance(key, str) for key in source):
+            raise TypeError("JSON object keys must be strings")
+        dict.__init__(self)
+        for key, item in source.items():
+            dict.__setitem__(self, key, freeze_json(item))
+
+    @staticmethod
+    def _immutable(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("FrozenDict cannot be modified")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __ior__ = _immutable
+    clear = _immutable
+    pop = _immutable
+    popitem = _immutable
+    setdefault = _immutable
+    update = _immutable
+
+    def copy(self) -> FrozenDict:
+        return self
+
+    def __copy__(self) -> FrozenDict:
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> FrozenDict:
+        return self
+
+    def thaw(self) -> dict[str, Any]:
+        return thaw_json(self)
+
+
+class FrozenList(list[Any]):
+    """A JSON-compatible list that cannot change after construction."""
+
+    def __init__(self, values: list[Any] | tuple[Any, ...]) -> None:
+        list.__init__(self, (freeze_json(value) for value in values))
+
+    @staticmethod
+    def _immutable(*_args: Any, **_kwargs: Any) -> None:
+        raise TypeError("FrozenList cannot be modified")
+
+    __setitem__ = _immutable
+    __delitem__ = _immutable
+    __iadd__ = _immutable
+    __imul__ = _immutable
+    append = _immutable
+    clear = _immutable
+    extend = _immutable
+    insert = _immutable
+    pop = _immutable
+    remove = _immutable
+    reverse = _immutable
+    sort = _immutable
+
+    def copy(self) -> FrozenList:
+        return self
+
+    def __copy__(self) -> FrozenList:
+        return self
+
+    def __deepcopy__(self, _memo: dict[int, Any]) -> FrozenList:
+        return self
+
+    def thaw(self) -> list[Any]:
+        return thaw_json(self)
+
+
+def freeze_json(value: Any) -> Any:
+    if isinstance(value, (FrozenDict, FrozenList)):
+        return value
+    if isinstance(value, dict):
+        return FrozenDict(value)
+    if isinstance(value, (list, tuple)):
+        return FrozenList(value)
+    if value is None or isinstance(value, (str, int, float, bool)):
+        return value
+    raise TypeError(f"JSON payloads cannot contain {type(value).__name__}")
+
+
+def thaw_json(value: Any) -> Any:
+    if isinstance(value, FrozenDict):
+        return {key: thaw_json(item) for key, item in value.items()}
+    if isinstance(value, (FrozenList, tuple)):
+        return [thaw_json(item) for item in value]
+    return value
 
 
 class SessionState(str, Enum):
@@ -73,6 +167,9 @@ class EditOperation:
     group: str
     action: str
     arguments: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "arguments", FrozenDict(self.arguments))
 
 
 _ACTION_FIELDS: dict[tuple[str, str], dict[str, type | tuple[type, ...]]] = {
@@ -253,7 +350,7 @@ def _validated_arguments(
 ) -> dict[str, Any]:
     key = (operation.group, operation.action)
     fields = _ACTION_FIELDS[key]
-    arguments = deepcopy(operation.arguments)
+    arguments = operation.arguments.thaw()
     if not isinstance(arguments, dict):
         raise TypeError(f"Edit arguments for {operation.action} must be an object")
     unknown = set(arguments) - set(fields)
@@ -324,6 +421,12 @@ class EditProgram:
     changed_ranges: tuple[tuple[float, float], ...] = ()
 
     def __post_init__(self) -> None:
+        object.__setattr__(self, "operations", tuple(self.operations))
+        object.__setattr__(
+            self,
+            "changed_ranges",
+            tuple(tuple(change) for change in self.changed_ranges),
+        )
         if not self.operations:
             raise ValueError("Edit program must contain at least one operation")
         for operation in self.operations:
@@ -389,12 +492,64 @@ class EvidenceBinding:
     manifest_sha256: str
     frame_timestamps: tuple[float, ...]
 
+    def __post_init__(self) -> None:
+        if not isinstance(self.session_id, str) or not re.fullmatch(
+            r"[A-Za-z0-9_-]{6,64}", self.session_id
+        ):
+            raise ValueError("Evidence binding session id is invalid")
+        if (
+            isinstance(self.pass_number, bool)
+            or not isinstance(self.pass_number, int)
+            or self.pass_number < 1
+        ):
+            raise ValueError("Evidence binding pass number must be positive")
+        if (
+            isinstance(self.state_version, bool)
+            or not isinstance(self.state_version, int)
+            or self.state_version < 0
+        ):
+            raise ValueError("Evidence binding state version cannot be negative")
+        if not isinstance(self.project_name, str) or not self.project_name.strip():
+            raise ValueError("Evidence binding project name cannot be blank")
+        for name in (
+            "candidate_sha256",
+            "preview_sha256",
+            "manifest_sha256",
+        ):
+            digest = getattr(self, name)
+            if not isinstance(digest, str) or not re.fullmatch(
+                r"[0-9A-Fa-f]{64}", digest
+            ):
+                raise ValueError(f"Evidence binding {name} must be a SHA-256 hash")
+        timestamps = tuple(self.frame_timestamps)
+        if not timestamps:
+            raise ValueError("Evidence binding requires frame timestamps")
+        if any(
+            isinstance(timestamp, bool)
+            or not isinstance(timestamp, (int, float))
+            or not isfinite(timestamp)
+            or timestamp < 0
+            for timestamp in timestamps
+        ):
+            raise ValueError(
+                "Evidence binding frame timestamps must be finite and positive"
+            )
+        if any(left >= right for left, right in pairwise(timestamps)):
+            raise ValueError(
+                "Evidence binding frame timestamps must be strictly ordered"
+            )
+        object.__setattr__(self, "frame_timestamps", timestamps)
+
 
 @dataclass(frozen=True)
 class ReviewReportInput:
     binding: EvidenceBinding
     required: dict[str, bool]
     observations: tuple[str, ...] = ()
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "required", FrozenDict(self.required))
+        object.__setattr__(self, "observations", tuple(self.observations))
 
 
 @dataclass(frozen=True)
@@ -404,3 +559,13 @@ class ExternalAction:
     arguments: dict[str, Any]
     expected: dict[str, Any]
     status: Literal["pending", "complete", "blocked"]
+
+    def __post_init__(self) -> None:
+        if not self.token:
+            raise ValueError("External action token cannot be blank")
+        if not self.action.strip():
+            raise ValueError("External action name cannot be blank")
+        if self.status not in {"pending", "complete", "blocked"}:
+            raise ValueError("External action status is invalid")
+        object.__setattr__(self, "arguments", FrozenDict(self.arguments))
+        object.__setattr__(self, "expected", FrozenDict(self.expected))

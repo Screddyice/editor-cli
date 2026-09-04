@@ -10,7 +10,6 @@ import time
 import uuid
 from collections.abc import Iterator
 from contextlib import contextmanager, nullcontext
-from dataclasses import asdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
@@ -72,7 +71,6 @@ class SessionStore:
             snapshot = dict(value)
             snapshot["version"] = current_version + 1
             self._atomic_state_write(snapshot)
-            value["version"] = snapshot["version"]
             return snapshot
 
     def _atomic_state_write(self, value: dict[str, Any]) -> None:
@@ -154,11 +152,11 @@ class SessionStore:
         ):
             raise ValueError("Pass either expected or legacy action expectations")
         if expected is None:
-            expected = {}
-            if expected_identity is not None:
-                expected["identity"] = dict(expected_identity)
-            if idempotency is not None:
-                expected["idempotency"] = dict(idempotency)
+            expected = {
+                "identity": dict(expected_identity or {}),
+                "idempotency": dict(idempotency or {}),
+            }
+        self._validate_expected(expected)
         token = str(uuid.uuid4())
         record = ExternalAction(
             token=token,
@@ -169,7 +167,7 @@ class SessionStore:
         )
         return self.append(
             "external_action",
-            asdict(record),
+            self._action_data(record),
             event_id=token,
         )
 
@@ -189,7 +187,7 @@ class SessionStore:
             expected=dict(pending.expected),
             status="complete",
         )
-        data = asdict(record)
+        data = self._action_data(record)
         data["result"] = dict(result or {})
         return self.append(
             "external_action",
@@ -200,14 +198,7 @@ class SessionStore:
         latest: dict[str, ExternalAction] = {}
         for event in self.events():
             if event["kind"] == "external_action":
-                data = event["data"]
-                record = ExternalAction(
-                    token=data["token"],
-                    action=data["action"],
-                    arguments=dict(data.get("arguments") or {}),
-                    expected=dict(data.get("expected") or {}),
-                    status=data["status"],
-                )
+                record = self._external_action_from_data(event["data"])
                 latest[record.token] = record
         return [action for action in latest.values() if action.status == "pending"]
 
@@ -220,3 +211,47 @@ class SessionStore:
             ):
                 return dict(event["data"].get("result") or {})
         return None
+
+    @staticmethod
+    def _action_data(record: ExternalAction) -> dict[str, Any]:
+        return {
+            "token": record.token,
+            "action": record.action,
+            "arguments": record.arguments.thaw(),
+            "expected": record.expected.thaw(),
+            "status": record.status,
+        }
+
+    @classmethod
+    def _external_action_from_data(cls, data: Any) -> ExternalAction:
+        try:
+            if not isinstance(data, dict):
+                raise TypeError
+            required = {"token", "action", "arguments", "expected", "status"}
+            if not required.issubset(data):
+                raise ValueError
+            if not isinstance(data["arguments"], dict) or not isinstance(
+                data["expected"], dict
+            ):
+                raise TypeError
+            cls._validate_expected(data["expected"])
+            return ExternalAction(
+                token=data["token"],
+                action=data["action"],
+                arguments=data["arguments"],
+                expected=data["expected"],
+                status=data["status"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise ValueError("Malformed external action journal row") from exc
+
+    @staticmethod
+    def _validate_expected(expected: Any) -> None:
+        if not isinstance(expected, dict):
+            raise TypeError("External action expected data must be an object")
+        identity = expected.get("identity")
+        if not isinstance(identity, dict) or not identity:
+            raise ValueError("External action requires a nonempty expected identity")
+        idempotency = expected.get("idempotency")
+        if not isinstance(idempotency, dict) or not idempotency:
+            raise ValueError("External action requires nonempty idempotency data")
