@@ -1,9 +1,14 @@
 # Final Cut Closed-Loop Controller Design
 
 **Date:** 2026-09-05  
-**Status:** Implemented; device acceptance pending
+**Status:** Superseded for live control
 **Owner:** Shawn  
 **Target:** Final Cut Pro 12.3 on Apple silicon
+
+The session, access, and verification goals remain valid. The paid
+CommandPost/LateNite transport is replaced by the project-owned native Swift
+controller specified in
+[`2026-09-05-native-final-cut-controller-design.md`](2026-09-05-native-final-cut-controller-design.md).
 
 ## Summary
 
