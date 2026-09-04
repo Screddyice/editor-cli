@@ -40,6 +40,26 @@ Two gates remain before a live run:
 2. **Manual FCP import** — import a generated `timeline.fcpxml` into FCP 12.2
    once to confirm it opens with media linked (DTD-valid, GUI-import pending).
 
+### Planned Final Cut controller
+
+The approved next phase turns Editor CLI into a closed-loop controller for
+Final Cut Pro 12.3. Claude Code or Codex will work from the active project,
+preserve the source as a timestamped version, apply the full edit to a working
+copy, render a temporary preview through Final Cut, watch that preview, and
+correct defects before handing the timeline back to the editor.
+
+The controller will combine a narrow CommandPost bridge, a pinned FCPXML MCP
+adapter, and the shared `bradautomates/claude-video` watch skill. It may use
+media already referenced by the active project, installed Final Cut assets,
+and public internet media downloaded into the current session folder. It will
+not search unrelated files or libraries on the device. The editor reviews the
+verified timeline and performs the final export.
+
+See
+[`docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md`](docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md)
+for the approved architecture, access boundaries, recovery model, and live
+Final Cut 12.3 acceptance test.
+
 ## Setup
 
 ```bash
