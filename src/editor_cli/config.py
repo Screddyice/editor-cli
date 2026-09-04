@@ -11,6 +11,7 @@ import os
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Optional
+from urllib.parse import urlsplit
 
 
 class ConfigError(RuntimeError):
@@ -22,6 +23,14 @@ class Config:
     gemini_api_key: str
     elevenlabs_api_key: str
     gemini_model: str = "gemini-2.5-pro"
+
+
+@dataclass(frozen=True)
+class ControllerConfig:
+    session_root: Path
+    commandpost_url: str = "ws://127.0.0.1:27480/"
+    fcpxml_command: tuple[str, ...] = ("uvx", "fcp-mcp-server==0.22.1")
+    max_passes: int = 3
 
 
 def _parse_dotenv(start: Optional[Path] = None) -> dict[str, str]:
@@ -66,4 +75,32 @@ def load_config(
     model = src.get("EDITOR1_GEMINI_MODEL", "gemini-2.5-pro")
     return Config(
         gemini_api_key=gemini, elevenlabs_api_key=elevenlabs or "", gemini_model=model
+    )
+
+
+def load_controller_config(
+    env: Optional[dict[str, str]] = None,
+) -> ControllerConfig:
+    """Load local Final Cut controller settings without requiring cloud keys."""
+    src = dict(os.environ if env is None else env)
+    url = src.get("EDITOR_CLI_COMMANDPOST_URL", "ws://127.0.0.1:27480/")
+    parsed = urlsplit(url)
+    if parsed.scheme != "ws" or parsed.hostname not in {
+        "127.0.0.1",
+        "::1",
+        "localhost",
+    }:
+        raise ConfigError(
+            "CommandPost URL must use an unencrypted loopback WebSocket"
+        )
+
+    root = Path(src.get("EDITOR_CLI_SESSION_ROOT", "~/Movies/Editor CLI Sessions"))
+    max_passes = int(src.get("EDITOR_CLI_MAX_PASSES", "3"))
+    if max_passes != 3:
+        raise ConfigError("EDITOR_CLI_MAX_PASSES must be 3 for the initial release")
+
+    return ControllerConfig(
+        session_root=root.expanduser().resolve(),
+        commandpost_url=url,
+        max_passes=max_passes,
     )
