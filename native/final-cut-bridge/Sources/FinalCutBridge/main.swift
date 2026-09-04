@@ -11,21 +11,19 @@ private func writeResponse(_ response: [String: Any]) {
 
 private func readRequest() throws -> Data {
     var retained = Data()
-    var exceedsInputLimit = false
 
-    while let chunk = try FileHandle.standardInput.read(upToCount: inputReadChunkBytes), !chunk.isEmpty {
+    while retained.count <= maximumInputBytes {
         let remainingCapacity = maximumInputBytes + 1 - retained.count
-        if remainingCapacity > 0 {
-            retained.append(contentsOf: chunk.prefix(remainingCapacity))
+        let readCount = min(inputReadChunkBytes, remainingCapacity)
+        guard let chunk = try FileHandle.standardInput.read(upToCount: readCount), !chunk.isEmpty else {
+            break
         }
+        retained.append(chunk)
         if retained.count > maximumInputBytes {
-            exceedsInputLimit = true
+            throw ProtocolError.inputTooLarge
         }
     }
 
-    guard !exceedsInputLimit else {
-        throw ProtocolError.inputTooLarge
-    }
     return retained
 }
 

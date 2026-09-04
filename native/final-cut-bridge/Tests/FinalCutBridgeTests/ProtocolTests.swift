@@ -59,4 +59,47 @@ final class ProtocolTests: XCTestCase {
         XCTAssertEqual(response["ok"] as? Bool, false)
         XCTAssertEqual(process.terminationStatus, 1)
     }
+
+    func testOversizedInputDoesNotWaitForEOF() throws {
+        let executable = Bundle(for: Self.self).bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("FinalCutBridge")
+        XCTAssertTrue(FileManager.default.isExecutableFile(atPath: executable.path))
+
+        let process = Process()
+        let input = Pipe()
+        let output = Pipe()
+        process.executableURL = executable
+        process.standardInput = input
+        process.standardOutput = output
+        process.standardError = Pipe()
+        try process.run()
+        defer {
+            if process.isRunning {
+                process.terminate()
+                process.waitUntilExit()
+            }
+            try? input.fileHandleForWriting.close()
+        }
+
+        let request = #"{"protocolVersion":1,"action":"probe","sessionRoot":"/tmp/session","payload":{}}"#.data(using: .utf8)!
+        input.fileHandleForWriting.write(request)
+        input.fileHandleForWriting.write(Data(repeating: 0x20, count: 1_048_577 - request.count))
+
+        let terminated = expectation(description: "oversized input terminates without EOF")
+        DispatchQueue.global().async {
+            process.waitUntilExit()
+            terminated.fulfill()
+        }
+        let waitResult = XCTWaiter.wait(for: [terminated], timeout: 2)
+        XCTAssertEqual(waitResult, .completed)
+        guard waitResult == .completed else { return }
+
+        let responseData = output.fileHandleForReading.readDataToEndOfFile()
+        let responseText = try XCTUnwrap(String(data: responseData, encoding: .utf8))
+        XCTAssertEqual(responseText.filter { $0 == "\n" }.count, 1)
+        let response = try XCTUnwrap(try JSONSerialization.jsonObject(with: responseData) as? [String: Any])
+        XCTAssertEqual(response["ok"] as? Bool, false)
+        XCTAssertEqual(process.terminationStatus, 1)
+    }
 }
