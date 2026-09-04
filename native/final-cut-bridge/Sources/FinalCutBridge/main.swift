@@ -1,6 +1,7 @@
 import Foundation
 
 private let maximumInputBytes = 1_048_576
+private let inputReadChunkBytes = 64 * 1024
 
 private func writeResponse(_ response: [String: Any]) {
     let data = (try? JSONSerialization.data(withJSONObject: response, options: [.sortedKeys])) ?? Data("{\"ok\":false,\"error\":\"Unable to encode response\"}".utf8)
@@ -9,13 +10,23 @@ private func writeResponse(_ response: [String: Any]) {
 }
 
 private func readRequest() throws -> Data {
-    // Read one sentinel byte beyond the accepted limit so oversized input is
-    // rejected without buffering an unbounded stdin stream.
-    let data = try FileHandle.standardInput.read(upToCount: maximumInputBytes + 1) ?? Data()
-    guard data.count <= maximumInputBytes else {
+    var retained = Data()
+    var exceedsInputLimit = false
+
+    while let chunk = try FileHandle.standardInput.read(upToCount: inputReadChunkBytes), !chunk.isEmpty {
+        let remainingCapacity = maximumInputBytes + 1 - retained.count
+        if remainingCapacity > 0 {
+            retained.append(contentsOf: chunk.prefix(remainingCapacity))
+        }
+        if retained.count > maximumInputBytes {
+            exceedsInputLimit = true
+        }
+    }
+
+    guard !exceedsInputLimit else {
         throw ProtocolError.inputTooLarge
     }
-    return data
+    return retained
 }
 
 private func dispatch(_ request: Request) -> [String: Any] {
