@@ -1,0 +1,12 @@
+{
+  "duration_seconds": 8.0,
+  "required_checks": [
+    "source_unchanged",
+    "gap_removed",
+    "title_visible",
+    "transition_visible",
+    "reaction_insert_visible",
+    "preview_rendered",
+    "preview_watched"
+  ]
+}
