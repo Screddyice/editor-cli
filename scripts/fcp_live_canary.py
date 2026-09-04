@@ -41,6 +41,8 @@ _FRAME_TARGETS = {
     "reaction_insert_visible": (5.5, "reaction"),
 }
 _FRAME_TOLERANCE_SECONDS = 0.25
+_TRANSITION_OFFSET_SECONDS = 2.75
+_FRAME_QUANTIZATION_TOLERANCE_SECONDS = 1 / 60
 
 
 @dataclass(frozen=True)
@@ -307,6 +309,14 @@ def _is_cross_dissolve(transition: ET.Element) -> bool:
     return name == "cross dissolve"
 
 
+def _matches_frame_quantized_time(actual: float | None, expected: float) -> bool:
+    """Accept the closest 30fps FCPXML frame to an intended timeline instant."""
+    return (
+        actual is not None
+        and abs(actual - expected) <= _FRAME_QUANTIZATION_TOLERANCE_SECONDS + 1e-9
+    )
+
+
 def candidate_structure_checks(path: Path) -> dict[str, bool]:
     """Verify the candidate carries the exact canary edits in its FCPXML."""
     validate_fcpxml(path)
@@ -319,7 +329,10 @@ def candidate_structure_checks(path: Path) -> dict[str, bool]:
         ),
         "transition_visible": any(
             _is_cross_dissolve(transition)
-            and _fcpxml_seconds(transition.get("offset")) == 3.0
+            and _matches_frame_quantized_time(
+                _fcpxml_seconds(transition.get("offset")),
+                _TRANSITION_OFFSET_SECONDS,
+            )
             and _fcpxml_seconds(transition.get("duration")) == 0.5
             for transition in transitions
         ),

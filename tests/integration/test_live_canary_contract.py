@@ -1,4 +1,5 @@
 import hashlib
+import importlib.metadata
 import importlib.util
 import json
 import sys
@@ -6,6 +7,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
+from fcpxml.writer import FCPXMLModifier
 
 from editor_cli.config import ControllerConfig
 from editor_cli.session.controller import (
@@ -92,11 +94,35 @@ def test_canary_program_is_valid_offline_and_covers_required_edits():
     assert program.changed_ranges == ((1.0, 3.0), (5.0, 6.0))
 
 
+def test_pinned_modifier_chains_the_full_canary_program(monkeypatch, tmp_path):
+    assert importlib.metadata.version("fcp-mcp-server") == "0.22.1"
+    workspace = fcp_live_canary.create_canary_workspace(tmp_path / "canary")
+
+    def render(destination, **_kwargs):
+        destination.write_bytes(b"generated canary media")
+
+    monkeypatch.setattr(fcp_live_canary, "_render_card", render)
+    source = fcp_live_canary.create_source(workspace)
+    modifier = FCPXMLModifier(str(source))
+    program = fcp_live_canary.canary_program()
+    for operation in program.operations:
+        getattr(modifier, operation.action)(**operation.arguments)
+    candidate = tmp_path / "candidate.fcpxml"
+    modifier.save(str(candidate))
+
+    checks = fcp_live_canary.candidate_structure_checks(candidate)
+    transition = fcp_live_canary.ET.parse(candidate).find(".//transition")
+    assert transition is not None
+    assert fcp_live_canary._TRANSITION_OFFSET_SECONDS == 2.75
+    assert fcp_live_canary._fcpxml_seconds(transition.get("offset")) == 82 / 30
+    assert all(checks.values())
+
+
 def _candidate_xml(
     *,
     title_offset: str = "1s",
     title_duration: str = "2s",
-    transition_offset: str = "3s",
+    transition_offset: str = "82/30s",
     transition_duration: str = "15/30s",
     transition_name: str = "Cross Dissolve",
     reaction_offset: str = "5s",
