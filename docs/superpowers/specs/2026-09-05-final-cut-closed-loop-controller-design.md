@@ -412,8 +412,11 @@ The setup command is idempotent. It:
 3. installs `watch` 0.2.0 for Claude Code and Codex when either copy is absent
    or has a different version;
 4. links the Final Cut editor skill and CommandPost bridge plugin;
-5. writes managed MCP registrations for Codex and Claude Code, preserving a
-   timestamped backup before each configuration change; and
+5. writes managed MCP registrations for Codex and Claude Code. Before the
+   first change to an existing configuration, setup saves one fixed sibling
+   backup named `*.editor-cli.bak`; later setup changes retain that backup
+   instead of creating a new snapshot. Restoring it returns the configuration
+   to its state before the first setup change, not its most recent state; and
 6. verifies that the project MCP server imports and lists tools.
 
 `editor-cli setup` does not install Final Cut, configure macOS permissions,
