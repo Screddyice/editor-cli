@@ -1,15 +1,15 @@
 # Final Cut Closed-Loop Controller Design
 
 **Date:** 2026-09-05  
-**Status:** Approved for implementation planning  
+**Status:** Implemented; device acceptance pending
 **Owner:** Shawn  
 **Target:** Final Cut Pro 12.3 on Apple silicon
 
 ## Summary
 
-Editor CLI will become a local controller for an editor who works in Final Cut
-Pro. The editor opens a library, selects a project, and makes any initial cuts.
-Claude Code or Codex then receives a natural-language edit request and runs a
+Editor CLI is a local controller for an editor who works in Final Cut Pro. The
+editor opens a library, selects a project, and makes any initial cuts. Claude
+Code or Codex then receives a natural-language edit request and runs a
 closed loop:
 
 1. capture the active project;
@@ -20,9 +20,40 @@ closed loop:
 6. watch the result and correct defects; and
 7. leave the best verified timeline open for the editor.
 
-The editor reviews the timeline and performs the final export. Editor CLI may
-create temporary preview renders, but it will not export or publish the final
+The editor reviews the timeline and performs the final export. Editor CLI
+creates temporary preview renders but does not export or publish the final
 master.
+
+## Implementation and measured status
+
+The controller is installed in the project and exposes four grouped MCP tools:
+`editor_session`, `editor_timeline`, `editor_media`, and `editor_verify`. The
+Codex and Claude Code configurations both start the same `editor_cli.mcp_server`
+module from this repository. The `final-cut-editor` skill directs both hosts
+through the same grouped surface and shared `watch` evidence format.
+
+Fresh verification on 2026-09-05 recorded:
+
+- `uv run pytest -q`: 238 passed, 1 skipped in 21.73s;
+- `uv build`: source distribution and wheel built successfully; setuptools
+  emitted its existing `project.license` deprecation warning;
+- bounded stdio MCP probe: initialized protocol `2025-11-25`, listed
+  `editor_media`, `editor_session`, `editor_timeline`, and `editor_verify`, and
+  returned the doctor report below; and
+- scoped canary lint and format checks: passed.
+
+The same doctor report found Final Cut Pro 12.3 build 450152, CommandPost
+2.1.0, and `watch` 0.2.0 installed for both Codex and Claude Code. It also
+found no eligible LateNite license app and no listener on CommandPost port
+27480. `ready` is therefore `false`.
+
+The live canary date, preview hash, and evidence-manifest comparison are
+**pending**. The canary preflight on 2026-09-05 stopped with `Run editor-cli
+doctor and resolve failed checks first` and created no workspace. The required
+dependency is an eligible LateNite license app plus a CommandPost WebSocket
+listener bound only to loopback. Run the disposable canary and the fresh
+Claude Code/Codex manifest comparison after those host prerequisites pass; do
+not infer acceptance from the installed commands or automated tests.
 
 ## Decisions
 
@@ -57,14 +88,14 @@ master.
 
 ## Non-goals
 
-- Editor CLI will not replace Final Cut's timeline interface.
-- Editor CLI will not perform the final share, upload, or publication step.
-- Editor CLI will not patch or modify the Final Cut application binary.
-- Editor CLI will not index the device, Photos library, unrelated Final Cut
+- Editor CLI does not replace Final Cut's timeline interface.
+- Editor CLI does not perform the final share, upload, or publication step.
+- Editor CLI does not patch or modify the Final Cut application binary.
+- Editor CLI does not index the device, Photos library, unrelated Final Cut
   libraries, or external drives.
-- Editor CLI will not bypass DRM, paywalls, authentication, or site controls to
+- Editor CLI does not bypass DRM, paywalls, authentication, or site controls to
   obtain internet media.
-- The first release will not automate color-critical grading decisions or a
+- The first release does not automate color-critical grading decisions or a
   final audio mix without an explicit edit request.
 
 ## Device baseline
@@ -80,8 +111,9 @@ The design review measured this Mac before implementation:
 - Node.js 26.4.0; and
 - CommandPost not installed.
 
-Implementation must repeat these probes. The values above record the design
-baseline and do not replace the setup doctor.
+The setup doctor repeated the application and skill probes on 2026-09-05. It
+replaced the original "CommandPost not installed" baseline with CommandPost
+2.1.0, while retaining the live-control gate described above.
 
 ## Architecture
 
@@ -142,15 +174,15 @@ The Final Cut adapter presents a small internal interface:
 
 CommandPost drives the Final Cut UI for active-project selection, menu actions,
 project duplication, XML export, opening a working project, installed-asset
-discovery, and preview sharing. Editor CLI will connect to CommandPost 2.1's
+discovery, and preview sharing. Editor CLI connects to CommandPost 2.1's
 built-in WebSocket control surface through a narrow command allowlist. The
 setup doctor must prove that the listener binds only to loopback before it
-sends a command. Editor CLI will not expose a general Lua or keystroke
+sends a command. Editor CLI does not expose a general Lua or keystroke
 execution endpoint to agents.
 
 FCPXML MCP parses, validates, edits, journals, diffs, and imports timeline XML.
 It provides rational time arithmetic and the timeline operations that the
-current `render/fcpxml.py` generator lacks. Editor CLI will pin and wrap the
+current `render/fcpxml.py` generator lacks. Editor CLI pins and wraps the
 dependency rather than exposing its full tool catalog to every agent session.
 
 Apple does not provide a complete programmatic export API for Final Cut. The
@@ -161,7 +193,7 @@ guess which timeline it captured.
 
 ### Perception adapter
 
-The project will install `bradautomates/claude-video` as the shared `watch`
+The project installs `bradautomates/claude-video` 0.2.0 as the shared `watch`
 skill for Claude Code and Codex. The adapter writes a durable evidence bundle
 for each preview:
 
@@ -279,18 +311,17 @@ new paths. The journal stores every XML diff and action in execution order.
 Undo creates another project version from the prior accepted XML; it does not
 destructively rewrite the library.
 
-Session layout:
+Implemented session layout (mode `0700`):
 
 ```text
 Editor CLI Sessions/<session-id>/
-  request.json
+  state.json
   source/
   assets/
   candidates/
   previews/
   evidence/
   journal.jsonl
-  result.json
 ```
 
 ## Agent interface
@@ -300,8 +331,8 @@ CommandPost and all FCPXML operations:
 
 - `editor_session`: doctor, start, status, resume, finish;
 - `editor_timeline`: inspect, apply an edit program, diff, undo;
-- `editor_media`: search, inspect, acquire, list provenance;
-- `editor_verify`: render preview, watch, inspect a time range, compare passes.
+- `editor_media`: acquire, list provenance;
+- `editor_verify`: preview, watch, record, compare passes.
 
 `editor_timeline.apply` accepts a typed edit program. The controller validates
 the full program before it runs any operation. This prevents half-applied edits
@@ -311,9 +342,8 @@ The CLI exposes the same controller for direct diagnosis:
 
 ```text
 editor-cli doctor
-editor-cli session start
 editor-cli edit-active --prompt "remove gaps and add two restrained meme beats"
-editor-cli session status
+editor-cli session status <session-id>
 editor-cli session resume <session-id>
 ```
 
@@ -361,7 +391,7 @@ approval.
 
 ## Installation and configuration
 
-The first implementation target pins these reviewed upstream releases:
+The implementation pins these reviewed upstream releases:
 
 | Dependency | Release | Purpose |
 |---|---:|---|
@@ -374,20 +404,24 @@ the CommandPost code signature, a loopback-only WebSocket listener, and adapter
 contract tests before enabling live control. Dependency upgrades require the
 same checks and the live canary.
 
-The implementation will provide an idempotent setup command that:
+The implementation provides an idempotent setup command that:
 
 1. checks Final Cut Pro 12.3, FFmpeg, `uv`, Python, and Node.js;
 2. installs the pinned, signed CommandPost release when it is absent;
 3. installs and pins the FCPXML MCP dependency in the project environment;
 4. installs the `watch` skill for Claude Code and Codex from
    `bradautomates/claude-video`;
-5. enables CommandPost's built-in WebSocket control surface on loopback;
+5. verifies CommandPost's built-in WebSocket control surface on loopback;
 6. configures the Editor CLI MCP server for both agent hosts;
 7. creates the session root with restrictive permissions; and
 8. reports the macOS Automation and Accessibility permissions that need user
    approval.
 
-The setup command creates timestamped backups before it changes an existing
+Run `uv run editor-cli setup`, then grant CommandPost Automation access to
+Final Cut Pro and Accessibility access when macOS prompts. Enable the
+CommandPost WebSocket control surface on `127.0.0.1` or `::1`, then confirm it
+with `uv run editor-cli doctor`. The setup command creates timestamped backups
+before it changes an existing
 Claude Code, Codex, or CommandPost configuration. Repeated runs produce the
 same effective configuration.
 
@@ -437,7 +471,9 @@ real library.
 8. Confirm the source project and media remain unchanged.
 9. Restart the controller during a second run and verify journal recovery.
 
-The project will not claim device readiness until this live canary passes.
+The project does not claim device readiness until this live canary passes. The
+2026-09-05 preflight failed closed before creating a disposable library because
+the eligible LateNite license app and loopback bridge are missing.
 
 ## Acceptance criteria
 
@@ -454,17 +490,15 @@ The project will not claim device readiness until this live canary passes.
 - The allowlist prevents discovery of unrelated local files and libraries.
 - Downloaded assets include source provenance.
 - The editor retains control of the final export.
-- Unit, contract, integration, and live Final Cut 12.3 canary checks pass on
-  this device.
+- Unit, contract, and integration checks pass on this device. The live Final
+  Cut 12.3 canary and dual-host evidence comparison remain pending on the
+  eligible LateNite license app and loopback bridge.
 
-## Delivery sequence
+## Remaining device acceptance
 
-1. Add session contracts, storage, allowlist enforcement, and the state
-   machine.
-2. Integrate FCPXML MCP behind a pinned adapter.
-3. Build and live-test the narrow CommandPost adapter on Final Cut 12.3.
-4. Install and integrate the shared `watch` skill.
-5. Add media acquisition and provenance.
-6. Add the Final Cut preview and visual correction loop.
-7. Expose the grouped MCP and CLI surfaces.
-8. Run the disposable-library canary and document the verified device setup.
+1. Install or activate an eligible LateNite license app.
+2. Enable CommandPost's WebSocket control surface on loopback and pass
+   `uv run editor-cli doctor`.
+3. Run the disposable-library canary, retain its evidence manifest and preview
+   hash, then compare that same manifest from fresh Claude Code and Codex
+   sessions.

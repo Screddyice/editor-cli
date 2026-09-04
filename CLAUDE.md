@@ -29,6 +29,26 @@ vendor/video-use/.venv/bin/python vendor/video-use/helpers/render.py <edl.json> 
 
 Do **not** rewrite these as bare `python helpers/x.py` — that uses the wrong interpreter and the imports (librosa/numpy/matplotlib/requests) will fail.
 
+## Final Cut controller — auto-invoke for an open Final Cut project
+
+Use `skills/final-cut-editor/SKILL.md` when the user asks to change a project
+that is open in Final Cut Pro. The skill calls the grouped `editor-cli` MCP
+surface, preserves the source project, renders and watches each candidate, and
+leaves the selected working project open. Do not substitute raw CommandPost
+commands, AppleScript, or keystrokes.
+
+Start with `editor_session` using `action: doctor`. Stop when the report is not
+ready. The current measured host report has Final Cut Pro 12.3 (build 450152),
+CommandPost 2.1.0, and `watch` 0.2.0 on both hosts, but it remains blocked by
+the missing eligible LateNite license app and CommandPost loopback listener.
+Do not claim a live canary result, preview hash, or dual-host comparison until
+those prerequisites are present and the disposable canary completes.
+
+Use only active-project references, installed Final Cut or Motion assets, and
+the session directory. Route public media through `editor_media.acquire`; it
+records provenance and accepts public HTTPS media only. The editor performs the
+final export in Final Cut Pro.
+
 ### Environment (already wired)
 
 - **Keys:** `ELEVENLABS_API_KEY` (Scribe transcription) and `GEMINI_API_KEY` are in `editor-cli/.env`. `vendor/video-use/.env` is a symlink to it, so the helpers' key lookup resolves with no duplication. Never echo or commit keys.

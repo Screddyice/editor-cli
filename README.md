@@ -24,10 +24,11 @@ decision remains hand-tweakable — not locked inside a flattened render.
 
 ## Status
 
-**Phases 1–3 built + unit-tested (52 tests).**
+**Phases 1–3 are built; the full repository suite reports 238 passed and 1
+skipped on 2026-09-05.**
 - **Phase 1 — spine:** acquire → Gemini style → transcribe/probe → reason EDL →
-  ffmpeg mp4 + FCPXML → Gemini eval loop. EDL→FCPXML validated against FCP 12.2's
-  own **v1.14 DTD**.
+  ffmpeg mp4 + FCPXML → Gemini eval loop. EDL→FCPXML validated against Final
+  Cut's **v1.14 DTD**.
 - **Phase 2 — discovery:** `--genre "<query>"` finds trending comparable videos
   (yt-dlp search), extracts sound/title metadata, feeds them as extra Gemini
   references + trend context.
@@ -37,23 +38,76 @@ decision remains hand-tweakable — not locked inside a flattened render.
 Two gates remain before a live run:
 1. **API keys required** — set `GEMINI_API_KEY` (or `CLIQK_GEMINI_API_KEY`) and
    `ELEVENLABS_API_KEY`. They are currently empty in `~/projects/.env`.
-2. **Manual FCP import** — import a generated `timeline.fcpxml` into FCP 12.2
-   once to confirm it opens with media linked (DTD-valid, GUI-import pending).
+2. **Manual FCP import** — import a generated `timeline.fcpxml` into Final Cut
+   Pro 12.3 once to confirm it opens with media linked (DTD-valid, GUI-import
+   pending).
 
-### Planned Final Cut controller
+### Final Cut closed-loop controller
 
-The approved next phase turns Editor CLI into a closed-loop controller for
-Final Cut Pro 12.3. Claude Code or Codex will work from the active project,
-preserve the source as a timestamped version, apply the full edit to a working
-copy, render a temporary preview through Final Cut, watch that preview, and
-correct defects before handing the timeline back to the editor.
+Editor CLI includes a closed-loop controller for Final Cut Pro 12.3. Claude
+Code and Codex use the same four grouped MCP tools: `editor_session`,
+`editor_timeline`, `editor_media`, and `editor_verify`. An edit session captures
+the selected project, preserves its exported source, creates up to three
+working candidates, renders each candidate through Final Cut, and stores
+`watch` evidence before it opens a candidate for the editor.
 
-The controller will combine a narrow CommandPost bridge, a pinned FCPXML MCP
-adapter, and the shared `bradautomates/claude-video` watch skill. It may use
-media already referenced by the active project, installed Final Cut assets,
-and public internet media downloaded into the current session folder. It will
-not search unrelated files or libraries on the device. The editor reviews the
-verified timeline and performs the final export.
+The controller accepts only the selected project's media references, installed
+Final Cut and Motion assets, and files inside the current session. Public media
+goes through `editor_media.acquire`; it requires public HTTPS, rejects private
+addresses and executable content, caps downloads at 500 MB, and writes
+provenance to the session. It does not search unrelated folders, libraries,
+Photos, drives, browser profiles, or credential stores.
+
+The editor performs the final export in Final Cut Pro. Editor CLI renders
+temporary previews and never exports, publishes, or uploads the final master.
+
+#### Host setup and readiness
+
+Run setup once to install the pinned dependencies and register the MCP server
+for both hosts:
+
+```bash
+uv run editor-cli setup
+uv run editor-cli doctor
+```
+
+When macOS prompts, approve CommandPost's Automation access to Final Cut Pro
+and its Accessibility access for UI control. Keep CommandPost's WebSocket
+bridge bound to `127.0.0.1` or `::1`. The doctor refuses to start sessions
+until Final Cut, CommandPost, an eligible LateNite license app, the loopback
+bridge, and the shared `watch` skill are present.
+
+Measured on 2026-09-05: Final Cut Pro 12.3 (build 450152), CommandPost 2.1.0,
+and `watch` 0.2.0 are installed for Codex and Claude Code. Device readiness is
+**false** because no eligible LateNite license app is installed and no
+CommandPost listener exists on port 27480. The disposable live canary and the
+fresh Claude Code/Codex evidence-manifest comparison remain pending until both
+prerequisites are resolved.
+
+#### Session workflow and recovery
+
+```bash
+uv run editor-cli doctor
+uv run editor-cli edit-active "remove pauses and add a restrained title"
+uv run editor-cli session status <session-id>
+uv run editor-cli session resume <session-id>
+```
+
+Sessions live under `~/Movies/Editor CLI Sessions/<session-id>/` by default and
+use mode `0700`. Each session contains `state.json`, `journal.jsonl`, `source/`,
+`assets/`, `candidates/`, `previews/`, and `evidence/`; each rendered pass keeps
+its own FCPXML, preview, and evidence manifest. On restart, run `status`, then
+`resume` only after reopening the captured project. The controller refuses to
+replay an uncertain external action or proceed if the source export changed.
+
+#### Measured automated verification
+
+On 2026-09-05, `uv run pytest -q` reported **238 passed, 1 skipped** and
+`uv build` produced the source distribution and wheel. A bounded stdio MCP
+probe initialized `editor-cli`, listed all four grouped tools, and returned the
+same not-ready doctor report. The canary preflight exited before it created a
+workspace: `Canary failed: Run editor-cli doctor and resolve failed checks
+first`. No preview hash or live evidence manifest exists yet.
 
 See
 [`docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md`](docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md)
@@ -66,7 +120,7 @@ Final Cut 12.3 acceptance test.
 uv sync --extra dev            # install deps + dev tools
 export GEMINI_API_KEY=...      # or CLIQK_GEMINI_API_KEY
 export ELEVENLABS_API_KEY=...  # https://elevenlabs.io/app/settings/api-keys
-uv run pytest -q               # 52 passing
+uv run pytest -q               # 238 passed, 1 skipped on 2026-09-05
 ```
 
 ## Usage
@@ -89,12 +143,13 @@ uv run editor-cli edit ./footage --prompt "..." \
 # Outputs: edit/final.mp4 (ffmpeg) and edit/timeline.fcpxml (import into FCP).
 ```
 
-## Stack (proposed — not yet finalized)
+## Stack
 
 - Python — orchestrator + FCPXML generation
 - Gemini API — video understanding + style evaluation
 - ElevenLabs — word-level transcription (reused from `video-use`)
-- Final Cut Pro 12.2 — editing + render, via FCPXML import / export
+- Final Cut Pro 12.3 — editing + preview render through the loopback-only
+  CommandPost bridge
 - ffmpeg — preprocessing and fast preview renders
 
 ## References (vendored, gitignored)
