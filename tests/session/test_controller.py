@@ -134,7 +134,9 @@ async def test_controller_finishes_after_verified_first_pass(tmp_path):
     assert result.passes == 1
     assert result.best_pass.number == 1
     assert deps.fcp.opened_project == candidate.project_name
-    assert (session.root / "source" / "active-source.fcpxml").read_bytes() == deps.fcp.source_bytes
+    assert (
+        session.root / "source" / "active-source.fcpxml"
+    ).read_bytes() == deps.fcp.source_bytes
 
 
 @pytest.mark.anyio
@@ -166,3 +168,27 @@ async def test_controller_resumes_from_persisted_state(tmp_path):
     assert status.state is SessionState.APPLY
     candidate = await resumed.apply(session.id, valid_edit_program())
     assert candidate.number == 1
+
+
+@pytest.mark.anyio
+async def test_controller_resume_revalidates_the_active_project(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(EditRequest("remove gaps"))
+
+    resumed = await EditSessionController(deps).resume(session.id)
+
+    assert resumed.id == session.id
+    assert resumed.identity == deps.fcp.identity
+    assert resumed.state is SessionState.APPLY
+
+
+@pytest.mark.anyio
+async def test_controller_resume_rejects_a_different_active_project(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(EditRequest("remove gaps"))
+    deps.fcp.identity = ProjectIdentity("Library", "Event", "Other", 12.0)
+
+    with pytest.raises(SessionError, match="active project changed"):
+        await EditSessionController(deps).resume(session.id)

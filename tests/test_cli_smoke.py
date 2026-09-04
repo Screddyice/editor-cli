@@ -38,8 +38,14 @@ def test_doctor_reports_final_cut_version(monkeypatch):
         "editor_cli.mcp_server.device_report",
         lambda: {
             "final_cut": {"installed": True, "version": "12.3", "build": "450152"},
-            "commandpost": {"installed": True},
+            "commandpost": {
+                "installed": True,
+                "version": "2.1.0",
+                "license_app": "Fast Collections",
+                "bridge": {"loopback_only": True},
+            },
             "watch": {"codex": True, "claude_code": True},
+            "ready": True,
         },
     )
     res = CliRunner().invoke(app, ["doctor"])

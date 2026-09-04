@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+
 import typer
 
 app = typer.Typer(
@@ -9,6 +11,8 @@ app = typer.Typer(
     no_args_is_help=True,
     add_completion=False,
 )
+session_app = typer.Typer(help="Inspect or resume a persisted Final Cut edit session.")
+app.add_typer(session_app, name="session")
 
 
 @app.callback()
@@ -31,9 +35,7 @@ def setup_controller(
     from editor_cli.setup import SetupError, run_setup
 
     try:
-        result = run_setup(
-            dry_run=dry_run, upgrade_commandpost=upgrade_commandpost
-        )
+        result = run_setup(dry_run=dry_run, upgrade_commandpost=upgrade_commandpost)
     except (SetupError, OSError) as exc:
         typer.secho(f"Setup failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
@@ -57,27 +59,98 @@ def doctor() -> None:
     final_cut = report["final_cut"]
     if final_cut["installed"]:
         typer.echo(
-            f"✓ Final Cut Pro {final_cut['version']} "
-            f"(build {final_cut['build']})"
+            f"✓ Final Cut Pro {final_cut['version']} (build {final_cut['build']})"
         )
     else:
         typer.echo("✗ Final Cut Pro is not installed")
     commandpost = report["commandpost"]
     typer.echo(
         f"{'✓' if commandpost['installed'] else '✗'} CommandPost "
-        f"{'installed' if commandpost['installed'] else 'missing'}"
+        f"{commandpost.get('version') or ('installed' if commandpost['installed'] else 'missing')}"
+    )
+    typer.echo(
+        f"{'✓' if commandpost.get('license_app') else '✗'} LateNite license app"
+        + (f": {commandpost['license_app']}" if commandpost.get("license_app") else "")
+    )
+    bridge = commandpost.get("bridge", {})
+    typer.echo(
+        f"{'✓' if bridge.get('loopback_only') else '✗'} CommandPost loopback bridge"
     )
     watch = report["watch"]
     typer.echo(f"{'✓' if watch['codex'] else '✗'} Codex watch skill")
     typer.echo(f"{'✓' if watch['claude_code'] else '✗'} Claude Code watch skill")
-    ready = (
-        final_cut["installed"]
-        and commandpost["installed"]
-        and watch["codex"]
-        and watch["claude_code"]
-    )
-    if not ready:
+    if not report["ready"]:
         raise typer.Exit(1)
+
+
+def _session_call(action: str, session_id: str | None, prompt: str | None = None):
+    from editor_cli.mcp_server import build_default_services
+
+    return asyncio.run(
+        build_default_services().session.dispatch(
+            action, prompt=prompt, session_id=session_id
+        )
+    )
+
+
+def _print_session(result: dict) -> None:
+    session_id = result.get("session_id") or result.get("id")
+    typer.echo(f"Session: {session_id}")
+    typer.echo(f"State: {result['state']}")
+    typer.echo(f"Passes: {result.get('pass_count', result.get('passes', 0))}/3")
+    best = result.get("best_candidate") or result.get("best_pass")
+    if best:
+        typer.echo(f"Best candidate: pass {best['number']}")
+    failed = result.get("failed_checks") or []
+    if failed:
+        typer.echo("Failed checks: " + ", ".join(failed))
+
+
+@app.command("edit-active")
+def edit_active(
+    prompt: str = typer.Argument(
+        ..., help="Complete edit request for the active project."
+    ),
+) -> None:
+    """Capture the selected Final Cut project for an agent edit loop."""
+    try:
+        result = _session_call("start", None, prompt)
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.secho(
+            f"Could not start edit session: {exc}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(1)
+    _print_session(result)
+    typer.echo("Continue in Claude Code or Codex with the final-cut-editor skill.")
+
+
+@session_app.command("status")
+def session_status(session_id: str) -> None:
+    """Report persisted pass state and required-check failures."""
+    try:
+        result = _session_call("status", session_id)
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.secho(
+            f"Could not read edit session: {exc}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(1)
+    _print_session(result)
+    if result["state"] == "blocked" or result.get("failed_checks"):
+        raise typer.Exit(2)
+
+
+@session_app.command("resume")
+def session_resume(session_id: str) -> None:
+    """Revalidate and continue a persisted Final Cut edit session."""
+    try:
+        result = _session_call("resume", session_id)
+    except (OSError, RuntimeError, ValueError) as exc:
+        typer.secho(
+            f"Could not resume edit session: {exc}", fg=typer.colors.RED, err=True
+        )
+        raise typer.Exit(1)
+    _print_session(result)
+    typer.echo("Continue in Claude Code or Codex with the final-cut-editor skill.")
 
 
 @app.command()
@@ -92,20 +165,28 @@ def edit(
     preview: bool = typer.Option(False, "--preview", help="Fast 720p render."),
     no_fcpxml: bool = typer.Option(False, "--no-fcpxml", help="Skip FCPXML output."),
     genre: str = typer.Option(
-        None, "--genre", "-g", help="Discover trending reference videos for this genre/query."
+        None,
+        "--genre",
+        "-g",
+        help="Discover trending reference videos for this genre/query.",
     ),
-    trend_count: int = typer.Option(5, "--trend-count", help="How many trend refs to discover."),
+    trend_count: int = typer.Option(
+        5, "--trend-count", help="How many trend refs to discover."
+    ),
     effects: str = typer.Option(
-        "subtle", "--effects",
+        "subtle",
+        "--effects",
         help="Motion-graphics intensity the editor may apply: none | subtle | punchy.",
     ),
     titles: str = typer.Option(
-        "auto", "--titles",
+        "auto",
+        "--titles",
         help="Title overlay engine: auto | pillow | hyperframes "
-             "(auto uses HyperFrames when its runtime is ready, else Pillow).",
+        "(auto uses HyperFrames when its runtime is ready, else Pillow).",
     ),
     cookies_from_browser: str = typer.Option(
-        None, "--cookies-from-browser",
+        None,
+        "--cookies-from-browser",
         help="Read cookies from this browser for IG/TikTok refs (chrome, safari, firefox).",
     ),
     cookies: str = typer.Option(None, "--cookies", help="Path to a cookies.txt file."),
@@ -125,14 +206,24 @@ def edit(
     # References are fetched only to learn style → cap resolution and sample so
     # a long/4K reference URL doesn't break the Gemini upload. Footage is local.
     fetch_opts = FetchOptions(
-        cookies_from_browser=cookies_from_browser, cookies_file=cookies,
-        max_height=720, section="*0:00-240",
+        cookies_from_browser=cookies_from_browser,
+        cookies_file=cookies,
+        max_height=720,
+        section="*0:00-240",
     )
     deps = build_deps(cfg, out, fetch_opts=fetch_opts)
     result = run_edit(
-        footage_dir, prompt, ref or [], out, deps,
-        max_eval=max_eval, fcpxml=not no_fcpxml, preview=preview,
-        genre=genre, trend_count=trend_count, effects_intensity=effects,
+        footage_dir,
+        prompt,
+        ref or [],
+        out,
+        deps,
+        max_eval=max_eval,
+        fcpxml=not no_fcpxml,
+        preview=preview,
+        genre=genre,
+        trend_count=trend_count,
+        effects_intensity=effects,
         titles_engine=titles,
     )
     typer.secho(
@@ -145,14 +236,19 @@ def edit(
 
 @app.command()
 def style(
-    refs: list[str] = typer.Argument(..., help="Reference video(s): local path or URL."),
+    refs: list[str] = typer.Argument(
+        ..., help="Reference video(s): local path or URL."
+    ),
     out: str = typer.Option("style_refs", "--out", help="Download dir for URL refs."),
     cookies_from_browser: str = typer.Option(
         None, "--cookies-from-browser", help="Browser cookies for IG/TikTok refs."
     ),
-    max_height: int = typer.Option(720, "--max-height", help="Cap reference download resolution."),
+    max_height: int = typer.Option(
+        720, "--max-height", help="Cap reference download resolution."
+    ),
     sample_seconds: int = typer.Option(
-        240, "--sample-seconds",
+        240,
+        "--sample-seconds",
         help="Analyze only the first N seconds (0 = full video). Long videos break the upload.",
     ),
 ) -> None:
@@ -167,14 +263,19 @@ def style(
         typer.secho(f"Config error: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
 
-    section = f"*0:00-{sample_seconds}" if sample_seconds and sample_seconds > 0 else None
+    section = (
+        f"*0:00-{sample_seconds}" if sample_seconds and sample_seconds > 0 else None
+    )
     opts = FetchOptions(
-        cookies_from_browser=cookies_from_browser, max_height=max_height, section=section
+        cookies_from_browser=cookies_from_browser,
+        max_height=max_height,
+        section=section,
     )
     files = [resolve_reference(r, out, opts=opts) for r in refs]
     typer.secho(
         f"Analyzing style of {len(files)} reference(s) with {cfg.gemini_model} …",
-        fg=typer.colors.CYAN, err=True,
+        fg=typer.colors.CYAN,
+        err=True,
     )
     gemini = GeminiClient(make_gemini_generate(cfg.gemini_api_key, cfg.gemini_model))
     typer.echo(gemini.analyze_style(files).to_json())
@@ -206,11 +307,15 @@ def motion_doctor() -> None:
 @app.command()
 def overlay(
     base: str = typer.Argument(..., help="Base footage clip."),
-    clip: str = typer.Argument(..., metavar="OVERLAY", help="Overlay clip (with alpha)."),
+    clip: str = typer.Argument(
+        ..., metavar="OVERLAY", help="Overlay clip (with alpha)."
+    ),
     out: str = typer.Option("overlayed.mp4", "--out", "-o", help="Output path."),
     x: str = typer.Option("0", "--x", help="Overlay x position (px or ffmpeg expr)."),
     y: str = typer.Option("0", "--y", help="Overlay y position (px or ffmpeg expr)."),
-    start: float = typer.Option(0.0, "--start", help="When the overlay appears (seconds)."),
+    start: float = typer.Option(
+        0.0, "--start", help="When the overlay appears (seconds)."
+    ),
     preview: bool = typer.Option(False, "--preview", help="Fast encode."),
 ) -> None:
     """Composite a motion-graphics overlay (e.g. a HyperFrames render) onto footage."""

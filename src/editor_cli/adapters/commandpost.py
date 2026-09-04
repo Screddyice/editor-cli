@@ -7,11 +7,12 @@ import json
 import re
 import subprocess
 import uuid
-from typing import Any, Callable
+from collections.abc import Callable
+from copy import deepcopy
+from typing import Any
 from urllib.parse import urlsplit
 
 from websockets.asyncio.client import connect
-
 
 ALLOWED_HANDLERS = frozenset(
     {
@@ -22,7 +23,11 @@ ALLOWED_HANDLERS = frozenset(
         "fcpx_generator",
         "fcpx_title",
         "fcpx_transition",
+        "editor_cli",
     }
+)
+EDITOR_CONTROLLER_ACTIONS = frozenset(
+    {"active_project", "export_xml", "duplicate_project", "open_project"}
 )
 LOOPBACK_HOSTS = frozenset({"127.0.0.1", "::1", "localhost"})
 
@@ -50,7 +55,9 @@ class CommandPostClient:
     def __init__(self, url: str, timeout_seconds: float = 20.0):
         parsed = urlsplit(url)
         if parsed.scheme != "ws" or parsed.hostname not in LOOPBACK_HOSTS:
-            raise CommandPostError("CommandPost must use an unencrypted loopback WebSocket")
+            raise CommandPostError(
+                "CommandPost must use an unencrypted loopback WebSocket"
+            )
         self.url = url
         self.timeout_seconds = timeout_seconds
         self.port = parsed.port or 80
@@ -71,6 +78,11 @@ class CommandPostClient:
                 "parameters": parameters,
             },
         }
+
+    def controller_message(self, action: str, **parameters: Any) -> dict[str, Any]:
+        if action not in EDITOR_CONTROLLER_ACTIONS:
+            raise CommandPostError(f"Unsupported editor controller action: {action}")
+        return self.command_message("editor_cli", action, **deepcopy(parameters))
 
     async def request(self, message: dict[str, Any]) -> dict[str, Any]:
         try:

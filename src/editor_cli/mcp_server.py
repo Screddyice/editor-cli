@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import plistlib
+import subprocess
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
+
+from editor_cli.adapters.commandpost import CommandPostClient, CommandPostError
 
 try:
     from mcp.server.mcpserver import MCPServer
@@ -45,6 +48,32 @@ class UnconfiguredService:
         )
 
 
+LATENITE_APP_IDS = frozenset(
+    {
+        "com.latenitefilms.ATEMExporter",
+        "com.latenitefilms.BRAWToolbox",
+        "com.latenitefilms.Capacitor",
+        "com.latenitefilms.FastCollections",
+        "com.latenitefilms.GyroflowToolbox",
+        "com.latenitefilms.LUTRobot",
+        "com.latenitefilms.MarkerToolbox",
+        "com.latenitefilms.Metaburner",
+        "com.latenitefilms.NewsImport",
+        "com.latenitefilms.RecallToolbox",
+        "com.latenitefilms.TransferToolbox",
+        "com.latenitefilms.ScriptStar",
+        "com.latenitefilms.NotionToolbox",
+        "com.latenitefilms.SmartScriptPro",
+        "com.latenitefilms.SyncScriptPro",
+        "com.latenitefilms.TimecodeToolbox",
+        "com.latenitefilms.VFXToolbox",
+        "com.latenitefilms.KeyframeToolbox",
+        "com.latenitefilms.OutputToolbox",
+        "com.latenitefilms.SmartLevels",
+    }
+)
+
+
 def _find_app(
     applications: Path, pattern: str, bundle_identifier: str
 ) -> tuple[Path | None, dict[str, Any]]:
@@ -62,15 +91,47 @@ def _find_app(
     return None, {}
 
 
-def device_report(applications: Path = Path("/Applications")) -> dict[str, Any]:
+def device_report(
+    applications: Path = Path("/Applications"),
+    *,
+    listener_runner=subprocess.run,
+    skill_paths: tuple[Path, Path] | None = None,
+) -> dict[str, Any]:
     final_cut, info = _find_app(
         applications, "*Final Cut*.app", "com.apple.FinalCutApp"
     )
     reported_final_cut = final_cut or applications / "Final Cut Pro.app"
-    commandpost = applications / "CommandPost.app"
-    codex_watch = Path("~/.codex/skills/watch/SKILL.md").expanduser()
-    claude_watch = Path("~/.claude/skills/watch/SKILL.md").expanduser()
-    return {
+    commandpost, commandpost_info = _find_app(
+        applications, "CommandPost.app", "org.latenitefilms.CommandPost"
+    )
+    license_app = None
+    for candidate in sorted(applications.glob("*.app")):
+        info_path = candidate / "Contents/Info.plist"
+        if not info_path.is_file():
+            continue
+        try:
+            with info_path.open("rb") as handle:
+                candidate_info = plistlib.load(handle)
+        except (OSError, plistlib.InvalidFileException):
+            continue
+        if candidate_info.get("CFBundleIdentifier") in LATENITE_APP_IDS:
+            license_app = candidate.stem
+            break
+
+    bridge: dict[str, Any] = {"available": False, "loopback_only": False}
+    try:
+        bridge = {
+            "available": True,
+            **CommandPostClient("ws://127.0.0.1:27480/").doctor(runner=listener_runner),
+        }
+    except CommandPostError as exc:
+        bridge["error"] = str(exc)
+
+    codex_watch, claude_watch = skill_paths or (
+        Path("~/.codex/skills/watch/SKILL.md").expanduser(),
+        Path("~/.claude/skills/watch/SKILL.md").expanduser(),
+    )
+    report = {
         "final_cut": {
             "installed": final_cut is not None,
             "version": info.get("CFBundleShortVersionString"),
@@ -78,23 +139,32 @@ def device_report(applications: Path = Path("/Applications")) -> dict[str, Any]:
             "path": str(reported_final_cut),
         },
         "commandpost": {
-            "installed": commandpost.is_dir(),
-            "path": str(commandpost),
+            "installed": commandpost is not None,
+            "path": str(commandpost or applications / "CommandPost.app"),
+            "version": commandpost_info.get("CFBundleShortVersionString"),
+            "license_app": license_app,
+            "bridge": bridge,
         },
         "watch": {
             "codex": codex_watch.is_file(),
             "claude_code": claude_watch.is_file(),
         },
     }
+    report["ready"] = bool(
+        report["final_cut"]["installed"]
+        and report["commandpost"]["installed"]
+        and report["commandpost"]["license_app"]
+        and report["commandpost"]["bridge"]["loopback_only"]
+        and report["watch"]["codex"]
+        and report["watch"]["claude_code"]
+    )
+    return report
 
 
 def build_default_services() -> ServiceRegistry:
-    return ServiceRegistry(
-        session=DeviceSessionService(),
-        timeline=UnconfiguredService("timeline"),
-        media=UnconfiguredService("media"),
-        verify=UnconfiguredService("verification"),
-    )
+    from editor_cli.services import build_services
+
+    return build_services(doctor=device_report)
 
 
 def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:

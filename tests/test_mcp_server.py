@@ -1,5 +1,6 @@
-import sys
 import plistlib
+import sys
+from types import SimpleNamespace
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
@@ -44,7 +45,10 @@ async def test_mcp_exposes_only_grouped_tools():
         "editor_media",
         "editor_verify",
     }
-    assert all(tool.input_schema.get("additionalProperties") is False for tool in await mcp.list_tools())
+    assert all(
+        tool.input_schema.get("additionalProperties") is False
+        for tool in await mcp.list_tools()
+    )
 
 
 @pytest.mark.anyio
@@ -71,10 +75,12 @@ async def test_stdio_server_initializes_and_lists_four_tools():
         command=sys.executable,
         args=["-m", "editor_cli.mcp_server"],
     )
-    async with stdio_client(params) as (reader, writer):
-        async with ClientSession(reader, writer) as session:
-            await session.initialize()
-            names = {tool.name for tool in (await session.list_tools()).tools}
+    async with (
+        stdio_client(params) as (reader, writer),
+        ClientSession(reader, writer) as session,
+    ):
+        await session.initialize()
+        names = {tool.name for tool in (await session.list_tools()).tools}
     assert names == {
         "editor_session",
         "editor_timeline",
@@ -102,3 +108,37 @@ def test_device_report_discovers_creator_studio_final_cut_bundle(tmp_path):
     assert report["final_cut"]["installed"] is True
     assert report["final_cut"]["version"] == "12.3"
     assert report["final_cut"]["path"] == str(app)
+
+
+def test_device_report_requires_latenite_license_app_and_loopback_bridge(tmp_path):
+    def write_app(name, bundle, version="1.0", build="1"):
+        app = tmp_path / f"{name}.app"
+        info = app / "Contents" / "Info.plist"
+        info.parent.mkdir(parents=True)
+        with info.open("wb") as handle:
+            plistlib.dump(
+                {
+                    "CFBundleIdentifier": bundle,
+                    "CFBundleShortVersionString": version,
+                    "CFBundleVersion": build,
+                },
+                handle,
+            )
+        return app
+
+    write_app("Final Cut Pro Creator Studio", "com.apple.FinalCutApp", "12.3", "450152")
+    write_app("CommandPost", "org.latenitefilms.CommandPost", "2.1.0")
+    write_app("Fast Collections", "com.latenitefilms.FastCollections", "1.0")
+
+    report = device_report(
+        applications=tmp_path,
+        listener_runner=lambda *_args, **_kwargs: SimpleNamespace(
+            stdout="CommandPo 1 user 1u IPv4 0x0 0t0 TCP 127.0.0.1:27480 (LISTEN)\n"
+        ),
+        skill_paths=(tmp_path / "watch-a.md", tmp_path / "watch-b.md"),
+    )
+
+    assert report["commandpost"]["version"] == "2.1.0"
+    assert report["commandpost"]["license_app"] == "Fast Collections"
+    assert report["commandpost"]["bridge"]["loopback_only"] is True
+    assert report["ready"] is False

@@ -11,7 +11,12 @@ from typing import Any, Protocol
 
 from editor_cli.config import ControllerConfig
 from editor_cli.session.capture import capture_active_project, file_sha256
-from editor_cli.session.models import EditProgram, EditRequest, ProjectIdentity, SessionState
+from editor_cli.session.models import (
+    EditProgram,
+    EditRequest,
+    ProjectIdentity,
+    SessionState,
+)
 from editor_cli.session.paths import SessionPaths
 from editor_cli.session.store import SessionStore
 from editor_cli.verification.review import ReviewReport
@@ -40,7 +45,7 @@ class VideoEvidence(Protocol):
 
 @dataclass(frozen=True)
 class ControllerDeps:
-    sessions: "SessionRepository"
+    sessions: SessionRepository
     fcp: Any
     timeline: TimelineEngine
     watch: VideoEvidence
@@ -125,9 +130,7 @@ class SessionRepository:
 
 def select_best_pass(candidates: list[dict[str, Any]]) -> dict[str, Any]:
     """Choose the highest-scoring reviewed pass, preferring the earlier tie."""
-    reviewed = (
-        candidate for candidate in candidates if candidate["score"] is not None
-    )
+    reviewed = (candidate for candidate in candidates if candidate["score"] is not None)
     try:
         return min(
             reviewed,
@@ -185,7 +188,9 @@ class EditSessionController:
         destination = paths.candidates / f"pass-{number:02d}.fcpxml"
 
         self._transition(record, SessionState.APPLY)
-        written = (await self.deps.timeline.apply(source, program, destination)).resolve()
+        written = (
+            await self.deps.timeline.apply(source, program, destination)
+        ).resolve()
         if written != destination.resolve() or not written.is_file():
             raise SessionError("Timeline engine wrote outside the candidate path")
 
@@ -271,6 +276,19 @@ class EditSessionController:
         best = select_best_pass(reviewed) if reviewed else None
         return self._result(record, best)
 
+    async def resume(self, session_id: str) -> SessionHandle:
+        record = self.deps.sessions.load(session_id)
+        if self.deps.sessions.store(session_id).pending_actions():
+            raise SessionError("A pending Final Cut action requires reconciliation")
+        active = tuple(await self.deps.fcp.active_projects())
+        expected = ProjectIdentity(**record["identity"])
+        if len(active) != 1 or active[0] != expected:
+            raise SessionError(
+                "The active project changed; reopen the captured Final Cut project"
+            )
+        self._require_original(record)
+        return self._handle(record)
+
     async def _open_project(
         self, record: dict[str, Any], candidate: dict[str, Any]
     ) -> None:
@@ -293,9 +311,7 @@ class EditSessionController:
         await operation
         store.complete_external_action(token)
 
-    def _transition(
-        self, record: dict[str, Any], state: SessionState
-    ) -> None:
+    def _transition(self, record: dict[str, Any], state: SessionState) -> None:
         record["state"] = state.value
         self.deps.sessions.save(record)
         self.deps.sessions.store(record["id"]).append(
@@ -347,5 +363,10 @@ class EditSessionController:
     @staticmethod
     def _require_original(record: dict[str, Any]) -> None:
         source = Path(record["capture"]["source_xml"])
-        if not source.is_file() or file_sha256(source) != record["capture"]["source_sha256"]:
-            raise SessionError("The preserved source XML changed during this edit session")
+        if (
+            not source.is_file()
+            or file_sha256(source) != record["capture"]["source_sha256"]
+        ):
+            raise SessionError(
+                "The preserved source XML changed during this edit session"
+            )

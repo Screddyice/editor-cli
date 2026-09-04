@@ -102,3 +102,19 @@ def test_listener_probe_rejects_wildcard_and_lan_addresses(address):
     )
     with pytest.raises(CommandPostError, match="loopback"):
         require_loopback_listeners(output, port=27480)
+
+
+def test_commandpost_builds_only_named_editor_controller_actions():
+    client = CommandPostClient("ws://127.0.0.1:27480/")
+
+    message = client.controller_message(
+        "export_xml", destination="/tmp/session/source.fcpxml"
+    )
+
+    assert message["payload"] == {
+        "handler": "editor_cli",
+        "actionId": "export_xml",
+        "parameters": {"destination": "/tmp/session/source.fcpxml"},
+    }
+    with pytest.raises(CommandPostError, match="controller action"):
+        client.controller_message("run_shell", command="anything")
