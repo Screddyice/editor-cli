@@ -20,6 +20,9 @@ references/
 /edit/
 /out/
 /renders/
+/sessions/
+/canary-output/
+/work/
 
 # fcp interchange artifacts (generated)
 *.fcpxmld/

@@ -16,6 +16,70 @@ def _main() -> None:
     """Editor CLI — AI video editing (Final Cut Pro + Gemini)."""
 
 
+@app.command("setup")
+def setup_controller(
+    dry_run: bool = typer.Option(
+        False, "--dry-run", help="Show host changes without applying them."
+    ),
+    upgrade_commandpost: bool = typer.Option(
+        False,
+        "--upgrade-commandpost",
+        help="Replace a different CommandPost version with the pinned release.",
+    ),
+) -> None:
+    """Install and configure the local Final Cut controller."""
+    from editor_cli.setup import SetupError, run_setup
+
+    try:
+        result = run_setup(
+            dry_run=dry_run, upgrade_commandpost=upgrade_commandpost
+        )
+    except (SetupError, OSError) as exc:
+        typer.secho(f"Setup failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+
+    items = result.planned if dry_run else result.changed
+    if items:
+        for item in items:
+            typer.echo(f"  {'would ' if dry_run else ''}{item}")
+    else:
+        typer.echo("Editor CLI is already configured.")
+    if not dry_run:
+        typer.secho("Editor CLI host setup is complete.", fg=typer.colors.GREEN)
+
+
+@app.command("doctor")
+def doctor() -> None:
+    """Read local Final Cut controller readiness without opening an app."""
+    from editor_cli.mcp_server import device_report
+
+    report = device_report()
+    final_cut = report["final_cut"]
+    if final_cut["installed"]:
+        typer.echo(
+            f"✓ Final Cut Pro {final_cut['version']} "
+            f"(build {final_cut['build']})"
+        )
+    else:
+        typer.echo("✗ Final Cut Pro is not installed")
+    commandpost = report["commandpost"]
+    typer.echo(
+        f"{'✓' if commandpost['installed'] else '✗'} CommandPost "
+        f"{'installed' if commandpost['installed'] else 'missing'}"
+    )
+    watch = report["watch"]
+    typer.echo(f"{'✓' if watch['codex'] else '✗'} Codex watch skill")
+    typer.echo(f"{'✓' if watch['claude_code'] else '✗'} Claude Code watch skill")
+    ready = (
+        final_cut["installed"]
+        and commandpost["installed"]
+        and watch["codex"]
+        and watch["claude_code"]
+    )
+    if not ready:
+        raise typer.Exit(1)
+
+
 @app.command()
 def edit(
     footage_dir: str = typer.Argument(..., help="Folder of raw footage to edit."),

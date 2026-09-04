@@ -1,0 +1,24 @@
+from pathlib import Path
+
+
+def test_bridge_binds_loopback_and_restricts_handlers():
+    text = Path("commandpost/editor-cli-bridge/init.lua").read_text()
+    assert 'setInterface("loopback")' in text
+    assert "global_applescript" not in text
+    for handler in (
+        "global_menuactions",
+        "global_handler",
+        "fcpx_videoEffect",
+        "fcpx_audioEffect",
+        "fcpx_generator",
+        "fcpx_title",
+        "fcpx_transition",
+    ):
+        assert handler in text
+
+
+def test_bridge_has_no_shell_or_network_escape_hatches():
+    text = Path("commandpost/editor-cli-bridge/init.lua").read_text()
+    assert "os.execute" not in text
+    assert "hs.execute" not in text
+    assert "hs.task" not in text
