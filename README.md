@@ -24,8 +24,9 @@ decision remains hand-tweakable — not locked inside a flattened render.
 
 ## Status
 
-**Phases 1–3 are built; the full repository suite reports 238 passed and 1
-skipped on 2026-09-05.**
+**Phases 1–3 are built; the full repository suite reports 240 passed on
+2026-09-05.**
+
 - **Phase 1 — spine:** acquire → Gemini style → transcribe/probe → reason EDL →
   ffmpeg mp4 + FCPXML → Gemini eval loop. EDL→FCPXML validated against Final
   Cut's **v1.14 DTD**.
@@ -35,7 +36,11 @@ skipped on 2026-09-05.**
 - **Phase 3 — social:** Instagram/TikTok reference URLs via yt-dlp cookie auth
   (`--cookies-from-browser` / `--cookies`), retry hardening, actionable errors.
 
-Two gates remain before a live run:
+### Legacy Gemini and ffmpeg workflow gates
+
+These gates apply to the original Gemini and ffmpeg workflow. They do not
+determine Final Cut controller readiness:
+
 1. **API keys required** — set `GEMINI_API_KEY` (or `CLIQK_GEMINI_API_KEY`) and
    `ELEVENLABS_API_KEY`. They are currently empty in `~/projects/.env`.
 2. **Manual FCP import** — import a generated `timeline.fcpxml` into Final Cut
@@ -77,6 +82,13 @@ bridge bound to `127.0.0.1` or `::1`. The doctor refuses to start sessions
 until Final Cut, CommandPost, an eligible LateNite license app, the loopback
 bridge, and the shared `watch` skill are present.
 
+`editor-cli setup` installs the pinned CommandPost release when it is absent,
+installs the shared watch skill when needed, links the Final Cut skill and
+CommandPost bridge, writes the two MCP registrations with backups, and verifies
+that the MCP server lists tools. It does not start or validate the CommandPost
+listener. Configure the listener and macOS permissions, then use
+`editor-cli doctor` for readiness.
+
 Measured on 2026-09-05: Final Cut Pro 12.3 (build 450152), CommandPost 2.1.0,
 and `watch` 0.2.0 are installed for Codex and Claude Code. Device readiness is
 **false** because no eligible LateNite license app is installed and no
@@ -102,12 +114,16 @@ replay an uncertain external action or proceed if the source export changed.
 
 #### Measured automated verification
 
-On 2026-09-05, `uv run pytest -q` reported **238 passed, 1 skipped** and
+On 2026-09-05, `uv run pytest -q` reported **240 passed** and
 `uv build` produced the source distribution and wheel. A bounded stdio MCP
 probe initialized `editor-cli`, listed all four grouped tools, and returned the
 same not-ready doctor report. The canary preflight exited before it created a
 workspace: `Canary failed: Run editor-cli doctor and resolve failed checks
 first`. No preview hash or live evidence manifest exists yet.
+
+PR delivery remains pending until this branch is pushed. PR #18 has no
+configured check run in the latest remote state, so this document makes no
+green-check claim.
 
 See
 [`docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md`](docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md)
@@ -120,7 +136,7 @@ Final Cut 12.3 acceptance test.
 uv sync --extra dev            # install deps + dev tools
 export GEMINI_API_KEY=...      # or CLIQK_GEMINI_API_KEY
 export ELEVENLABS_API_KEY=...  # https://elevenlabs.io/app/settings/api-keys
-uv run pytest -q               # 238 passed, 1 skipped on 2026-09-05
+uv run pytest -q               # 240 passed on 2026-09-05
 ```
 
 ## Usage

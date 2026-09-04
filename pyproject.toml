@@ -3,7 +3,7 @@ name = "editor-cli"
 version = "0.1.0"
 description = "Editor CLI — AI video editing where Final Cut Pro is the engine and Gemini is the visual brain"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "Screddyice" }]
 keywords = ["video-editing", "final-cut-pro", "fcpxml", "gemini", "cli"]

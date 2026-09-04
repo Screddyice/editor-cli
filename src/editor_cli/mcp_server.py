@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import plistlib
 import subprocess
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
@@ -238,6 +239,12 @@ mcp = create_mcp()
 
 
 def main() -> None:
+    if "--help" in sys.argv[1:] or "-h" in sys.argv[1:]:
+        print(
+            "Usage: python -m editor_cli.mcp_server\n\n"
+            "Start the Editor CLI MCP server over standard input and output."
+        )
+        return
     mcp.run(transport="stdio")
 
 

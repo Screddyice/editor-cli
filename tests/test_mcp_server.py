@@ -1,4 +1,5 @@
 import plistlib
+import subprocess
 import sys
 from types import SimpleNamespace
 
@@ -142,3 +143,17 @@ def test_device_report_requires_latenite_license_app_and_loopback_bridge(tmp_pat
     assert report["commandpost"]["license_app"] == "Fast Collections"
     assert report["commandpost"]["bridge"]["loopback_only"] is True
     assert report["ready"] is False
+
+
+def test_mcp_module_help_exits_without_starting_stdio():
+    result = subprocess.run(
+        [sys.executable, "-m", "editor_cli.mcp_server", "--help"],
+        capture_output=True,
+        check=False,
+        input="",
+        text=True,
+        timeout=5,
+    )
+
+    assert result.returncode == 0
+    assert "Usage: python -m editor_cli.mcp_server" in result.stdout

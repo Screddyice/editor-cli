@@ -44,6 +44,10 @@ the missing eligible LateNite license app and CommandPost loopback listener.
 Do not claim a live canary result, preview hash, or dual-host comparison until
 those prerequisites are present and the disposable canary completes.
 
+Treat branch delivery and CI as separate evidence. Do not call PR #18 delivered
+or its checks green until the branch is pushed and GitHub reports a completed
+check run.
+
 Use only active-project references, installed Final Cut or Motion assets, and
 the session directory. Route public media through `editor_media.acquire`; it
 records provenance and accepts public HTTPS media only. The editor performs the

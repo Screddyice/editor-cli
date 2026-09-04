@@ -34,9 +34,9 @@ through the same grouped surface and shared `watch` evidence format.
 
 Fresh verification on 2026-09-05 recorded:
 
-- `uv run pytest -q`: 238 passed, 1 skipped in 21.73s;
-- `uv build`: source distribution and wheel built successfully; setuptools
-  emitted its existing `project.license` deprecation warning;
+- `uv run pytest -q`: 240 passed in 13.82s;
+- `uv build`: source distribution and wheel built successfully without the
+  prior `project.license` deprecation warning;
 - bounded stdio MCP probe: initialized protocol `2025-11-25`, listed
   `editor_media`, `editor_session`, `editor_timeline`, and `editor_verify`, and
   returned the doctor report below; and
@@ -54,6 +54,10 @@ dependency is an eligible LateNite license app plus a CommandPost WebSocket
 listener bound only to loopback. Run the disposable canary and the fresh
 Claude Code/Codex manifest comparison after those host prerequisites pass; do
 not infer acceptance from the installed commands or automated tests.
+
+The local branch still awaits push, so PR delivery remains pending. The latest
+remote PR #18 state has no configured check run. This specification does not
+claim green GitHub checks.
 
 ## Decisions
 
@@ -399,31 +403,26 @@ The implementation pins these reviewed upstream releases:
 | `bradautomates/claude-video` | 0.2.0 | Shared Claude Code and Codex video perception |
 | `CommandPost/CommandPost` | 2.1.0 | Final Cut UI control and installed-asset access |
 
-All three projects use the MIT license. The setup path verifies release hashes,
-the CommandPost code signature, a loopback-only WebSocket listener, and adapter
-contract tests before enabling live control. Dependency upgrades require the
-same checks and the live canary.
+The setup command is idempotent. It:
 
-The implementation provides an idempotent setup command that:
+1. checks the installed CommandPost version and installs the pinned release
+   when it is absent;
+2. verifies the downloaded CommandPost DMG checksum and app code signature
+   during installation;
+3. installs `watch` 0.2.0 for Claude Code and Codex when either copy is absent
+   or has a different version;
+4. links the Final Cut editor skill and CommandPost bridge plugin;
+5. writes managed MCP registrations for Codex and Claude Code, preserving a
+   timestamped backup before each configuration change; and
+6. verifies that the project MCP server imports and lists tools.
 
-1. checks Final Cut Pro 12.3, FFmpeg, `uv`, Python, and Node.js;
-2. installs the pinned, signed CommandPost release when it is absent;
-3. installs and pins the FCPXML MCP dependency in the project environment;
-4. installs the `watch` skill for Claude Code and Codex from
-   `bradautomates/claude-video`;
-5. verifies CommandPost's built-in WebSocket control surface on loopback;
-6. configures the Editor CLI MCP server for both agent hosts;
-7. creates the session root with restrictive permissions; and
-8. reports the macOS Automation and Accessibility permissions that need user
-   approval.
-
-Run `uv run editor-cli setup`, then grant CommandPost Automation access to
-Final Cut Pro and Accessibility access when macOS prompts. Enable the
-CommandPost WebSocket control surface on `127.0.0.1` or `::1`, then confirm it
-with `uv run editor-cli doctor`. The setup command creates timestamped backups
-before it changes an existing
-Claude Code, Codex, or CommandPost configuration. Repeated runs produce the
-same effective configuration.
+`editor-cli setup` does not install Final Cut, configure macOS permissions,
+start or validate the CommandPost listener, create a session root, or check the
+FFmpeg, `uv`, Python, and Node toolchain. Grant CommandPost Automation access
+to Final Cut Pro and Accessibility access when macOS prompts, then enable a
+loopback WebSocket listener on `127.0.0.1` or `::1`. Run `editor-cli doctor` to
+read those host prerequisites and block sessions until they pass. Dependency
+upgrades still require targeted tests and the disposable live canary.
 
 ## Testing
 
