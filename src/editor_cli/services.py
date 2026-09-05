@@ -225,14 +225,12 @@ class TimelineService:
                 },
             )
         if action == "undo":
-            candidates = record["candidates"]
-            project = (
-                candidates[-2]["project_name"]
-                if len(candidates) > 1
-                else record["identity"]["project"]
-            )
-            await self.controller.deps.fcp.open_project(project)
-            return {"session_id": session_id, "opened_project": project}
+            undone = await self.controller.undo(session_id)
+            return {
+                "session_id": session_id,
+                "project_name": undone.project_name,
+                "fcpxml_path": str(undone.fcpxml_path),
+            }
         raise ValueError(f"Unknown editor_timeline action: {action}")
 
 

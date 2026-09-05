@@ -12,6 +12,7 @@ from editor_cli.session.controller import (
     SessionError,
     SessionRepository,
 )
+from editor_cli.session.locking import SessionBusy, SessionLock
 from editor_cli.session.models import (
     BASE_REQUIRED_CHECKS,
     EditOperation,
@@ -44,6 +45,7 @@ class FakeFinalCut:
         self.imported = []
         self.rendered = []
         self.duplicated = []
+        self.reconciled = []
 
     async def active_projects(self):
         return (self.identity,)
@@ -53,18 +55,20 @@ class FakeFinalCut:
 
     async def inspect_xml(self, _path):
         return SimpleNamespace(
-            project=self.identity.project,
-            duration_seconds=self.identity.duration_seconds,
+            project="Demo",
+            duration_seconds=12.0,
             frame_seconds=1 / 30,
         )
 
     async def duplicate_project(self, _identity, _name):
         self.duplicated.append(_name)
-        return ProjectIdentity("Library", "Event", _name, 12.0)
+        self.identity = ProjectIdentity("Library", "Event", _name, 12.0)
+        return self.identity
 
     async def import_project(self, path, expected_identity):
         self.imported.append((path, expected_identity.project))
         self.identity = expected_identity
+        return expected_identity
 
     async def render_preview(self, identity, destination):
         self.rendered.append(identity)
@@ -73,6 +77,11 @@ class FakeFinalCut:
     async def open_project(self, identity):
         self.opened_project = identity.project
         self.identity = identity
+        return identity
+
+    async def reconcile_external_action(self, action):
+        self.reconciled.append(action.action)
+        return {"reconciled": True, "project": self.identity.project}
 
 
 class FakeTimeline:
@@ -487,7 +496,7 @@ async def test_controller_resume_revalidates_the_active_project(tmp_path):
     resumed = await EditSessionController(deps).resume(session.id)
 
     assert resumed.id == session.id
-    assert resumed.identity == deps.fcp.identity
+    assert resumed.identity == session.identity
     assert resumed.state is SessionState.APPLY
 
 
@@ -550,3 +559,171 @@ async def test_controller_names_candidates_with_short_session_id(tmp_path):
     candidate = await controller.apply(session.id, valid_edit_program())
 
     assert session.id[:8] in candidate.project_name
+
+
+@pytest.mark.anyio
+async def test_resume_reconciles_actionable_pending_open(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    store = deps.sessions.store(session.id)
+    expected = deps.fcp.identity
+    store.begin_external_action(
+        "finalcut.open_project",
+        {"project_name": expected.project},
+        expected_identity=expected.__dict__,
+        idempotency={"project_name": expected.project},
+    )
+
+    resumed = await EditSessionController(deps).resume(session.id)
+
+    assert resumed.id == session.id
+    assert deps.fcp.opened_project is None
+    assert store.pending_actions() == []
+
+
+@pytest.mark.anyio
+async def test_resume_fails_closed_for_multiple_pending_actions(tmp_path):
+    deps = controller_deps(tmp_path)
+    session = await EditSessionController(deps).start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    store = deps.sessions.store(session.id)
+    expected = deps.fcp.identity
+    for _ in range(2):
+        store.begin_external_action(
+            "finalcut.open_project",
+            {"identity": expected.__dict__},
+            expected_identity=expected.__dict__,
+            idempotency={"project_name": expected.project},
+        )
+
+    with pytest.raises(SessionError, match="multiple pending"):
+        await EditSessionController(deps).resume(session.id)
+
+    assert len(store.pending_actions()) == 2
+
+
+@pytest.mark.anyio
+async def test_apply_fails_under_competing_session_lock_before_timeline_mutation(
+    tmp_path,
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+
+    with SessionLock(session.root), pytest.raises(SessionBusy):
+        await controller.apply(session.id, valid_edit_program())
+
+    assert list((session.root / "candidates").iterdir()) == []
+
+
+@pytest.mark.anyio
+async def test_resume_reconciles_completed_import_without_replay(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    record = deps.sessions.load(session.id)
+    candidate = deps.sessions.paths(session.id).candidates / "pass-01.fcpxml"
+    candidate.write_bytes(deps.fcp.source_bytes)
+    expected = ProjectIdentity(
+        "Library", "Event", f"Demo - {session.id[:8]} - AI Pass 1", 12.0
+    )
+    deps.fcp.identity = expected
+    deps.fcp.imported.clear()
+    record["state"] = SessionState.IMPORT.value
+    deps.sessions.save(record)
+    store = deps.sessions.store(session.id)
+    store.begin_external_action(
+        "finalcut.import_xml",
+        {"path": str(candidate), "identity": expected.__dict__},
+        expected_identity=expected.__dict__,
+        idempotency={
+            "candidate_sha256": sha256(candidate.read_bytes()).hexdigest(),
+            "project_name": expected.project,
+        },
+    )
+
+    result = await controller.resume(session.id)
+
+    assert result.state is SessionState.PREVIEW
+    assert deps.fcp.imported == []
+    assert store.pending_actions() == []
+
+
+@pytest.mark.anyio
+async def test_resume_reconstructs_capture_after_completed_duplicate_without_replay(
+    tmp_path,
+):
+    deps = controller_deps(tmp_path)
+    record = deps.sessions.create(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    record["state"] = SessionState.CAPTURE.value
+    deps.sessions.save(record)
+    paths = deps.sessions.paths(record["id"])
+    store = deps.sessions.store(record["id"])
+    original = deps.fcp.identity
+    source = paths.source / "active-source.fcpxml"
+    source.write_bytes(deps.fcp.source_bytes)
+    export_token = store.begin_external_action(
+        "finalcut.export_xml",
+        {"project": original.project, "destination": str(source)},
+        expected_identity=original.__dict__,
+        idempotency={"destination": str(source)},
+    )
+    store.complete_external_action(
+        export_token,
+        {
+            "identity": original.__dict__,
+            "path": str(source),
+            "sha256": sha256(source.read_bytes()).hexdigest(),
+        },
+    )
+    preserved = ProjectIdentity(
+        original.library,
+        original.event,
+        f"Demo - Before AI - {record['id'][:8]}",
+        original.duration_seconds,
+    )
+    store.begin_external_action(
+        "finalcut.duplicate_project",
+        {"project": original.project, "preserved_name": preserved.project},
+        expected_identity=preserved.__dict__,
+        idempotency={"project_name": preserved.project},
+    )
+    deps.fcp.identity = preserved
+    deps.fcp.duplicated.clear()
+
+    result = await EditSessionController(deps).resume(record["id"])
+
+    assert result.state is SessionState.APPLY
+    assert result.identity == original
+    assert deps.fcp.duplicated == []
+    assert store.pending_actions() == []
+
+
+@pytest.mark.anyio
+async def test_undo_is_journaled_and_creates_a_new_project_version(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    first = await controller.apply(session.id, valid_edit_program())
+    await controller.record_review(session.id, first.number, failed_report(first, 0.5))
+    await controller.apply(session.id, valid_edit_program())
+
+    result = await controller.undo(session.id)
+
+    assert result.project_name.endswith("Undo 1")
+    assert deps.fcp.imported[-1][0] == result.fcpxml_path
+    assert deps.fcp.opened_project == result.project_name
+    kinds = [event["kind"] for event in deps.sessions.store(session.id).events()]
+    assert "undo_created" in kinds

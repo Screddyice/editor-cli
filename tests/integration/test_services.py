@@ -69,6 +69,9 @@ class FakeController:
 
 
 class FakeTimelineController:
+    def __init__(self):
+        self.undo_calls = []
+
     async def apply(self, session_id, program):
         assert session_id == "d" * 32
         assert program.operations[0].action == "fill_gaps"
@@ -81,6 +84,13 @@ class FakeTimelineController:
             required_checks={},
             observations=(),
             score=None,
+        )
+
+    async def undo(self, session_id):
+        self.undo_calls.append(session_id)
+        return SimpleNamespace(
+            project_name="Demo - Undo 1",
+            fcpxml_path=Path("/tmp/undo-01.fcpxml"),
         )
 
 
@@ -186,6 +196,25 @@ async def test_timeline_service_applies_a_typed_edit_program():
 
     assert result["candidate"]["number"] == 1
     assert result["candidate"]["project_name"] == "Demo - AI Pass 1"
+
+
+@pytest.mark.anyio
+async def test_timeline_service_routes_undo_through_controller():
+    class Sessions:
+        def load(self, _session_id):
+            return {"candidates": []}
+
+    controller = FakeTimelineController()
+    service = TimelineService(controller, Sessions(), fcpxml=None)
+
+    result = await service.dispatch("undo", session_id="d" * 32, edit_program=None)
+
+    assert result == {
+        "session_id": "d" * 32,
+        "project_name": "Demo - Undo 1",
+        "fcpxml_path": "/tmp/undo-01.fcpxml",
+    }
+    assert controller.undo_calls == ["d" * 32]
 
 
 def test_default_mcp_registry_has_concrete_services():

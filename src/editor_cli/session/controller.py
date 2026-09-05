@@ -12,8 +12,15 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
 
+from fcpxml.safe_xml import safe_parse
+
 from editor_cli.config import ControllerConfig
-from editor_cli.session.capture import capture_active_project, file_sha256
+from editor_cli.session.capture import (
+    capture_active_project,
+    file_sha256,
+    recover_active_project_capture,
+)
+from editor_cli.session.locking import SessionLock
 from editor_cli.session.models import (
     EditProgram,
     EditRequest,
@@ -23,6 +30,10 @@ from editor_cli.session.models import (
     required_checks_for_operations,
 )
 from editor_cli.session.paths import SessionPaths
+from editor_cli.session.reconcile import (
+    ReconciliationError,
+    reconcile_external_action,
+)
 from editor_cli.session.store import SessionStore
 from editor_cli.verification.review import ReviewReport
 from editor_cli.verification.technical import (
@@ -101,6 +112,14 @@ class SessionResult:
     failed_checks: tuple[str, ...]
 
 
+@dataclass(frozen=True)
+class UndoResult:
+    number: int
+    project_name: str
+    fcpxml_path: Path
+    source_version: int
+
+
 class SessionRepository:
     def __init__(self, config: ControllerConfig):
         self.config = config
@@ -141,7 +160,12 @@ class SessionRepository:
         return record
 
     def save(self, record: dict[str, Any]) -> None:
-        saved = self.store(record["id"]).save_state(record)
+        expected_version = record.get("version")
+        if isinstance(expected_version, bool) or not isinstance(expected_version, int):
+            raise SessionError("Edit session state has no valid version")
+        saved = self.store(record["id"]).save_state(
+            record, expected_version=expected_version
+        )
         record.clear()
         record.update(saved)
 
@@ -165,6 +189,11 @@ class EditSessionController:
     async def start(self, request: EditRequest) -> SessionHandle:
         record = self.deps.sessions.create(request)
         session_id = record["id"]
+        with self._session_lock(session_id):
+            return await self._start_locked(record)
+
+    async def _start_locked(self, record: dict[str, Any]) -> SessionHandle:
+        session_id = record["id"]
         paths = self.deps.sessions.paths(session_id)
         store = self.deps.sessions.store(session_id)
 
@@ -175,6 +204,7 @@ class EditSessionController:
             "source_xml": str(capture.source_xml),
             "source_sha256": capture.source_sha256,
             "preserved_name": capture.preserved_name,
+            "media_references": [str(path) for path in capture.media_references],
         }
         self._transition(record, SessionState.PRESERVE)
         self._transition(record, SessionState.ANALYZE)
@@ -183,6 +213,10 @@ class EditSessionController:
         return self._handle(record)
 
     async def apply(self, session_id: str, program: EditProgram) -> Candidate:
+        with self._session_lock(session_id):
+            return await self._apply_locked(session_id, program)
+
+    async def _apply_locked(self, session_id: str, program: EditProgram) -> Candidate:
         record = self.deps.sessions.load(session_id)
         if record["pass_count"] >= self.deps.sessions.config.max_passes:
             raise SessionError("This edit session already used all three passes")
@@ -340,7 +374,14 @@ class EditSessionController:
     async def record_review(
         self, session_id: str, pass_number: int, report: ReviewReport
     ) -> SessionResult:
+        with self._session_lock(session_id):
+            return await self._record_review_locked(session_id, pass_number, report)
+
+    async def _record_review_locked(
+        self, session_id: str, pass_number: int, report: ReviewReport
+    ) -> SessionResult:
         record = self.deps.sessions.load(session_id)
+        self._require_no_pending(session_id)
         if SessionState(record["state"]) is not SessionState.VERIFY:
             raise SessionError("Session is not awaiting a rendered review")
         if not report.required:
@@ -396,17 +437,157 @@ class EditSessionController:
         return self._result(record, best)
 
     async def resume(self, session_id: str) -> SessionHandle:
+        with self._session_lock(session_id):
+            return await self._resume_locked(session_id)
+
+    async def _resume_locked(self, session_id: str) -> SessionHandle:
         record = self.deps.sessions.load(session_id)
-        if self.deps.sessions.store(session_id).pending_actions():
-            raise SessionError("A pending Final Cut action requires reconciliation")
+        store = self.deps.sessions.store(session_id)
+        pending = store.pending_actions()
+        reconciled_actions: list[str] = []
+        if len(pending) > 1:
+            raise SessionError(
+                "Edit session journal contains multiple pending external actions"
+            )
+        if pending:
+            for action in pending:
+                try:
+                    result = await reconcile_external_action(
+                        action,
+                        self.deps.fcp,
+                        self.deps.sessions.paths(session_id).root,
+                    )
+                except ReconciliationError as exc:
+                    raise SessionError(
+                        f"Pending Final Cut action could not be reconciled: {action.action}"
+                    ) from exc
+                store.complete_external_action(action.token, result)
+                reconciled_actions.append(action.action)
+
+        if record.get("identity") is None:
+            if SessionState(record["state"]) is not SessionState.CAPTURE:
+                raise SessionError("Edit session has no captured project identity")
+            capture = await recover_active_project_capture(
+                self.deps.fcp, self.deps.sessions.paths(session_id), store
+            )
+            record["identity"] = asdict(capture.identity)
+            record["capture"] = {
+                "source_xml": str(capture.source_xml),
+                "source_sha256": capture.source_sha256,
+                "preserved_name": capture.preserved_name,
+                "media_references": [str(path) for path in capture.media_references],
+            }
+            self._transition(record, SessionState.PRESERVE)
+            self._transition(record, SessionState.ANALYZE)
+            record["analysis"] = await self.deps.timeline.analyze(capture.source_xml)
+            self._transition(record, SessionState.APPLY)
+            return self._handle(record)
+
+        if any(self._action_kind(name) == "import_xml" for name in reconciled_actions):
+            self._transition(record, SessionState.PREVIEW)
+        elif any(
+            self._action_kind(name) == "open_project" for name in reconciled_actions
+        ):
+            candidate = record["candidates"][-1] if record["candidates"] else None
+            if (
+                candidate
+                and candidate.get("required_checks")
+                and all(candidate["required_checks"].values())
+            ):
+                self._transition(record, SessionState.READY)
+            elif record["pass_count"] >= self.deps.sessions.config.max_passes:
+                self._transition(record, SessionState.BLOCKED)
+
         active = tuple(await self.deps.fcp.active_projects())
-        expected = ProjectIdentity(**record["identity"])
+        expected = self._latest_active_identity(store, record)
         if len(active) != 1 or active[0] != expected:
             raise SessionError(
                 "The active project changed; reopen the captured Final Cut project"
             )
         self._require_original(record)
         return self._handle(record)
+
+    async def undo(self, session_id: str) -> UndoResult:
+        with self._session_lock(session_id):
+            return await self._undo_locked(session_id)
+
+    async def _undo_locked(self, session_id: str) -> UndoResult:
+        record = self.deps.sessions.load(session_id)
+        self._require_no_pending(session_id)
+        if not record["candidates"]:
+            raise SessionError("Undo requires a candidate version")
+        if len(record["candidates"]) > 1:
+            previous = record["candidates"][-2]
+            source_path = Path(previous["fcpxml_path"])
+            source_version = int(previous["number"])
+            duration = float(previous["duration_seconds"])
+        else:
+            source_path = Path(record["capture"]["source_xml"])
+            source_version = 0
+            duration = float(record["identity"]["duration_seconds"])
+        source_identity = ProjectIdentity(**record["identity"])
+        undo_count = int(record.get("undo_count", 0)) + 1
+        identity = ProjectIdentity(
+            source_identity.library,
+            source_identity.event,
+            f"{source_identity.project} - {session_id[:8]} - Undo {undo_count}",
+            duration,
+        )
+        path = (
+            self.deps.sessions.paths(session_id).candidates
+            / f"undo-{undo_count:02d}.fcpxml"
+        )
+        self._write_undo_candidate(source_path, path, identity.project)
+        candidate_sha256 = file_sha256(path)
+        inspection = await self.deps.candidate_validator(path)
+        self._require_artifact_hash(
+            path, candidate_sha256, "Undo candidate changed during inspection"
+        )
+        if (
+            not inspection.verified
+            or inspection.duration_seconds != identity.duration_seconds
+        ):
+            raise SessionError("Undo candidate failed exact timeline validation")
+        imported = await self._external(
+            session_id,
+            "finalcut.import_xml",
+            {"path": str(path), "identity": asdict(identity)},
+            self.deps.fcp.import_project(path, identity),
+            expected_identity=identity,
+            idempotency={
+                "candidate_sha256": candidate_sha256,
+                "project_name": identity.project,
+            },
+        )
+        if imported != identity:
+            raise SessionError("Final Cut did not import the exact undo project")
+        opened = await self._external(
+            session_id,
+            "finalcut.open_project",
+            {"identity": asdict(identity)},
+            self.deps.fcp.open_project(identity),
+            expected_identity=identity,
+            idempotency={"project_name": identity.project},
+        )
+        if opened != identity:
+            raise SessionError("Final Cut did not open the exact undo project")
+        record["undo_count"] = undo_count
+        record.setdefault("undo_versions", []).append(
+            {
+                "number": undo_count,
+                "project_name": identity.project,
+                "fcpxml_path": str(path),
+                "sha256": candidate_sha256,
+                "identity": asdict(identity),
+                "source_version": source_version,
+            }
+        )
+        self.deps.sessions.save(record)
+        self.deps.sessions.store(session_id).append(
+            "undo_created",
+            {"project_name": identity.project, "source_version": source_version},
+        )
+        return UndoResult(undo_count, identity.project, path, source_version)
 
     async def _open_project(
         self, record: dict[str, Any], candidate: dict[str, Any]
@@ -440,6 +621,92 @@ class EditSessionController:
         result = await operation
         store.complete_external_action(token, self._external_result(result))
         return result
+
+    def _session_lock(self, session_id: str) -> SessionLock:
+        return SessionLock(
+            self.deps.sessions.paths(session_id).root,
+            blocking=False,
+        )
+
+    def _require_no_pending(self, session_id: str) -> None:
+        if self.deps.sessions.store(session_id).pending_actions():
+            raise SessionError("A pending Final Cut action requires reconciliation")
+
+    @staticmethod
+    def _action_kind(action: str) -> str:
+        aliases = {
+            "commandpost.export": "export_xml",
+            "finalcut.export": "export_xml",
+            "finalcut.export_xml": "export_xml",
+            "commandpost.duplicate": "duplicate_project",
+            "finalcut.duplicate": "duplicate_project",
+            "finalcut.duplicate_project": "duplicate_project",
+            "finalcut.import_xml": "import_xml",
+            "finalcut.share_preview": "share_preview",
+            "finalcut.open_project": "open_project",
+            "internet.download": "download",
+        }
+        return aliases.get(action, action)
+
+    @classmethod
+    def _latest_active_identity(
+        cls, store: SessionStore, record: dict[str, Any]
+    ) -> ProjectIdentity:
+        for event in reversed(store.events()):
+            if event.get("kind") != "external_action":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict) or data.get("status") != "complete":
+                continue
+            if cls._action_kind(str(data.get("action"))) not in {
+                "export_xml",
+                "duplicate_project",
+                "import_xml",
+                "share_preview",
+                "open_project",
+            }:
+                continue
+            try:
+                expected = data["expected"]
+                if not isinstance(expected, dict) or set(expected) != {
+                    "identity",
+                    "idempotency",
+                }:
+                    raise ValueError
+                identity = expected["identity"]
+                if not isinstance(identity, dict) or set(identity) != {
+                    "library",
+                    "event",
+                    "project",
+                    "duration_seconds",
+                }:
+                    raise ValueError
+                return ProjectIdentity(**identity)
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SessionError(
+                    "Completed Final Cut action has malformed identity evidence"
+                ) from exc
+        return ProjectIdentity(**record["identity"])
+
+    @staticmethod
+    def _write_undo_candidate(source: Path, destination: Path, name: str) -> None:
+        try:
+            if destination.exists():
+                raise SessionError("Undo candidate path already exists")
+            tree = safe_parse(str(source))
+            projects = tree.getroot().findall(".//project")
+            if len(projects) != 1:
+                raise SessionError("Undo source must contain one Final Cut project")
+            projects[0].set("name", name)
+            tree.write(
+                str(destination),
+                encoding="utf-8",
+                xml_declaration=True,
+            )
+        except SessionError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise SessionError("Could not create the undo candidate") from exc
 
     @staticmethod
     def _validate_evidence_manifest(
