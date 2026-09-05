@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import json
 import os
@@ -165,20 +166,89 @@ def _symlink_matches_plan(link: Path, plan: _SymlinkPlan) -> bool:
     ) and raw_target == plan.raw_target
 
 
-def _replace_legacy_symlink(link: Path, target: Path, plan: _SymlinkPlan) -> None:
-    link.parent.mkdir(parents=True, exist_ok=True)
-    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{link.name}.", dir=link.parent)
-    os.close(descriptor)
-    temp = Path(raw_temp)
-    temp.unlink()
+def _atomic_exchange(source: Path, destination: Path) -> None:
+    if sys.platform == "darwin":
+        function_name = "renameatx_np"
+    elif sys.platform.startswith("linux"):
+        function_name = "renameat2"
+    else:
+        raise SetupError(
+            "Atomic skill migration is unavailable on this platform; "
+            "the legacy link was left unchanged"
+        )
+
+    library = ctypes.CDLL(None, use_errno=True)
     try:
-        temp.symlink_to(target, target_is_directory=True)
-        if not _symlink_matches_plan(link, plan):
-            raise SetupError(f"Path changed after setup preflight: {link}")
-        os.replace(temp, link)
-        _fsync_directory(link.parent)
+        exchange = getattr(library, function_name)
+    except AttributeError as exc:
+        raise SetupError(
+            "Atomic skill migration is unavailable on this platform; "
+            "the legacy link was left unchanged"
+        ) from exc
+    exchange.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    exchange.restype = ctypes.c_int
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    source_directory = os.open(source.parent, directory_flags)
+    try:
+        destination_directory = os.open(destination.parent, directory_flags)
+        try:
+            result = exchange(
+                source_directory,
+                os.fsencode(source.name),
+                destination_directory,
+                os.fsencode(destination.name),
+                0x00000002,
+            )
+        finally:
+            os.close(destination_directory)
     finally:
-        temp.unlink(missing_ok=True)
+        os.close(source_directory)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        raise SetupError(f"Atomic skill migration failed: {os.strerror(error_number)}")
+
+
+def _replace_legacy_symlink(link: Path, target: Path, plan: _SymlinkPlan) -> Path:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    quarantine = Path(
+        tempfile.mkdtemp(prefix=f".{link.name}.editor-cli-migration-", dir=link.parent)
+    )
+    staged = quarantine / "replacement"
+    staged.symlink_to(target, target_is_directory=True)
+    if not _symlink_matches_plan(link, plan):
+        raise SetupError(
+            f"Path changed after setup preflight: {link}; "
+            f"staged replacement preserved at {staged}"
+        )
+
+    try:
+        _atomic_exchange(staged, link)
+    except SetupError as exc:
+        raise SetupError(f"{exc}; staged replacement preserved at {staged}") from exc
+
+    if not _symlink_matches_plan(staged, plan):
+        try:
+            _atomic_exchange(staged, link)
+        except SetupError as exc:
+            raise SetupError(
+                f"Path changed after setup preflight: {link}; "
+                f"the displaced path is preserved at {staged}"
+            ) from exc
+        raise SetupError(
+            f"Path changed after setup preflight: {link}; "
+            f"the staged replacement is preserved at {staged}"
+        )
+
+    _fsync_directory(link.parent)
+    _fsync_directory(quarantine)
+    return staged
 
 
 def _ensure_symlink(
@@ -198,7 +268,7 @@ def _ensure_symlink(
     if dry_run:
         return
     if plan.action == "legacy":
-        _replace_legacy_symlink(link, target, plan)
+        result.backups.append(_replace_legacy_symlink(link, target, plan))
     else:
         link.parent.mkdir(parents=True, exist_ok=True)
         try:

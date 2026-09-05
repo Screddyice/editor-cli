@@ -164,6 +164,10 @@ def test_setup_migrates_exact_legacy_final_cut_skill_links(tmp_path):
     for root in (paths.codex_skills, paths.claude_skills):
         assert (root / "final-cut-editor").resolve() == packaged
     assert sum(str(item).startswith("migrate ") for item in result.changed) == 2
+    assert len(result.backups) == 2
+    for backup in result.backups:
+        assert backup.is_symlink()
+        assert backup.resolve() == legacy.resolve()
 
 
 def test_setup_preflights_arbitrary_skill_collision_before_native_build(tmp_path):
@@ -234,3 +238,53 @@ def test_setup_does_not_clobber_legacy_skill_changed_after_preflight(tmp_path):
 
     assert link.is_symlink()
     assert link.resolve() == replacement.resolve()
+
+
+def test_setup_leaves_legacy_skill_usable_without_atomic_exchange(
+    tmp_path, monkeypatch
+):
+    paths = setup_paths(tmp_path)
+    legacy = paths.repo_root / "skills/final-cut-editor"
+    link = paths.codex_skills / "final-cut-editor"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(legacy, target_is_directory=True)
+    monkeypatch.setattr(setup_lib.sys, "platform", "unsupported")
+
+    with pytest.raises(SetupError, match="legacy link was left unchanged"):
+        run_setup(paths, platform=FakePlatform())
+
+    assert link.is_symlink()
+    assert link.resolve() == legacy.resolve()
+
+
+def test_setup_restores_skill_swapped_immediately_before_legacy_install(
+    tmp_path, monkeypatch
+):
+    paths = setup_paths(tmp_path)
+    legacy = paths.repo_root / "skills/final-cut-editor"
+    link = paths.codex_skills / "final-cut-editor"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(legacy, target_is_directory=True)
+    replacement = tmp_path / "replacement-skill"
+    replacement.mkdir()
+    real_exchange = setup_lib._atomic_exchange
+    injected = False
+
+    def exchange_after_swap(source, destination):
+        nonlocal injected
+        if destination == link and not injected:
+            injected = True
+            link.unlink()
+            link.symlink_to(replacement, target_is_directory=True)
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", exchange_after_swap)
+
+    with pytest.raises(SetupError, match="changed after setup preflight") as error:
+        run_setup(paths, platform=FakePlatform())
+
+    assert injected
+    assert link.is_symlink()
+    assert link.resolve() == replacement.resolve()
+    assert replacement.is_dir()
+    assert "staged replacement is preserved at" in str(error.value)
