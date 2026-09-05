@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -111,6 +112,257 @@ def test_setup_refuses_unmanaged_claude_editor_cli_entry(tmp_path):
         run_setup(paths, platform=FakePlatform())
 
     assert "someone-else" in paths.claude_config.read_text(encoding="utf-8")
+
+
+def test_setup_refuses_unmarked_claude_entry_with_installed_command(tmp_path):
+    paths = setup_paths(tmp_path)
+    python = paths.repo_root / ".venv/bin/python"
+    paths.claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "editor-cli": {
+                        "type": "stdio",
+                        "command": str(python),
+                        "args": ["-m", "editor_cli.mcp_server"],
+                        "cwd": str(paths.repo_root),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    platform = FakePlatform()
+
+    with pytest.raises(SetupError, match="unmanaged editor-cli"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.application_support.exists()
+
+
+def test_setup_refuses_marked_claude_entry_with_other_command(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "editor-cli": {
+                        "managed_by": "editor-cli.mcp-server",
+                        "command": "/other/tool",
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    platform = FakePlatform()
+
+    with pytest.raises(SetupError, match="unmanaged editor-cli"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.application_support.exists()
+
+
+def test_setup_refuses_other_claude_marker_with_installed_command(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.claude_config.write_text(
+        json.dumps(
+            {
+                "mcpServers": {
+                    "editor-cli": {
+                        "managed_by": "another-installer",
+                        "command": str(paths.repo_root / ".venv/bin/python"),
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    platform = FakePlatform()
+
+    with pytest.raises(SetupError, match="unmanaged editor-cli"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.application_support.exists()
+
+
+def test_setup_refuses_marked_codex_entry_with_other_command(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.codex_config.parent.mkdir(parents=True)
+    paths.codex_config.write_text(
+        "\n".join(
+            (
+                setup_lib.CODEX_BLOCK_START,
+                '[mcp_servers."editor-cli"]',
+                'command = "/other/tool"',
+                'args = ["-m", "editor_cli.mcp_server"]',
+                f"cwd = {json.dumps(str(paths.repo_root))}",
+                setup_lib.CODEX_BLOCK_END,
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+    platform = FakePlatform()
+
+    with pytest.raises(SetupError, match="unmanaged editor-cli"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.application_support.exists()
+
+
+def test_setup_marks_claude_entry_and_preserves_unrelated_keys(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.claude_config.write_text(
+        json.dumps(
+            {
+                "theme": "dark",
+                "mcpServers": {
+                    "other": {"command": "/other/tool", "env": {"SAFE": "1"}}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    run_setup(paths, platform=FakePlatform())
+
+    value = json.loads(paths.claude_config.read_text(encoding="utf-8"))
+    assert value["theme"] == "dark"
+    assert value["mcpServers"]["other"] == {
+        "command": "/other/tool",
+        "env": {"SAFE": "1"},
+    }
+    assert value["mcpServers"]["editor-cli"]["managed_by"] == ("editor-cli.mcp-server")
+
+
+def test_setup_preserves_unrelated_codex_tables_around_managed_block(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.codex_config.parent.mkdir(parents=True)
+    paths.codex_config.write_text(
+        "\n".join(
+            (
+                'theme = "dark"',
+                "",
+                "[existing]",
+                "value = 1",
+                "",
+                setup_lib.CODEX_BLOCK_START,
+                '[mcp_servers."editor-cli"]',
+                f"command = {json.dumps(str(paths.repo_root / '.venv/bin/python'))}",
+                'args = ["wrong"]',
+                f"cwd = {json.dumps(str(paths.repo_root))}",
+                setup_lib.CODEX_BLOCK_END,
+                "",
+                "[tail]",
+                "enabled = true",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    run_setup(paths, platform=FakePlatform())
+
+    value = setup_lib.tomllib.loads(paths.codex_config.read_text(encoding="utf-8"))
+    assert value["theme"] == "dark"
+    assert value["existing"] == {"value": 1}
+    assert value["tail"] == {"enabled": True}
+    assert value["mcp_servers"]["editor-cli"]["args"] == [
+        "-m",
+        "editor_cli.mcp_server",
+    ]
+
+
+def test_setup_does_not_clobber_config_created_after_preflight(tmp_path):
+    paths = setup_paths(tmp_path)
+    collision = {"mcpServers": {"editor-cli": {"command": "/created/during/setup"}}}
+
+    class RacingPlatform(FakePlatform):
+        def run(self, command, *, cwd=None):
+            super().run(command, cwd=cwd)
+            if command[:2] == ("swift", "build"):
+                paths.claude_config.write_text(json.dumps(collision), encoding="utf-8")
+
+    with pytest.raises(SetupError, match="changed after setup preflight"):
+        run_setup(paths, platform=RacingPlatform())
+
+    assert json.loads(paths.claude_config.read_text(encoding="utf-8")) == collision
+
+
+def test_atomic_config_update_validates_temp_before_replacement(tmp_path, monkeypatch):
+    config = tmp_path / "config.toml"
+    original = b"[existing]\nvalue = 1\n"
+    config.write_bytes(original)
+    replacements = []
+    real_replace = setup_lib.os.replace
+
+    def record_replace(source, destination):
+        replacements.append((Path(source), Path(destination)))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(setup_lib.os, "replace", record_replace)
+
+    with pytest.raises(SetupError, match="invalid configuration"):
+        setup_lib.atomic_config_update(
+            config, b"not toml", parse=setup_lib.tomllib.loads
+        )
+
+    assert config.read_bytes() == original
+    assert not config.with_suffix(".toml.editor-cli.bak").exists()
+    assert all(destination != config for _, destination in replacements)
+    assert list(tmp_path.glob(f".{config.name}.*")) == []
+
+
+def test_setup_restores_fixed_backup_after_later_verification_failure(
+    tmp_path, monkeypatch
+):
+    paths = setup_paths(tmp_path)
+    paths.codex_config.parent.mkdir(parents=True)
+    original = "[existing]\nvalue = 1\n"
+    paths.codex_config.write_text(original, encoding="utf-8")
+    platform = FakePlatform()
+    run_setup(paths, platform=platform)
+    backup = paths.codex_config.with_suffix(".toml.editor-cli.bak")
+    assert backup.read_text(encoding="utf-8") == original
+
+    configured = paths.codex_config.read_text(encoding="utf-8")
+    paths.codex_config.write_text(
+        configured.replace(
+            'args = ["-m", "editor_cli.mcp_server"]', 'args = ["wrong"]'
+        ),
+        encoding="utf-8",
+    )
+    real_validate = setup_lib._validate_config_file
+    failed = False
+    replacements = []
+    real_replace = setup_lib.os.replace
+
+    def fail_once(path):
+        nonlocal failed
+        if path == paths.codex_config and not failed:
+            failed = True
+            raise SetupError("post-write parse failed")
+        return real_validate(path)
+
+    def record_replace(source, destination):
+        if Path(destination) == paths.codex_config:
+            replacements.append(Path(source))
+        real_replace(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_validate_config_file", fail_once)
+    monkeypatch.setattr(setup_lib.os, "replace", record_replace)
+
+    with pytest.raises(SetupError, match="post-write parse failed"):
+        run_setup(paths, platform=platform)
+
+    assert paths.codex_config.read_text(encoding="utf-8") == original
+    assert len(replacements) == 2
+    assert all(source.parent == paths.codex_config.parent for source in replacements)
 
 
 def test_setup_rolls_back_config_when_post_write_validation_fails(

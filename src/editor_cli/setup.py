@@ -11,6 +11,7 @@ import stat
 import subprocess
 import sys
 import tempfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from importlib.resources.abc import Traversable
 from pathlib import Path
@@ -31,6 +32,7 @@ NATIVE_BUILD_PRODUCT = "FinalCutBridge"
 NATIVE_SIGNING_IDENTIFIER = "com.screddy.editorcli.finalcutbridge"
 NATIVE_METADATA_VERSION = 1
 NATIVE_MANAGED_BY = "editor-cli.native-final-cut-helper"
+MCP_MANAGED_BY = "editor-cli.mcp-server"
 CODEX_BLOCK_START = "# BEGIN editor-cli managed MCP"
 CODEX_BLOCK_END = "# END editor-cli managed MCP"
 
@@ -295,19 +297,46 @@ def _codex_block(python: Path, repo_root: Path) -> str:
 def _merge_codex_config(path: Path, python: Path, repo_root: Path) -> str | None:
     existing = path.read_text(encoding="utf-8") if path.is_file() else ""
     block = _codex_block(python, repo_root)
-    if CODEX_BLOCK_START in existing:
+    try:
+        parsed = tomllib.loads(existing) if existing.strip() else {}
+    except tomllib.TOMLDecodeError as exc:
+        raise SetupError(f"Codex config is invalid TOML: {path}") from exc
+    servers = parsed.get("mcp_servers", {})
+    if not isinstance(servers, dict):
+        raise SetupError("Codex mcp_servers must contain a TOML table")
+    current = servers.get("editor-cli")
+
+    start_count = existing.count(CODEX_BLOCK_START)
+    end_count = existing.count(CODEX_BLOCK_END)
+    if start_count or end_count:
+        if start_count != 1 or end_count != 1:
+            raise SetupError("Codex editor-cli MCP ownership marker is malformed")
         before, remainder = existing.split(CODEX_BLOCK_START, 1)
-        if CODEX_BLOCK_END not in remainder:
-            raise SetupError("Codex editor-cli MCP block is missing its end marker")
-        _, after = remainder.split(CODEX_BLOCK_END, 1)
+        managed_text, after = remainder.split(CODEX_BLOCK_END, 1)
+        try:
+            managed = tomllib.loads(managed_text)
+        except tomllib.TOMLDecodeError as exc:
+            raise SetupError("Codex editor-cli MCP ownership block is invalid") from exc
+        managed_servers = managed.get("mcp_servers", {})
+        managed_entry = (
+            managed_servers.get("editor-cli")
+            if isinstance(managed_servers, dict)
+            else None
+        )
+        if (
+            not isinstance(current, dict)
+            or not isinstance(managed_entry, dict)
+            or current.get("command") != str(python)
+            or managed_entry.get("command") != str(python)
+        ):
+            raise SetupError(
+                "Codex already has an unmanaged editor-cli MCP entry; "
+                "remove or rename it"
+            )
         prefix = before.rstrip()
         updated = (prefix + "\n\n" if prefix else "") + block + after
     else:
-        try:
-            parsed = tomllib.loads(existing) if existing.strip() else {}
-        except tomllib.TOMLDecodeError as exc:
-            raise SetupError(f"Codex config is invalid TOML: {path}") from exc
-        if "editor-cli" in parsed.get("mcp_servers", {}):
+        if current is not None:
             raise SetupError(
                 "Codex already has an unmanaged editor-cli MCP entry; remove or rename it"
             )
@@ -336,15 +365,24 @@ def _merge_claude_config(path: Path, python: Path, repo_root: Path) -> str | Non
         "command": str(python),
         "args": ["-m", "editor_cli.mcp_server"],
         "cwd": str(repo_root),
+        "managed_by": MCP_MANAGED_BY,
     }
     current = servers.get("editor-cli")
-    if current == desired:
-        return None
     if current is not None:
-        raise SetupError(
-            "Claude already has an unmanaged editor-cli entry; remove or rename it"
-        )
-    servers["editor-cli"] = desired
+        if (
+            not isinstance(current, dict)
+            or current.get("command") != str(python)
+            or current.get("managed_by") != MCP_MANAGED_BY
+        ):
+            raise SetupError(
+                "Claude already has an unmanaged editor-cli entry; remove or rename it"
+            )
+        updated = {**current, **desired}
+        if current == updated:
+            return None
+        servers["editor-cli"] = updated
+    else:
+        servers["editor-cli"] = desired
     return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
 
 
@@ -356,20 +394,89 @@ def _fsync_directory(path: Path) -> None:
         os.close(descriptor)
 
 
-def _atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+def _write_sibling_temp(path: Path, content: bytes, *, mode: int) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temp = Path(raw_temp)
     try:
         with os.fdopen(descriptor, "wb") as handle:
+            os.fchmod(handle.fileno(), mode)
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        temp.chmod(mode)
+    except Exception:
+        temp.unlink(missing_ok=True)
+        raise
+    return temp
+
+
+def _atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+    temp = _write_sibling_temp(path, content, mode=mode)
+    try:
         os.replace(temp, path)
         _fsync_directory(path.parent)
     finally:
         temp.unlink(missing_ok=True)
+
+
+def _parse_config_path(path: Path, parse: Callable[[str], object]) -> None:
+    try:
+        parse(path.read_text(encoding="utf-8"))
+    except Exception as exc:
+        raise SetupError(f"Refusing to install invalid configuration: {path}") from exc
+
+
+def _atomic_validated_replace(
+    path: Path,
+    content: bytes,
+    *,
+    parse: Callable[[str], object],
+    mode: int = 0o600,
+) -> None:
+    temp = _write_sibling_temp(path, content, mode=mode)
+    try:
+        _parse_config_path(temp, parse)
+        os.replace(temp, path)
+        _fsync_directory(path.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def atomic_config_update(
+    path: Path,
+    content: bytes,
+    *,
+    parse: Callable[[str], object],
+    verify: Callable[[Path], None] | None = None,
+) -> Path | None:
+    """Install validated config bytes and restore the fixed backup on failure."""
+    existed = path.exists()
+    replaced = False
+    backup = None
+    temp = _write_sibling_temp(path, content, mode=0o600)
+    try:
+        _parse_config_path(temp, parse)
+        backup = backup_before_write(path)
+        os.replace(temp, path)
+        replaced = True
+        _fsync_directory(path.parent)
+        if verify is None:
+            _parse_config_path(path, parse)
+        else:
+            verify(path)
+    except Exception as exc:
+        if replaced:
+            if backup is not None:
+                _atomic_validated_replace(path, backup.read_bytes(), parse=parse)
+            elif not existed:
+                path.unlink(missing_ok=True)
+                _fsync_directory(path.parent)
+        if isinstance(exc, SetupError):
+            raise
+        raise SetupError(f"Failed to update configuration: {path}") from exc
+    finally:
+        temp.unlink(missing_ok=True)
+    return backup
 
 
 def _validate_config_file(path: Path) -> None:
@@ -381,26 +488,30 @@ def _validate_config_file(path: Path) -> None:
 
 
 def _write_config(
-    path: Path, content: str | None, result: SetupResult, dry_run: bool
+    path: Path,
+    content: str | None,
+    result: SetupResult,
+    dry_run: bool,
+    *,
+    expected: str | None,
 ) -> None:
     if content is None:
         return
     result.planned.append(f"configure {path}")
     if dry_run:
         return
-    backup = backup_before_write(path)
+    current = path.read_text(encoding="utf-8") if path.is_file() else None
+    if current != expected:
+        raise SetupError(f"Config changed after setup preflight: {path}")
+    parse = tomllib.loads if path.suffix == ".toml" else json.loads
+    backup = atomic_config_update(
+        path,
+        content.encode("utf-8"),
+        parse=parse,
+        verify=_validate_config_file,
+    )
     if backup is not None:
         result.backups.append(backup)
-    existed = path.exists()
-    try:
-        _atomic_write_bytes(path, content.encode("utf-8"))
-        _validate_config_file(path)
-    except Exception:
-        if backup is not None:
-            _atomic_write_bytes(path, backup.read_bytes())
-        elif not existed:
-            path.unlink(missing_ok=True)
-        raise
     result.changed.append(f"configure {path}")
 
 
@@ -749,6 +860,16 @@ def run_setup(
     claude_skill = paths.claude_skills / "final-cut-editor"
     codex_skill_plan = _symlink_plan(codex_skill, skill_source, legacy_skill_source)
     claude_skill_plan = _symlink_plan(claude_skill, skill_source, legacy_skill_source)
+    codex_original = (
+        paths.codex_config.read_text(encoding="utf-8")
+        if paths.codex_config.is_file()
+        else None
+    )
+    claude_original = (
+        paths.claude_config.read_text(encoding="utf-8")
+        if paths.claude_config.is_file()
+        else None
+    )
     codex_content = _merge_codex_config(paths.codex_config, python, paths.repo_root)
     claude_content = _merge_claude_config(paths.claude_config, python, paths.repo_root)
     helper = paths.application_support / "bin" / NATIVE_HELPER_NAME
@@ -795,12 +916,14 @@ def run_setup(
         codex_content,
         result,
         dry_run,
+        expected=codex_original,
     )
     _write_config(
         paths.claude_config,
         claude_content,
         result,
         dry_run,
+        expected=claude_original,
     )
 
     if dry_run:
