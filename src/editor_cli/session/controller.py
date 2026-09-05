@@ -27,7 +27,6 @@ from editor_cli.session.store import SessionStore
 from editor_cli.verification.review import ReviewReport
 from editor_cli.verification.technical import (
     CandidateFCPXMLInspection,
-    inspect_candidate_fcpxml,
     inspect_preview,
 )
 
@@ -59,9 +58,7 @@ class ControllerDeps:
     fcp: Any
     timeline: TimelineEngine
     watch: VideoEvidence
-    candidate_validator: (
-        Callable[[Path], Awaitable[CandidateFCPXMLInspection]] | None
-    ) = None
+    candidate_validator: Callable[[Path], Awaitable[CandidateFCPXMLInspection]]
     preview_inspector: Callable[..., ReviewReport] | None = None
 
 
@@ -215,7 +212,13 @@ class EditSessionController:
         if written != destination.resolve() or not written.is_file():
             raise SessionError("Timeline engine wrote outside the candidate path")
 
-        candidate_qc = await self._inspect_candidate(written)
+        candidate_sha256 = file_sha256(written)
+        candidate_qc = await self.deps.candidate_validator(written)
+        self._require_artifact_hash(
+            written,
+            candidate_sha256,
+            "Candidate XML changed during inspection",
+        )
         if not candidate_qc.required.get("fcpxml_parseable", False):
             raise SessionError(
                 "Candidate XML is malformed or does not contain one timeline"
@@ -233,8 +236,6 @@ class EditSessionController:
             project=project_name,
             duration_seconds=candidate_qc.duration_seconds,
         )
-        candidate_sha256 = file_sha256(written)
-
         self._transition(record, SessionState.IMPORT)
         await self._external(
             session_id,
@@ -264,6 +265,7 @@ class EditSessionController:
         if not preview.is_file():
             raise SessionError("Final Cut did not create the requested preview")
 
+        preview_sha256 = file_sha256(preview)
         preview_inspector = self.deps.preview_inspector or inspect_preview
         preview_qc = await asyncio.to_thread(
             preview_inspector,
@@ -271,7 +273,11 @@ class EditSessionController:
             expected_duration=candidate_qc.duration_seconds,
             fcpxml_qc=candidate_qc.verified,
         )
-        preview_sha256 = file_sha256(preview)
+        self._require_artifact_hash(
+            preview,
+            preview_sha256,
+            "Preview changed during inspection",
+        )
 
         evidence = await asyncio.to_thread(
             self.deps.watch.analyze,
@@ -283,10 +289,15 @@ class EditSessionController:
         if not manifest.is_file() or not manifest.is_relative_to(paths.evidence):
             raise SessionError("Watch evidence is outside the session")
         self._require_original(record)
+        manifest_sha256 = file_sha256(manifest)
         frame_timestamps = self._validate_evidence_manifest(
             manifest, preview, preview_sha256, paths.evidence
         )
-        manifest_sha256 = file_sha256(manifest)
+        self._require_artifact_hash(
+            manifest,
+            manifest_sha256,
+            "Watch evidence manifest changed during inspection",
+        )
         binding = EvidenceBinding(
             session_id=session_id,
             pass_number=number,
@@ -347,6 +358,7 @@ class EditSessionController:
         self._require_review_binding(
             record, candidate, report.binding, expected_binding
         )
+        self._require_original(record)
 
         accepted_checks = dict(report.required)
         accepted_checks.update(candidate["controller_checks"])
@@ -428,13 +440,6 @@ class EditSessionController:
         result = await operation
         store.complete_external_action(token, self._external_result(result))
         return result
-
-    async def _inspect_candidate(self, path: Path) -> CandidateFCPXMLInspection:
-        if self.deps.candidate_validator is not None:
-            return await self.deps.candidate_validator(path)
-        return inspect_candidate_fcpxml(
-            path, upstream_validation={"text": "## Health Score: 100%"}
-        )
 
     @staticmethod
     def _validate_evidence_manifest(

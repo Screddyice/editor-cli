@@ -1,4 +1,5 @@
 import json
+from dataclasses import replace
 from hashlib import sha256
 from types import SimpleNamespace
 
@@ -20,6 +21,7 @@ from editor_cli.session.models import (
     SessionState,
 )
 from editor_cli.verification.review import ReviewReport
+from editor_cli.verification.technical import inspect_candidate_fcpxml
 
 
 @pytest.fixture
@@ -28,13 +30,16 @@ def anyio_backend():
 
 
 class FakeFinalCut:
-    def __init__(self):
+    def __init__(self, media_path):
         self.identity = ProjectIdentity("Library", "Event", "Demo", 12.0)
-        self.source_bytes = b"""<fcpxml version="1.11"><resources>
+        self.source_bytes = f"""<fcpxml version="1.11"><resources>
         <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
+        <asset id="r2"><media-rep src="{media_path.as_uri()}"/></asset>
         </resources><library><event name="Event"><project name="Demo">
-        <sequence format="r1" duration="12s"><spine/></sequence>
-        </project></event></library></fcpxml>"""
+        <sequence format="r1" duration="12s"><spine>
+        <asset-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence>
+        </project></event></library></fcpxml>""".encode()
         self.opened_project = None
         self.imported = []
         self.rendered = []
@@ -117,16 +122,40 @@ class FakeWatch:
 
 def controller_deps(tmp_path):
     config = ControllerConfig(session_root=tmp_path / "sessions")
-    fcp = FakeFinalCut()
+    media = tmp_path / "source.mov"
+    media.write_bytes(b"source media")
+    fcp = FakeFinalCut(media)
+
+    async def validate_candidate(path):
+        return inspect_candidate_fcpxml(
+            path, upstream_validation={"text": "## Health Score: 100%"}
+        )
+
     return ControllerDeps(
         sessions=SessionRepository(config),
         fcp=fcp,
         timeline=FakeTimeline(),
         watch=FakeWatch(),
+        candidate_validator=validate_candidate,
         preview_inspector=lambda *_args, **_kwargs: ReviewReport(
             required={"preview_usable": True}, observations=()
         ),
     )
+
+
+def test_controller_dependencies_require_candidate_validator(tmp_path):
+    media = tmp_path / "source.mov"
+    media.write_bytes(b"source media")
+
+    with pytest.raises(TypeError, match="candidate_validator"):
+        ControllerDeps(
+            sessions=SessionRepository(
+                ControllerConfig(session_root=tmp_path / "sessions")
+            ),
+            fcp=FakeFinalCut(media),
+            timeline=FakeTimeline(),
+            watch=FakeWatch(),
+        )
 
 
 def valid_edit_program():
@@ -249,6 +278,90 @@ async def test_candidate_binding_persists_current_version_and_artifact_hashes(tm
     assert candidate.binding.frame_timestamps == (2.5,)
 
 
+@pytest.mark.anyio
+async def test_controller_rejects_candidate_mutated_during_quality_control(tmp_path):
+    deps = controller_deps(tmp_path)
+    original_validator = deps.candidate_validator
+
+    async def mutate_after_inspection(path):
+        result = await original_validator(path)
+        path.write_text(path.read_text(encoding="utf-8") + "\n<!-- changed -->")
+        return result
+
+    controller = EditSessionController(
+        replace(deps, candidate_validator=mutate_after_inspection)
+    )
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+
+    with pytest.raises(SessionError, match="changed during inspection"):
+        await controller.apply(session.id, valid_edit_program())
+
+    assert deps.fcp.imported == []
+
+
+@pytest.mark.anyio
+async def test_controller_rejects_preview_mutated_during_quality_control(tmp_path):
+    deps = controller_deps(tmp_path)
+
+    def mutate_after_inspection(path, **_kwargs):
+        path.write_bytes(b"mutated preview")
+        return ReviewReport(required={"preview_usable": True}, observations=())
+
+    controller = EditSessionController(
+        replace(deps, preview_inspector=mutate_after_inspection)
+    )
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+
+    with pytest.raises(SessionError, match="Preview changed during inspection"):
+        await controller.apply(session.id, valid_edit_program())
+
+
+@pytest.mark.anyio
+async def test_controller_rejects_manifest_mutated_during_quality_control(
+    tmp_path, monkeypatch
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+    original_read_text = type(tmp_path).read_text
+
+    def mutate_after_read(path, *args, **kwargs):
+        value = original_read_text(path, *args, **kwargs)
+        if path.name == "manifest.json":
+            path.write_text(value + "\n", encoding="utf-8")
+        return value
+
+    monkeypatch.setattr(type(tmp_path), "read_text", mutate_after_read)
+
+    with pytest.raises(SessionError, match="manifest changed during inspection"):
+        await controller.apply(session.id, valid_edit_program())
+
+
+@pytest.mark.anyio
+async def test_controller_rechecks_preserved_source_before_accepting_review(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+    source = session.root / "source" / "active-source.fcpxml"
+    source.write_text(source.read_text(encoding="utf-8") + "\n<!-- changed -->")
+
+    with pytest.raises(SessionError, match="preserved source XML changed"):
+        await controller.record_review(
+            session.id, candidate.number, verified_report(candidate)
+        )
+
+    assert deps.fcp.opened_project is None
+
+
 @pytest.mark.parametrize(
     ("artifact", "message"),
     [
@@ -297,9 +410,16 @@ async def test_controller_uses_candidate_duration_for_native_identity(tmp_path):
 async def test_controller_rejects_candidate_with_missing_media_before_import(tmp_path):
     deps = controller_deps(tmp_path)
     missing = tmp_path / "missing.mov"
-    deps.timeline.candidate_xml = deps.fcp.source_bytes.decode().replace(
-        "<resources>",
-        f'<resources><asset id="r2"><media-rep src="{missing.as_uri()}"/></asset>',
+    deps.timeline.candidate_xml = (
+        deps.fcp.source_bytes.decode()
+        .replace(
+            "<resources>",
+            f'<resources><asset id="r3"><media-rep src="{missing.as_uri()}"/></asset>',
+        )
+        .replace(
+            "</spine>",
+            '<asset-clip ref="r3" offset="0s" duration="1s"/></spine>',
+        )
     )
     controller = EditSessionController(deps)
     session = await controller.start(

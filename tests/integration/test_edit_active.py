@@ -40,7 +40,15 @@ def test_edit_active_captures_request_for_agent_loop(monkeypatch):
     )
 
     result = CliRunner().invoke(
-        app, ["edit-active", "remove gaps and add a reaction at 00:12"]
+        app,
+        [
+            "edit-active",
+            "remove gaps and add a reaction at 00:12",
+            "--operation",
+            "remove_gaps",
+            "--operation",
+            "insert_reaction",
+        ],
     )
 
     assert result.exit_code == 0
@@ -52,6 +60,7 @@ def test_edit_active_captures_request_for_agent_loop(monkeypatch):
             {
                 "prompt": "remove gaps and add a reaction at 00:12",
                 "session_id": None,
+                "required_operations": ["remove_gaps", "insert_reaction"],
             },
         )
     ]

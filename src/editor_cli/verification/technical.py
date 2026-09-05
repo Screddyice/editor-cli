@@ -18,6 +18,10 @@ from editor_cli.verification.review import ReviewReport
 
 Runner = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 
+_MEDIA_REFERENCE_TAGS = frozenset(
+    {"asset-clip", "audio", "clip", "mc-clip", "ref-clip", "sync-clip", "video"}
+)
+
 
 def run_command(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
     return subprocess.run(
@@ -73,6 +77,99 @@ def _media_path(source: str) -> Path | None:
     return None
 
 
+def _local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+
+def _resource_sources(element) -> set[str]:
+    sources = set()
+    direct = element.get("src")
+    if isinstance(direct, str) and direct.strip():
+        sources.add(direct.strip())
+    sources.update(
+        source.strip()
+        for media_rep in element.findall(".//media-rep")
+        if isinstance((source := media_rep.get("src")), str) and source.strip()
+    )
+    return sources
+
+
+def _nested_media_refs(element) -> set[str]:
+    return {
+        reference
+        for child in element.iter()
+        if child is not element
+        and _local_name(child.tag) in _MEDIA_REFERENCE_TAGS
+        and (reference := child.get("ref"))
+    }
+
+
+def _media_graph(root) -> tuple[set[str], tuple[str, ...]]:
+    resources_element = next(
+        (element for element in root if _local_name(element.tag) == "resources"),
+        None,
+    )
+    resources = (
+        {
+            resource_id: element
+            for element in resources_element
+            if (resource_id := element.get("id"))
+        }
+        if resources_element is not None
+        else {}
+    )
+    sources = {
+        source
+        for element in resources.values()
+        for source in _resource_sources(element)
+    }
+    observations: set[str] = set()
+    resource_nodes = (
+        set(resources_element.iter()) if resources_element is not None else set()
+    )
+    timeline_refs = {
+        reference
+        for element in root.iter()
+        if element not in resource_nodes
+        and _local_name(element.tag) in _MEDIA_REFERENCE_TAGS
+        and (reference := element.get("ref"))
+    }
+    resolved: dict[str, set[str]] = {}
+    resolving: set[str] = set()
+
+    def resolve(reference: str) -> set[str]:
+        if reference in resolved:
+            return resolved[reference]
+        if reference in resolving:
+            observations.add(
+                f"Candidate media resources contain a reference cycle: {reference}"
+            )
+            return set()
+        resource = resources.get(reference)
+        if resource is None:
+            observations.add(
+                f"Candidate timeline has unresolved media resource: {reference}"
+            )
+            return set()
+        resolving.add(reference)
+        resource_sources = _resource_sources(resource)
+        for nested_reference in _nested_media_refs(resource):
+            resource_sources.update(resolve(nested_reference))
+        resolving.remove(reference)
+        if not resource_sources:
+            observations.add(
+                f"Candidate media resource has no usable source: {reference}"
+            )
+        resolved[reference] = resource_sources
+        return resource_sources
+
+    for reference in sorted(timeline_refs):
+        resolve(reference)
+    if not sources:
+        observations.add("Candidate timeline has no media sources")
+    return sources, tuple(sorted(observations))
+
+
 def inspect_candidate_fcpxml(
     candidate: Path,
     *,
@@ -104,16 +201,7 @@ def inspect_candidate_fcpxml(
             observations.append("FCPXML timeline validation did not pass")
 
         tree = safe_parse(str(candidate))
-        sources = {
-            resource["src"]
-            for resource in parser.resources.values()
-            if isinstance(resource.get("src"), str) and resource["src"]
-        }
-        sources.update(
-            source
-            for element in tree.getroot().findall(".//media-rep")
-            if (source := element.get("src"))
-        )
+        sources, media_observations = _media_graph(tree.getroot())
         references = tuple(
             sorted(
                 {
@@ -128,7 +216,10 @@ def inspect_candidate_fcpxml(
             {source for source in sources if _media_path(source) is None}
         )
         missing = tuple(path for path in references if not path.is_file())
-        required["media_online"] = not missing and not unsupported
+        required["media_online"] = bool(sources) and not (
+            missing or unsupported or media_observations
+        )
+        observations.extend(media_observations)
         observations.extend(f"Candidate media is missing: {path}" for path in missing)
         observations.extend(
             f"Candidate media reference is unsupported: {source}"

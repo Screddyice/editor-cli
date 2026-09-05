@@ -21,11 +21,13 @@ from editor_cli.config import ControllerConfig, load_controller_config
 
 try:
     from mcp.server.mcpserver import MCPServer
+    from mcp.server.mcpserver.exceptions import ToolError
     from mcp.server.mcpserver.utilities.func_metadata import ArgModelBase
 except ImportError:  # pragma: no cover - compatibility with MCP 1.x
     from mcp.server.fastmcp import FastMCP as MCPServer
 
     ArgModelBase = None
+    ToolError = ValueError
 
 
 class ServiceGroup(Protocol):
@@ -257,13 +259,20 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         action: Literal["doctor", "start", "status", "resume", "finish"],
         prompt: str | None = None,
         session_id: str | None = None,
+        required_operations: list[str] | None = None,
     ) -> dict[str, Any]:
         """Inspect device readiness and manage persisted edit sessions."""
         if action == "doctor" and services is None:
             return device_report()
-        return await service_registry().session.dispatch(
-            action, prompt=prompt, session_id=session_id
-        )
+        try:
+            return await service_registry().session.dispatch(
+                action,
+                prompt=prompt,
+                session_id=session_id,
+                required_operations=required_operations,
+            )
+        except (RuntimeError, ValueError) as exc:
+            raise ToolError(str(exc)) from exc
 
     @server.tool()
     async def editor_timeline(

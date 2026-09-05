@@ -100,10 +100,17 @@ prerequisites are resolved.
 
 ```bash
 uv run editor-cli doctor
-uv run editor-cli edit-active "remove pauses and add a restrained title"
+uv run editor-cli edit-active "remove pauses and add a restrained title" \
+  --operation remove_gaps \
+  --operation add_title
 uv run editor-cli session status <session-id>
 uv run editor-cli session resume <session-id>
 ```
+
+Each `edit-active` request must name every required operation with a repeatable
+`--operation` option. The MCP `editor_session` start action uses the matching
+`required_operations` list. The controller rejects missing or unknown operations
+and persists the corresponding acceptance checks before capture begins.
 
 Sessions live under `~/Movies/Editor CLI Sessions/<session-id>/` by default and
 use mode `0700`. Each session contains `state.json`, `journal.jsonl`, `source/`,

@@ -2,6 +2,8 @@ import json
 import subprocess
 from pathlib import Path
 
+import pytest
+
 from editor_cli.verification.technical import (
     inspect_candidate,
     inspect_candidate_fcpxml,
@@ -143,13 +145,90 @@ def test_candidate_qc_checks_media_resources_not_only_asset_resources(tmp_path):
     assert qc.media_references == (missing,)
 
 
-def test_technical_qc_uses_candidate_duration_instead_of_source_duration(tmp_path):
+@pytest.mark.parametrize(
+    ("resources", "timeline", "observation"),
+    [
+        (
+            '<asset id="r2"><media-rep src="{present}"/></asset>',
+            '<asset-clip ref="r404" offset="0s" duration="12s"/>',
+            "unresolved media resource: r404",
+        ),
+        (
+            '<asset id="r2"/>',
+            '<asset-clip ref="r2" offset="0s" duration="12s"/>',
+            "has no usable source: r2",
+        ),
+        (
+            '<asset id="r2"><media-rep src="https://example.com/media.mov"/></asset>',
+            '<asset-clip ref="r2" offset="0s" duration="12s"/>',
+            "reference is unsupported",
+        ),
+        ("", '<gap offset="0s" duration="12s"/>', "no media sources"),
+    ],
+)
+def test_candidate_qc_rejects_invalid_or_empty_timeline_media_graph(
+    tmp_path, resources, timeline, observation
+):
+    present = tmp_path / "present.mov"
+    present.write_bytes(b"media")
     candidate = tmp_path / "candidate.fcpxml"
     candidate.write_text(
-        """<fcpxml version="1.11"><resources>
-        <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
+        f"""<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        {resources.format(present=present.as_uri())}
         </resources><library><event name="Event"><project name="Candidate">
-        <sequence format="r1" duration="12s"><spine/></sequence>
+        <sequence format="r1" duration="12s"><spine>{timeline}</spine></sequence>
+        </project></event></library></fcpxml>""",
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is False
+    assert observation in "\n".join(qc.observations)
+
+
+def test_candidate_qc_resolves_nested_media_resources(tmp_path):
+    present = tmp_path / "present.mov"
+    present.write_bytes(b"media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <asset id="r2"><media-rep src="{present.as_uri()}"/></asset>
+        <media id="r3"><sequence format="r1" duration="12s"><spine>
+        <asset-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence></media>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r3" offset="0s" duration="12s"/>
+        </spine></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is True
+    assert qc.media_references == (present,)
+
+
+def test_technical_qc_uses_candidate_duration_instead_of_source_duration(tmp_path):
+    media = tmp_path / "source.mov"
+    media.write_bytes(b"media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f"""<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
+        <asset id="r2"><media-rep src="{media.as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <asset-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence>
         </project></event></library></fcpxml>""",
         encoding="utf-8",
     )

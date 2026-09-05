@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import subprocess
+from typing import Annotated, Any
 
 import typer
 
@@ -113,14 +114,18 @@ def request_permissions() -> None:
         raise typer.Exit(1)
 
 
-def _session_call(action: str, session_id: str | None, prompt: str | None = None):
+def _session_call(
+    action: str,
+    session_id: str | None,
+    prompt: str | None = None,
+    required_operations: list[str] | None = None,
+):
     from editor_cli.mcp_server import build_default_services
 
-    return asyncio.run(
-        build_default_services().session.dispatch(
-            action, prompt=prompt, session_id=session_id
-        )
-    )
+    arguments: dict[str, Any] = {"prompt": prompt, "session_id": session_id}
+    if action == "start":
+        arguments["required_operations"] = required_operations
+    return asyncio.run(build_default_services().session.dispatch(action, **arguments))
 
 
 def _print_session(result: dict) -> None:
@@ -138,13 +143,22 @@ def _print_session(result: dict) -> None:
 
 @app.command("edit-active")
 def edit_active(
-    prompt: str = typer.Argument(
-        ..., help="Complete edit request for the active project."
-    ),
+    prompt: Annotated[
+        str, typer.Argument(help="Complete edit request for the active project.")
+    ],
+    required_operations: Annotated[
+        list[str],
+        typer.Option(
+            "--operation",
+            help="Required edit operation. Repeat for every requested operation.",
+        ),
+    ],
 ) -> None:
     """Capture the selected Final Cut project for an agent edit loop."""
     try:
-        result = _session_call("start", None, prompt)
+        result = _session_call(
+            "start", None, prompt, required_operations=required_operations
+        )
     except (OSError, RuntimeError, ValueError) as exc:
         typer.secho(
             f"Could not start edit session: {exc}", fg=typer.colors.RED, err=True

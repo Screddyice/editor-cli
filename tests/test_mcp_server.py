@@ -4,6 +4,7 @@ import subprocess
 import sys
 from dataclasses import replace
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -19,6 +20,9 @@ from editor_cli.adapters.native_final_cut import (
 )
 from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import ServiceRegistry, create_mcp, device_report
+from editor_cli.services import SessionService
+from editor_cli.session.controller import SessionRepository
+from editor_cli.session.models import SessionState
 
 
 @pytest.fixture
@@ -68,7 +72,87 @@ async def test_editor_session_doctor_is_read_only():
     mcp = create_mcp(services)
     result = await mcp.call_tool("editor_session", {"action": "doctor"})
     assert result.structured_content["final_cut"]["version"] == "12.3"
-    assert services.session.calls == [("doctor", {"prompt": None, "session_id": None})]
+    assert services.session.calls == [
+        (
+            "doctor",
+            {"prompt": None, "session_id": None, "required_operations": None},
+        )
+    ]
+
+
+class PersistingController:
+    def __init__(self, repository):
+        self.repository = repository
+
+    async def start(self, request):
+        record = self.repository.create(request)
+        return SimpleNamespace(
+            id=record["id"],
+            state=SessionState.APPLY,
+            pass_count=0,
+            root=self.repository.paths(record["id"]).root,
+            identity=None,
+            analysis={},
+        )
+
+
+def persistence_services(tmp_path):
+    repository = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    unavailable = FakeGroup({"ok": True})
+    return (
+        ServiceRegistry(
+            session=SessionService(
+                PersistingController(repository), doctor=lambda: {"ready": True}
+            ),
+            timeline=unavailable,
+            media=unavailable,
+            verify=unavailable,
+        ),
+        repository,
+    )
+
+
+@pytest.mark.anyio
+async def test_mcp_start_persists_title_gap_and_reaction_checks(tmp_path):
+    services, repository = persistence_services(tmp_path)
+    mcp = create_mcp(services)
+
+    result = await mcp.call_tool(
+        "editor_session",
+        {
+            "action": "start",
+            "prompt": "remove gaps, add a title, and insert a reaction",
+            "required_operations": [
+                "remove_gaps",
+                "add_title",
+                "insert_reaction",
+            ],
+        },
+    )
+
+    record = repository.load(result.structured_content["session_id"])
+    assert {
+        "gap_removed",
+        "title_visible",
+        "reaction_insert_visible",
+    }.issubset(record["required_checks"])
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("required_operations", [None, [], ["unknown_operation"]])
+async def test_mcp_start_refuses_missing_empty_or_unknown_operations(
+    tmp_path, required_operations
+):
+    services, repository = persistence_services(tmp_path)
+    mcp = create_mcp(services)
+    arguments = {"action": "start", "prompt": "edit this project"}
+    if required_operations is not None:
+        arguments["required_operations"] = required_operations
+
+    with pytest.raises(ToolError, match="required_operations|Unsupported"):
+        await mcp.call_tool("editor_session", arguments)
+
+    assert not repository.root.exists()
 
 
 @pytest.mark.anyio

@@ -17,6 +17,7 @@ from editor_cli.session.controller import (
 )
 from editor_cli.session.models import ProjectIdentity
 from editor_cli.verification.review import ReviewReport
+from editor_cli.verification.technical import CandidateFCPXMLInspection
 
 _ROOT = Path(__file__).resolve().parents[2]
 _SCRIPT = _ROOT / "scripts" / "fcp_live_canary.py"
@@ -352,6 +353,19 @@ async def _run_controller_backed_canary(
     source_xml.write_text(_candidate_xml(), encoding="utf-8")
     source_hashes = fcp_live_canary.hash_tree(workspace.source)
     fcp = _FakeFinalCut(workspace.library)
+
+    async def validate_candidate(_path):
+        return CandidateFCPXMLInspection(
+            duration_seconds=8.0,
+            media_references=(),
+            required={
+                "fcpxml_parseable": True,
+                "timeline_valid": True,
+                "media_online": True,
+            },
+            observations=(),
+        )
+
     deps = ControllerDeps(
         sessions=SessionRepository(ControllerConfig(session_root=workspace.sessions)),
         fcp=fcp,
@@ -359,6 +373,7 @@ async def _run_controller_backed_canary(
             candidate_xml or _candidate_xml(), workspace.source, mutate_source
         ),
         watch=_FakeWatch(),
+        candidate_validator=validate_candidate,
     )
     controller = EditSessionController(deps)
     monkeypatch.setattr(

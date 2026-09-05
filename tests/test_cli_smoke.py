@@ -1,11 +1,16 @@
 import subprocess
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 from typer.testing import CliRunner
 
 from editor_cli.cli import app
 from editor_cli.config import ControllerConfig
+from editor_cli.mcp_server import ServiceRegistry
+from editor_cli.services import SessionService
+from editor_cli.session.controller import SessionRepository
+from editor_cli.session.models import SessionState
 
 
 def test_help_lists_edit_command():
@@ -25,6 +30,89 @@ def test_help_lists_controller_setup_doctor_and_permissions_commands():
     assert "setup" in res.output
     assert "doctor" in res.output
     assert "permissions" in res.output
+
+
+class PersistingController:
+    def __init__(self, repository):
+        self.repository = repository
+
+    async def start(self, request):
+        record = self.repository.create(request)
+        return SimpleNamespace(
+            id=record["id"],
+            state=SessionState.APPLY,
+            pass_count=0,
+            root=self.repository.paths(record["id"]).root,
+            identity=None,
+            analysis={},
+        )
+
+
+def install_persisting_services(monkeypatch, tmp_path):
+    repository = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    unavailable = SimpleNamespace(dispatch=None)
+    registry = ServiceRegistry(
+        session=SessionService(
+            PersistingController(repository), doctor=lambda: {"ready": True}
+        ),
+        timeline=unavailable,
+        media=unavailable,
+        verify=unavailable,
+    )
+    monkeypatch.setattr(
+        "editor_cli.mcp_server.build_default_services", lambda: registry
+    )
+    return repository
+
+
+def test_edit_active_persists_repeated_required_operations(monkeypatch, tmp_path):
+    repository = install_persisting_services(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        [
+            "edit-active",
+            "remove gaps, add a title, and insert a reaction",
+            "--operation",
+            "remove_gaps",
+            "--operation",
+            "add_title",
+            "--operation",
+            "insert_reaction",
+        ],
+    )
+
+    assert result.exit_code == 0
+    session_id = next(repository.root.iterdir()).name
+    record = repository.load(session_id)
+    assert {
+        "gap_removed",
+        "title_visible",
+        "reaction_insert_visible",
+    }.issubset(record["required_checks"])
+
+
+def test_edit_active_refuses_missing_required_operations(monkeypatch, tmp_path):
+    repository = install_persisting_services(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(app, ["edit-active", "remove gaps"])
+
+    assert result.exit_code != 0
+    assert "operation" in result.output.lower()
+    assert not repository.root.exists()
+
+
+def test_edit_active_refuses_unknown_required_operation(monkeypatch, tmp_path):
+    repository = install_persisting_services(monkeypatch, tmp_path)
+
+    result = CliRunner().invoke(
+        app,
+        ["edit-active", "do something unsupported", "--operation", "unknown"],
+    )
+
+    assert result.exit_code == 1
+    assert "Unsupported required edit operation" in result.output
+    assert not repository.root.exists()
 
 
 def test_setup_dry_run_reports_planned_changes(monkeypatch):

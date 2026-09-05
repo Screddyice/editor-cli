@@ -29,6 +29,7 @@ from editor_cli.session.models import (
     EditRequest,
     EvidenceBinding,
     SessionState,
+    required_checks_for_operations,
 )
 from editor_cli.verification.review import parse_creative_review
 from editor_cli.verification.technical import (
@@ -125,20 +126,24 @@ class SessionService:
         if action == "doctor":
             return self.doctor()
         if action == "start":
+            if (
+                not isinstance(required_operations, (list, tuple))
+                or not required_operations
+            ):
+                raise ValueError(
+                    "editor_session start requires non-empty required_operations"
+                )
+            request = EditRequest(
+                prompt or "", required_operations=tuple(required_operations)
+            )
+            required_checks_for_operations(request.required_operations)
             if not self.doctor().get("ready", False):
                 raise RuntimeError(
                     "Run editor-cli doctor and resolve failed checks first"
                 )
             if session_id is not None:
                 raise ValueError("A new session cannot reuse a session ID")
-            return _handle(
-                await self.controller.start(
-                    EditRequest(
-                        prompt or "",
-                        required_operations=tuple(required_operations or ()),
-                    )
-                )
-            )
+            return _handle(await self.controller.start(request))
         if not session_id:
             raise ValueError(f"editor_session {action} requires session_id")
         if action == "status":

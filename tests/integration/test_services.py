@@ -89,7 +89,12 @@ async def test_session_service_serializes_start_status_and_resume():
     controller = FakeController()
     service = SessionService(controller, doctor=lambda: {"ready": True})
 
-    started = await service.dispatch("start", prompt="remove gaps", session_id=None)
+    started = await service.dispatch(
+        "start",
+        prompt="remove gaps",
+        session_id=None,
+        required_operations=["remove_gaps"],
+    )
     status = await service.dispatch("status", prompt=None, session_id="b" * 32)
     resumed = await service.dispatch("resume", prompt=None, session_id="c" * 32)
 
@@ -116,6 +121,41 @@ async def test_session_service_persists_controller_owned_required_checks():
 
 
 @pytest.mark.anyio
+@pytest.mark.parametrize("required_operations", [None, []])
+async def test_session_service_refuses_start_without_required_operations(
+    required_operations,
+):
+    controller = FakeController()
+    service = SessionService(controller, doctor=lambda: {"ready": True})
+
+    with pytest.raises(ValueError, match="required_operations"):
+        await service.dispatch(
+            "start",
+            prompt="remove gaps",
+            session_id=None,
+            required_operations=required_operations,
+        )
+
+    assert controller.calls == []
+
+
+@pytest.mark.anyio
+async def test_session_service_refuses_unknown_required_operation_before_start():
+    controller = FakeController()
+    service = SessionService(controller, doctor=lambda: {"ready": True})
+
+    with pytest.raises(ValueError, match="Unsupported required edit operation"):
+        await service.dispatch(
+            "start",
+            prompt="make an unsupported edit",
+            session_id=None,
+            required_operations=["unknown_operation"],
+        )
+
+    assert controller.calls == []
+
+
+@pytest.mark.anyio
 async def test_session_service_refuses_start_when_device_is_not_ready():
     service = SessionService(
         FakeController(),
@@ -123,7 +163,12 @@ async def test_session_service_refuses_start_when_device_is_not_ready():
     )
 
     with pytest.raises(RuntimeError, match="doctor"):
-        await service.dispatch("start", prompt="remove gaps", session_id=None)
+        await service.dispatch(
+            "start",
+            prompt="remove gaps",
+            session_id=None,
+            required_operations=["remove_gaps"],
+        )
 
 
 @pytest.mark.anyio
