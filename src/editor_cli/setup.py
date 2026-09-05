@@ -71,6 +71,14 @@ class SetupResult:
     checks: dict[str, bool] = field(default_factory=dict)
 
 
+@dataclass(frozen=True)
+class _SymlinkPlan:
+    action: str
+    raw_target: str | None = None
+    device: int | None = None
+    inode: int | None = None
+
+
 class SetupPlatform(Protocol):
     def run(self, command: tuple[str, ...], *, cwd: Path | None = None) -> None: ...
 
@@ -124,21 +132,40 @@ def _resource_path(resource: Traversable) -> Path:
     return path.resolve()
 
 
-def _symlink_plan(link: Path, target: Path, legacy_target: Path) -> str:
+def _symlink_plan(link: Path, target: Path, legacy_target: Path) -> _SymlinkPlan:
     target = target.resolve()
     if link.is_symlink():
+        before = link.lstat()
         raw_target = os.readlink(link)
+        after = link.lstat()
+        if (before.st_dev, before.st_ino) != (after.st_dev, after.st_ino):
+            raise SetupError(f"Path changed during setup preflight: {link}")
         if raw_target == str(target):
-            return "current"
+            return _SymlinkPlan("current", raw_target, before.st_dev, before.st_ino)
         if raw_target == str(legacy_target.resolve()):
-            return "legacy"
+            return _SymlinkPlan("legacy", raw_target, before.st_dev, before.st_ino)
         raise SetupError(f"Refusing to replace existing path: {link}")
     if link.exists() or link.is_symlink():
         raise SetupError(f"Refusing to replace existing path: {link}")
-    return "create"
+    return _SymlinkPlan("create")
 
 
-def _atomic_symlink(link: Path, target: Path) -> None:
+def _symlink_matches_plan(link: Path, plan: _SymlinkPlan) -> bool:
+    if not link.is_symlink():
+        return False
+    try:
+        before = link.lstat()
+        raw_target = os.readlink(link)
+        after = link.lstat()
+    except OSError:
+        return False
+    return (before.st_dev, before.st_ino) == (after.st_dev, after.st_ino) == (
+        plan.device,
+        plan.inode,
+    ) and raw_target == plan.raw_target
+
+
+def _replace_legacy_symlink(link: Path, target: Path, plan: _SymlinkPlan) -> None:
     link.parent.mkdir(parents=True, exist_ok=True)
     descriptor, raw_temp = tempfile.mkstemp(prefix=f".{link.name}.", dir=link.parent)
     os.close(descriptor)
@@ -146,6 +173,8 @@ def _atomic_symlink(link: Path, target: Path) -> None:
     temp.unlink()
     try:
         temp.symlink_to(target, target_is_directory=True)
+        if not _symlink_matches_plan(link, plan):
+            raise SetupError(f"Path changed after setup preflight: {link}")
         os.replace(temp, link)
         _fsync_directory(link.parent)
     finally:
@@ -155,18 +184,28 @@ def _atomic_symlink(link: Path, target: Path) -> None:
 def _ensure_symlink(
     link: Path,
     target: Path,
-    plan: str,
+    plan: _SymlinkPlan,
     result: SetupResult,
     dry_run: bool,
 ) -> None:
-    if plan == "current":
+    if plan.action == "current":
+        if not _symlink_matches_plan(link, plan):
+            raise SetupError(f"Path changed after setup preflight: {link}")
         return
-    verb = "migrate" if plan == "legacy" else "link"
+    verb = "migrate" if plan.action == "legacy" else "link"
     message = f"{verb} {link} -> {target}"
     result.planned.append(message)
     if dry_run:
         return
-    _atomic_symlink(link, target)
+    if plan.action == "legacy":
+        _replace_legacy_symlink(link, target, plan)
+    else:
+        link.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            link.symlink_to(target, target_is_directory=True)
+        except FileExistsError as exc:
+            raise SetupError(f"Path changed after setup preflight: {link}") from exc
+        _fsync_directory(link.parent)
     result.changed.append(message)
 
 

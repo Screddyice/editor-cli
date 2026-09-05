@@ -196,3 +196,41 @@ def test_setup_preflights_config_collision_before_native_build(tmp_path):
 
     assert platform.commands == []
     assert not paths.application_support.exists()
+
+
+def test_setup_does_not_clobber_skill_created_after_preflight(tmp_path):
+    paths = setup_paths(tmp_path)
+    collision = paths.codex_skills / "final-cut-editor"
+
+    class RacingPlatform(FakePlatform):
+        def install_watch(self, setup_paths):
+            super().install_watch(setup_paths)
+            collision.write_text("created by another process", encoding="utf-8")
+
+    with pytest.raises(SetupError, match="changed after setup preflight"):
+        run_setup(paths, platform=RacingPlatform())
+
+    assert collision.read_text(encoding="utf-8") == "created by another process"
+    assert not collision.is_symlink()
+
+
+def test_setup_does_not_clobber_legacy_skill_changed_after_preflight(tmp_path):
+    paths = setup_paths(tmp_path)
+    legacy = paths.repo_root / "skills/final-cut-editor"
+    link = paths.codex_skills / "final-cut-editor"
+    link.parent.mkdir(parents=True)
+    link.symlink_to(legacy, target_is_directory=True)
+    replacement = tmp_path / "replacement-skill"
+    replacement.mkdir()
+
+    class RacingPlatform(FakePlatform):
+        def install_watch(self, setup_paths):
+            super().install_watch(setup_paths)
+            link.unlink()
+            link.symlink_to(replacement, target_is_directory=True)
+
+    with pytest.raises(SetupError, match="changed after setup preflight"):
+        run_setup(paths, platform=RacingPlatform())
+
+    assert link.is_symlink()
+    assert link.resolve() == replacement.resolve()
