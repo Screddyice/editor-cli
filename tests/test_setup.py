@@ -50,6 +50,9 @@ class FakePlatform:
         self.python = python
         return True
 
+    def helper_has_signature(self, _path, _identifier):
+        return True
+
 
 def setup_paths(tmp_path: Path) -> SetupPaths:
     return SetupPaths(
@@ -146,3 +149,50 @@ def test_setup_writes_native_helper_metadata_without_websocket_configuration(tmp
     assert len(value["sha256"]) == 64
     assert "port" not in value
     assert "websocket" not in metadata.read_text(encoding="utf-8").lower()
+
+
+def test_setup_migrates_exact_legacy_final_cut_skill_links(tmp_path):
+    paths = setup_paths(tmp_path)
+    legacy = paths.repo_root / "skills/final-cut-editor"
+    for root in (paths.codex_skills, paths.claude_skills):
+        root.mkdir(parents=True)
+        (root / "final-cut-editor").symlink_to(legacy, target_is_directory=True)
+
+    result = run_setup(paths, platform=FakePlatform())
+
+    packaged = setup_lib._resource_path(setup_lib.final_cut_skill())
+    for root in (paths.codex_skills, paths.claude_skills):
+        assert (root / "final-cut-editor").resolve() == packaged
+    assert sum(str(item).startswith("migrate ") for item in result.changed) == 2
+
+
+def test_setup_preflights_arbitrary_skill_collision_before_native_build(tmp_path):
+    paths = setup_paths(tmp_path)
+    arbitrary = tmp_path / "arbitrary-skill"
+    arbitrary.mkdir()
+    paths.claude_skills.mkdir(parents=True)
+    link = paths.claude_skills / "final-cut-editor"
+    link.symlink_to(arbitrary, target_is_directory=True)
+    platform = FakePlatform()
+
+    with pytest.raises(SetupError, match="Refusing to replace existing path"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.application_support.exists()
+    assert link.resolve() == arbitrary.resolve()
+
+
+def test_setup_preflights_config_collision_before_native_build(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.claude_config.write_text(
+        '{"mcpServers":{"editor-cli":{"command":"someone-else"}}}\n',
+        encoding="utf-8",
+    )
+    platform = FakePlatform()
+
+    with pytest.raises(SetupError, match="unmanaged editor-cli"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.application_support.exists()

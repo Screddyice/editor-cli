@@ -6,6 +6,7 @@ import hashlib
 import json
 import os
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -27,6 +28,8 @@ NATIVE_PROTOCOL_VERSION = 1
 NATIVE_HELPER_NAME = "editor-fcp-bridge"
 NATIVE_BUILD_PRODUCT = "FinalCutBridge"
 NATIVE_SIGNING_IDENTIFIER = "com.screddy.editorcli.finalcutbridge"
+NATIVE_METADATA_VERSION = 1
+NATIVE_MANAGED_BY = "editor-cli.native-final-cut-helper"
 CODEX_BLOCK_START = "# BEGIN editor-cli managed MCP"
 CODEX_BLOCK_END = "# END editor-cli managed MCP"
 
@@ -72,6 +75,8 @@ class SetupPlatform(Protocol):
     def run(self, command: tuple[str, ...], *, cwd: Path | None = None) -> None: ...
 
     def install_watch(self, paths: SetupPaths) -> None: ...
+
+    def helper_has_signature(self, path: Path, identifier: str) -> bool: ...
 
     def verify_mcp(self, python: Path, repo_root: Path) -> bool: ...
 
@@ -119,20 +124,49 @@ def _resource_path(resource: Traversable) -> Path:
     return path.resolve()
 
 
-def _ensure_symlink(
-    link: Path, target: Path, result: SetupResult, dry_run: bool
-) -> None:
+def _symlink_plan(link: Path, target: Path, legacy_target: Path) -> str:
     target = target.resolve()
-    if link.is_symlink() and link.resolve() == target:
-        return
+    if link.is_symlink():
+        raw_target = os.readlink(link)
+        if raw_target == str(target):
+            return "current"
+        if raw_target == str(legacy_target.resolve()):
+            return "legacy"
+        raise SetupError(f"Refusing to replace existing path: {link}")
     if link.exists() or link.is_symlink():
         raise SetupError(f"Refusing to replace existing path: {link}")
-    message = f"link {link} -> {target}"
+    return "create"
+
+
+def _atomic_symlink(link: Path, target: Path) -> None:
+    link.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{link.name}.", dir=link.parent)
+    os.close(descriptor)
+    temp = Path(raw_temp)
+    temp.unlink()
+    try:
+        temp.symlink_to(target, target_is_directory=True)
+        os.replace(temp, link)
+        _fsync_directory(link.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _ensure_symlink(
+    link: Path,
+    target: Path,
+    plan: str,
+    result: SetupResult,
+    dry_run: bool,
+) -> None:
+    if plan == "current":
+        return
+    verb = "migrate" if plan == "legacy" else "link"
+    message = f"{verb} {link} -> {target}"
     result.planned.append(message)
     if dry_run:
         return
-    link.parent.mkdir(parents=True, exist_ok=True)
-    link.symlink_to(target, target_is_directory=True)
+    _atomic_symlink(link, target)
     result.changed.append(message)
 
 
@@ -311,6 +345,99 @@ def _sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _native_metadata_content(sha256: str, source_sha256: str) -> bytes:
+    return (
+        json.dumps(
+            {
+                "managed_by": NATIVE_MANAGED_BY,
+                "metadata_version": NATIVE_METADATA_VERSION,
+                "protocol_version": NATIVE_PROTOCOL_VERSION,
+                "sha256": sha256,
+                "source_sha256": source_sha256,
+            },
+            indent=2,
+            sort_keys=True,
+        )
+        + "\n"
+    ).encode("utf-8")
+
+
+def _native_helper_ownership(
+    destination: Path,
+    platform: SetupPlatform,
+    *,
+    known_legacy_source_sha256: str,
+) -> tuple[dict[str, object], bool] | None:
+    metadata = destination.with_suffix(".json")
+    destination_present = destination.exists() or destination.is_symlink()
+    metadata_present = metadata.exists() or metadata.is_symlink()
+    if not destination_present and not metadata_present:
+        return None
+    error = SetupError(
+        "Refusing to replace unmanaged native helper artifacts at "
+        f"{destination} and {metadata}"
+    )
+    if not destination_present or not metadata_present:
+        raise error
+    if destination.is_symlink() or metadata.is_symlink():
+        raise error
+    try:
+        if not stat.S_ISREG(destination.stat().st_mode) or not stat.S_ISREG(
+            metadata.stat().st_mode
+        ):
+            raise error
+        value = json.loads(metadata.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError, TypeError) as exc:
+        raise error from exc
+    if not isinstance(value, dict):
+        raise error
+    current_keys = {
+        "managed_by",
+        "metadata_version",
+        "protocol_version",
+        "sha256",
+        "source_sha256",
+    }
+    legacy_keys = {"protocol_version", "sha256", "source_sha256"}
+    keys = set(value)
+    legacy = keys == legacy_keys
+    if keys not in (current_keys, legacy_keys):
+        raise error
+    if legacy and value.get("source_sha256") != known_legacy_source_sha256:
+        raise error
+    if not legacy and (
+        value.get("managed_by") != NATIVE_MANAGED_BY
+        or type(value.get("metadata_version")) is not int
+        or value.get("metadata_version") != NATIVE_METADATA_VERSION
+    ):
+        raise error
+    if (
+        type(value.get("protocol_version")) is not int
+        or value.get("protocol_version") != NATIVE_PROTOCOL_VERSION
+        or not _is_sha256(value.get("sha256"))
+        or not _is_sha256(value.get("source_sha256"))
+    ):
+        raise error
+    try:
+        digest_matches = value["sha256"] == _sha256(destination)
+        signature_matches = platform.helper_has_signature(
+            destination, NATIVE_SIGNING_IDENTIFIER
+        )
+    except OSError as exc:
+        raise error from exc
+    if not digest_matches or not signature_matches:
+        raise error
+    return value, legacy
+
+
 def _install_native_helper(
     source_binary: Path,
     destination: Path,
@@ -338,26 +465,21 @@ def _install_native_helper(
                 str(staged),
             )
         )
+        if not platform.helper_has_signature(staged, NATIVE_SIGNING_IDENTIFIER):
+            raise SetupError("The signed native helper failed signature verification")
         digest = _sha256(staged)
-        changed = not destination.is_file() or _sha256(destination) != digest
+        changed = (
+            not destination.is_file()
+            or _sha256(destination) != digest
+            or destination.stat().st_mode & 0o777 != 0o700
+        )
         if changed:
             os.replace(staged, destination)
             destination.chmod(0o700)
             _fsync_directory(destination.parent)
             result.changed.append(destination)
         metadata = destination.with_suffix(".json")
-        content = (
-            json.dumps(
-                {
-                    "protocol_version": NATIVE_PROTOCOL_VERSION,
-                    "sha256": digest,
-                    "source_sha256": source_sha256,
-                },
-                indent=2,
-                sort_keys=True,
-            )
-            + "\n"
-        ).encode("utf-8")
+        content = _native_metadata_content(digest, source_sha256)
         if not metadata.is_file() or metadata.read_bytes() != content:
             _atomic_write_bytes(metadata, content)
             result.changed.append(metadata)
@@ -365,16 +487,22 @@ def _install_native_helper(
         staged.unlink(missing_ok=True)
 
 
-def _installed_helper_matches(destination: Path, source_sha256: str) -> bool:
-    metadata = destination.with_suffix(".json")
-    if not destination.is_file() or not metadata.is_file():
+def _installed_helper_matches(
+    destination: Path, source_sha256: str, platform: SetupPlatform
+) -> bool:
+    ownership = _native_helper_ownership(
+        destination,
+        platform,
+        known_legacy_source_sha256=source_sha256,
+    )
+    if ownership is None:
         return False
-    try:
-        value = json.loads(metadata.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, OSError):
-        return False
+    value, legacy = ownership
     return (
-        value.get("protocol_version") == NATIVE_PROTOCOL_VERSION
+        not legacy
+        and value.get("managed_by") == NATIVE_MANAGED_BY
+        and value.get("metadata_version") == NATIVE_METADATA_VERSION
+        and value.get("protocol_version") == NATIVE_PROTOCOL_VERSION
         and value.get("source_sha256") == source_sha256
         and value.get("sha256") == _sha256(destination)
         and destination.stat().st_mode & 0o777 == 0o700
@@ -394,7 +522,25 @@ def _build_and_install_native_helper(
         return
     packaged_source = native_source()
     source_sha256 = _resource_tree_sha256(packaged_source)
-    if _installed_helper_matches(destination, source_sha256):
+    ownership = _native_helper_ownership(
+        destination,
+        platform,
+        known_legacy_source_sha256=source_sha256,
+    )
+    if ownership is not None:
+        value, legacy = ownership
+        if (
+            legacy
+            and value.get("source_sha256") == source_sha256
+            and destination.stat().st_mode & 0o777 == 0o700
+        ):
+            metadata = destination.with_suffix(".json")
+            _atomic_write_bytes(
+                metadata,
+                _native_metadata_content(str(value["sha256"]), source_sha256),
+            )
+            result.changed.append(metadata)
+    if _installed_helper_matches(destination, source_sha256, platform):
         result.checks["native_helper"] = True
         return
     with tempfile.TemporaryDirectory(prefix="editor-cli-native-") as raw_temp:
@@ -417,7 +563,11 @@ def _build_and_install_native_helper(
             result,
             source_sha256,
         )
-    result.checks["native_helper"] = destination.is_file()
+    result.checks["native_helper"] = _installed_helper_matches(
+        destination, source_sha256, platform
+    )
+    if not result.checks["native_helper"]:
+        raise SetupError("The native helper failed its installed postcondition")
 
 
 class LocalPlatform:
@@ -432,6 +582,25 @@ class LocalPlatform:
 
     def install_watch(self, _paths: SetupPaths) -> None:
         subprocess.run(watch_install_command(), check=True)
+
+    def helper_has_signature(self, path: Path, identifier: str) -> bool:
+        verified = subprocess.run(
+            ("codesign", "--verify", "--strict", str(path)),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        if verified.returncode != 0:
+            return False
+        details = subprocess.run(
+            ("codesign", "-d", "--verbose=4", str(path)),
+            check=False,
+            capture_output=True,
+            text=True,
+        )
+        return details.returncode == 0 and any(
+            line == f"Identifier={identifier}" for line in details.stderr.splitlines()
+        )
 
     def verify_mcp(self, python: Path, repo_root: Path) -> bool:
         code = (
@@ -465,6 +634,22 @@ def run_setup(
     if not python.is_file():
         python = Path(sys.executable)
 
+    skill_source = _resource_path(final_cut_skill())
+    legacy_skill_source = (paths.repo_root / "skills/final-cut-editor").resolve()
+    codex_skill = paths.codex_skills / "final-cut-editor"
+    claude_skill = paths.claude_skills / "final-cut-editor"
+    codex_skill_plan = _symlink_plan(codex_skill, skill_source, legacy_skill_source)
+    claude_skill_plan = _symlink_plan(claude_skill, skill_source, legacy_skill_source)
+    codex_content = _merge_codex_config(paths.codex_config, python, paths.repo_root)
+    claude_content = _merge_claude_config(paths.claude_config, python, paths.repo_root)
+    helper = paths.application_support / "bin" / NATIVE_HELPER_NAME
+    packaged_source_sha256 = _resource_tree_sha256(native_source())
+    _native_helper_ownership(
+        helper,
+        platform,
+        known_legacy_source_sha256=packaged_source_sha256,
+    )
+
     _build_and_install_native_helper(paths, platform, result, dry_run)
 
     watch_ready = all(
@@ -481,23 +666,30 @@ def run_setup(
         for root in (paths.codex_skills, paths.claude_skills)
     )
 
-    skill_source = _resource_path(final_cut_skill())
     _ensure_symlink(
-        paths.codex_skills / "final-cut-editor", skill_source, result, dry_run
+        codex_skill,
+        skill_source,
+        codex_skill_plan,
+        result,
+        dry_run,
     )
     _ensure_symlink(
-        paths.claude_skills / "final-cut-editor", skill_source, result, dry_run
+        claude_skill,
+        skill_source,
+        claude_skill_plan,
+        result,
+        dry_run,
     )
 
     _write_config(
         paths.codex_config,
-        _merge_codex_config(paths.codex_config, python, paths.repo_root),
+        codex_content,
         result,
         dry_run,
     )
     _write_config(
         paths.claude_config,
-        _merge_claude_config(paths.claude_config, python, paths.repo_root),
+        claude_content,
         result,
         dry_run,
     )

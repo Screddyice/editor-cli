@@ -4,13 +4,16 @@ import hashlib
 import json
 from pathlib import Path
 
-from editor_cli.setup import SetupPaths, run_setup
+import pytest
+
+from editor_cli.setup import SetupError, SetupPaths, run_setup
 
 
 class FakePlatform:
     def __init__(self) -> None:
         self.commands: list[tuple[str, ...]] = []
         self.python: Path | None = None
+        self.signature_valid = True
 
     def run(self, command: tuple[str, ...], *, cwd: Path | None = None) -> None:
         self.commands.append(command)
@@ -39,6 +42,9 @@ class FakePlatform:
     def verify_mcp(self, python: Path, _repo_root: Path) -> bool:
         self.python = python
         return True
+
+    def helper_has_signature(self, _path: Path, _identifier: str) -> bool:
+        return self.signature_valid
 
 
 def setup_paths(tmp_path: Path) -> SetupPaths:
@@ -88,6 +94,135 @@ def test_setup_skips_rebuild_when_packaged_source_and_helper_match(tmp_path):
 
     assert second.changed == []
     assert len(platform.commands) == first_command_count
+
+
+@pytest.mark.parametrize("collision", ["helper", "metadata", "helper_symlink"])
+def test_setup_rejects_unmanaged_native_artifact_before_changes(tmp_path, collision):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    helper = paths.application_support / "bin/editor-fcp-bridge"
+    metadata = helper.with_suffix(".json")
+    helper.parent.mkdir(parents=True)
+    if collision == "helper":
+        helper.write_bytes(b"unmanaged")
+    elif collision == "metadata":
+        metadata.write_text("{}\n", encoding="utf-8")
+    else:
+        target = tmp_path / "unmanaged-helper"
+        target.write_bytes(b"unmanaged")
+        helper.symlink_to(target)
+
+    with pytest.raises(SetupError, match="unmanaged native helper"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert not paths.codex_config.exists()
+    assert not paths.claude_config.exists()
+
+
+def test_setup_rejects_metadata_that_lacks_matching_helper_signature(tmp_path):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=platform)
+    platform.commands.clear()
+    platform.signature_valid = False
+
+    with pytest.raises(SetupError, match="unmanaged native helper"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+
+
+@pytest.mark.parametrize("artifact", ["helper", "metadata"])
+def test_setup_rejects_symlinked_managed_native_artifact(tmp_path, artifact):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=platform)
+    helper = paths.application_support / "bin/editor-fcp-bridge"
+    metadata = helper.with_suffix(".json")
+    selected = helper if artifact == "helper" else metadata
+    target = tmp_path / f"linked-{artifact}"
+    target.write_bytes(selected.read_bytes())
+    selected.unlink()
+    selected.symlink_to(target)
+    platform.commands.clear()
+
+    with pytest.raises(SetupError, match="unmanaged native helper"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert selected.is_symlink()
+
+
+@pytest.mark.parametrize("content", ["not json", "{}", '{"managed_by": "other"}'])
+def test_setup_rejects_corrupt_native_metadata(tmp_path, content):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=platform)
+    helper = paths.application_support / "bin/editor-fcp-bridge"
+    helper.with_suffix(".json").write_text(content, encoding="utf-8")
+    platform.commands.clear()
+
+    with pytest.raises(SetupError, match="unmanaged native helper"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
+    assert helper.read_bytes() == b"reviewed native helper"
+
+
+def test_setup_repairs_managed_byte_identical_helper_mode(tmp_path):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=platform)
+    helper = paths.application_support / "bin/editor-fcp-bridge"
+    helper.chmod(0o644)
+    platform.commands.clear()
+
+    result = run_setup(paths, platform=platform)
+
+    assert helper in result.changed
+    assert helper.stat().st_mode & 0o777 == 0o700
+    assert platform.commands_contain(["swift", "build"])
+    assert platform.commands_contain(["codesign"])
+
+
+def test_setup_accepts_known_legacy_metadata_and_adds_ownership_marker(tmp_path):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=platform)
+    helper = paths.application_support / "bin/editor-fcp-bridge"
+    metadata_path = helper.with_suffix(".json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("managed_by", None)
+    metadata.pop("metadata_version", None)
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    platform.commands.clear()
+
+    run_setup(paths, platform=platform)
+
+    migrated = json.loads(metadata_path.read_text(encoding="utf-8"))
+    assert migrated["managed_by"] == "editor-cli.native-final-cut-helper"
+    assert migrated["metadata_version"] == 1
+    assert platform.commands == []
+
+
+def test_setup_rejects_unknown_legacy_metadata_state(tmp_path):
+    platform = FakePlatform()
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=platform)
+    helper = paths.application_support / "bin/editor-fcp-bridge"
+    metadata_path = helper.with_suffix(".json")
+    metadata = json.loads(metadata_path.read_text(encoding="utf-8"))
+    metadata.pop("managed_by")
+    metadata.pop("metadata_version")
+    metadata["source_sha256"] = "f" * 64
+    metadata_path.write_text(json.dumps(metadata), encoding="utf-8")
+    platform.commands.clear()
+
+    with pytest.raises(SetupError, match="unmanaged native helper"):
+        run_setup(paths, platform=platform)
+
+    assert platform.commands == []
 
 
 def test_setup_uses_packaged_resources_instead_of_repo_paths(tmp_path):
