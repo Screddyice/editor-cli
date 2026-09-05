@@ -234,7 +234,25 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
   func activeProjectMatches(
     _ expected: ProjectIdentity, timeout: TimeInterval
   ) throws -> Bool {
-    try activeProject(timeout: timeout) == expected
+    let deadline = try actionDeadline(timeout)
+    let processIdentifier = try verifiedActionProcessIdentifier(
+      timeout: remaining(before: deadline)
+    )
+    guard
+      let status = try LiveFinalCutAX(processIdentifier: processIdentifier).activeTimelineStatus(
+        timeout: remaining(before: deadline)
+      )
+    else {
+      return false
+    }
+    let locations = try NativeFinalCutProjectReader().locations(
+      processIdentifier: processIdentifier, timeout: remaining(before: deadline)
+    )
+    let matches = try ActiveProjectResolver.matches(
+      status: status, locations: locations, expected: expected
+    )
+    _ = try remaining(before: deadline)
+    return matches
   }
 
   func pressMenu(path: [String], timeout: TimeInterval) throws {
@@ -465,11 +483,9 @@ enum ActiveProjectResolver {
   static func resolve(
     status: LiveTimelineStatus, locations: [FinalCutProjectLocation]
   ) throws -> ProjectIdentity? {
-    let namedLocations = locations.filter { $0.project == status.project }
-    guard namedLocations.count <= 1 else {
-      throw FinalCutActionError.ambiguousProject
-    }
-    guard let location = namedLocations.first, let duration = status.duration else {
+    guard let location = try location(status: status, locations: locations),
+      let duration = status.duration
+    else {
       return nil
     }
     return ProjectIdentity(
@@ -478,6 +494,39 @@ enum ActiveProjectResolver {
       project: location.project,
       duration: duration
     )
+  }
+
+  static func matches(
+    status: LiveTimelineStatus,
+    locations: [FinalCutProjectLocation],
+    expected: ProjectIdentity
+  ) throws -> Bool {
+    guard let location = try location(status: status, locations: locations) else {
+      return false
+    }
+    return matches(status: status, location: location, expected: expected)
+  }
+
+  static func matches(
+    status: LiveTimelineStatus,
+    location: FinalCutProjectLocation,
+    expected: ProjectIdentity
+  ) -> Bool {
+    location.library == expected.library
+      && location.event == expected.event
+      && location.project == expected.project
+      && status.project == expected.project
+      && status.matches(duration: expected.duration)
+  }
+
+  private static func location(
+    status: LiveTimelineStatus, locations: [FinalCutProjectLocation]
+  ) throws -> FinalCutProjectLocation? {
+    let namedLocations = locations.filter { $0.project == status.project }
+    guard namedLocations.count <= 1 else {
+      throw FinalCutActionError.ambiguousProject
+    }
+    return namedLocations.first
   }
 }
 

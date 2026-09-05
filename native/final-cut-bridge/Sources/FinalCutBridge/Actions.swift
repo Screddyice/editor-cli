@@ -256,6 +256,9 @@ protocol FinalCutActionSystem {
   var sessionRoot: String { get }
 
   func activeProject(timeout: TimeInterval) throws -> ProjectIdentity?
+  func activeProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool
   func projectMatchCount(_ identity: ProjectIdentity, timeout: TimeInterval) throws -> Int
   func pressMenu(path: [String], timeout: TimeInterval) throws
   func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws
@@ -270,14 +273,6 @@ protocol FinalCutActionSystem {
   func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog]
   func monotonicTime() -> TimeInterval
   func waitForPoll(maximum: TimeInterval)
-}
-
-extension FinalCutActionSystem {
-  func activeProjectMatches(
-    _ expected: ProjectIdentity, timeout: TimeInterval
-  ) throws -> Bool {
-    try activeProject(timeout: timeout) == expected
-  }
 }
 
 struct Actions<System: FinalCutActionSystem> {
@@ -758,6 +753,7 @@ struct LiveTimelineStatus: Equatable {
 }
 
 enum FinalCutAXIdentifier {
+  static let activeProjectFormat = "FFViewerProjectFormat"
   static let backgroundTaskProgress = "FFBackgroundTasksProgressIndicator"
   static let shareWindowBackground = "PE Share WindowBackground"
 }
@@ -793,6 +789,11 @@ private struct ParsedTimelineTimecode {
   let seconds: Int
   let frames: Int
   let dropFrame: Bool
+}
+
+private struct AccessibilityPathElement {
+  let element: any FinalCutAXElement
+  let lineage: [any FinalCutAXElement]
 }
 
 private final class NativeFinalCutAXElement: FinalCutAXElement {
@@ -963,9 +964,11 @@ final class LiveFinalCutAX {
 
   func activeTimelineStatus(timeout: TimeInterval) throws -> LiveTimelineStatus? {
     let deadline = try deadline(after: timeout)
-    let elements = try allElements(beneath: root)
+    let focusedWindow = try focusedMainWindow()
+    let elements = try allElementsWithAncestry(beneath: focusedWindow)
     try requireTime(before: deadline)
-    let titleCandidates = elements.compactMap { element -> String? in
+    let titleCandidates = elements.compactMap { candidate -> (AccessibilityPathElement, String)? in
+      let element = candidate.element
       guard
         let identifier = stringAttribute(kAXIdentifierAttribute as String, of: element)?
           .lowercased(),
@@ -975,9 +978,12 @@ final class LiveFinalCutAX {
       else {
         return nil
       }
-      return title(of: element)
+      guard let projectTitle = title(of: element) else { return nil }
+      return (candidate, projectTitle)
     }
-    let durationCandidates = elements.compactMap { element -> ParsedTimelineTimecode? in
+    let durationCandidates = elements.compactMap {
+      candidate -> (AccessibilityPathElement, ParsedTimelineTimecode)? in
+      let element = candidate.element
       guard
         let identifier = stringAttribute(kAXIdentifierAttribute as String, of: element)?
           .lowercased(),
@@ -987,21 +993,45 @@ final class LiveFinalCutAX {
       else {
         return nil
       }
-      return parseTimecode(value)
+      guard let timecode = parseTimecode(value) else { return nil }
+      return (candidate, timecode)
     }
-    let timebases = Set(
-      elements.compactMap { element -> FinalCutTimebase? in
-        guard isVisible(element), let value = title(of: element) else { return nil }
-        return FinalCutTimebase(formatDescription: value)
-      })
-    let uniqueTitles = Set(titleCandidates.filter { !$0.isEmpty })
+    let timebases = elements.compactMap {
+      candidate -> (AccessibilityPathElement, FinalCutTimebase)? in
+      let element = candidate.element
+      guard
+        stringAttribute(kAXIdentifierAttribute as String, of: element)
+          == FinalCutAXIdentifier.activeProjectFormat,
+        (try? role(of: element)) == kAXStaticTextRole as String,
+        isVisible(element),
+        let value = title(of: element)
+      else {
+        return nil
+      }
+      guard let timebase = FinalCutTimebase(formatDescription: value) else { return nil }
+      return (candidate, timebase)
+    }
+    let uniqueTitles = Set(titleCandidates.map { $0.1 }.filter { !$0.isEmpty })
     guard !uniqueTitles.isEmpty || !durationCandidates.isEmpty || !timebases.isEmpty else {
       return nil
     }
-    guard uniqueTitles.count == 1, durationCandidates.count == 1, timebases.count == 1,
-      let project = uniqueTitles.first, let timecode = durationCandidates.first,
-      let timebase = timebases.first
+    guard uniqueTitles.count == 1, durationCandidates.count == 1,
+      let project = uniqueTitles.first, let (durationCandidate, timecode) = durationCandidates.first
     else {
+      throw AccessibilityDiscoveryError.ambiguousMatch
+    }
+    let scopedTimebases = timebases.filter { candidate, _ in
+      guard
+        let scope = candidate.lineage.last(where: { ancestor in
+          durationCandidate.lineage.contains { $0.isSameElement(as: ancestor) }
+            && titleCandidates.contains { $0.0.lineage.contains { $0.isSameElement(as: ancestor) } }
+        })
+      else {
+        return false
+      }
+      return !scope.isSameElement(as: focusedWindow)
+    }
+    guard scopedTimebases.count == 1, let (_, timebase) = scopedTimebases.first else {
       throw AccessibilityDiscoveryError.ambiguousMatch
     }
     return LiveTimelineStatus(
@@ -1162,6 +1192,49 @@ final class LiveFinalCutAX {
     var visited = 0
     try collect(element, depth: 0, visited: &visited, elements: &elements)
     return elements
+  }
+
+  private func allElementsWithAncestry(
+    beneath element: any FinalCutAXElement
+  ) throws -> [AccessibilityPathElement] {
+    var elements: [AccessibilityPathElement] = []
+    var visited = 0
+    try collect(
+      element, ancestry: [], depth: 0, visited: &visited, elements: &elements
+    )
+    return elements
+  }
+
+  private func collect(
+    _ element: any FinalCutAXElement,
+    ancestry: [any FinalCutAXElement],
+    depth: Int,
+    visited: inout Int,
+    elements: inout [AccessibilityPathElement]
+  ) throws {
+    guard depth <= limits.maxDepth else {
+      throw AccessibilityDiscoveryError.traversalLimitExceeded
+    }
+    visited += 1
+    guard visited <= limits.maxVisitedNodes else {
+      throw AccessibilityDiscoveryError.traversalLimitExceeded
+    }
+    let elementRole = try role(of: element)
+    guard allowedRoles.contains(elementRole) else {
+      return
+    }
+    let lineage = ancestry + [element]
+    elements.append(AccessibilityPathElement(element: element, lineage: lineage))
+    let children = try directChildren(of: element)
+    for child in children {
+      try collect(
+        child,
+        ancestry: lineage,
+        depth: depth + 1,
+        visited: &visited,
+        elements: &elements
+      )
+    }
   }
 
   private func collect(

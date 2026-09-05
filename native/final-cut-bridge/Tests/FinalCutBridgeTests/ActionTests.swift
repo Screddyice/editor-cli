@@ -417,6 +417,171 @@ final class ActionTests: XCTestCase {
     )
   }
 
+  func testActiveTimelineStatusUsesKnownProjectFormatControlInFocusedWindow() throws {
+    let projectTitle = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "Pass 1",
+      identifier: "timelineProjectTitle"
+    )
+    let projectDuration = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "00:00:00:05",
+      identifier: "timelineDuration"
+    )
+    let projectFormat = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "1920 x 1080 | 23.98p",
+      identifier: FinalCutAXIdentifier.activeProjectFormat
+    )
+    let clipFormatDecoy = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "3840 x 2160 | 24p",
+      identifier: "clipInspectorFormat"
+    )
+    let otherWindowFormatDecoy = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "3840 x 2160 | 29.97p",
+      identifier: FinalCutAXIdentifier.activeProjectFormat
+    )
+    let projectContent = FakeFinalCutAXElement.group(
+      children: [projectTitle, projectDuration, projectFormat]
+    )
+    let root = FakeFinalCutAXElement.application(children: [
+      .window(
+        title: "Final Cut Pro",
+        children: [projectContent, clipFormatDecoy]
+      ),
+      .window(title: "Other", children: [otherWindowFormatDecoy]),
+    ])
+
+    let status = try XCTUnwrap(
+      LiveFinalCutAX(root: root).activeTimelineStatus(timeout: 2)
+    )
+
+    XCTAssertEqual(status.timebase, FinalCutTimebase(formatDescription: "23.98p"))
+    XCTAssertTrue(status.matches(duration: 5 * 1_001 / 24_000))
+  }
+
+  func testActiveTimelineStatusRejectsProjectFormatDecoyOutsideProjectAncestry() throws {
+    let projectTitle = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "Pass 1",
+      identifier: "timelineProjectTitle"
+    )
+    let projectDuration = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "00:00:00:05",
+      identifier: "timelineDuration"
+    )
+    let decoyFormat = FakeFinalCutAXElement(
+      role: kAXStaticTextRole as String,
+      title: "1920 x 1080 | 23.98p",
+      identifier: FinalCutAXIdentifier.activeProjectFormat
+    )
+    let projectContent = FakeFinalCutAXElement.group(
+      children: [projectTitle, projectDuration]
+    )
+    let inspector = FakeFinalCutAXElement.group(children: [decoyFormat])
+    let root = FakeFinalCutAXElement.application(children: [
+      .window(title: "Final Cut Pro", children: [projectContent, inspector])
+    ])
+
+    XCTAssertThrowsError(
+      try LiveFinalCutAX(root: root).activeTimelineStatus(timeout: 2)
+    ) { error in
+      XCTAssertEqual(error as? AccessibilityDiscoveryError, .ambiguousMatch)
+    }
+  }
+
+  func testActiveProjectMatchAcceptsEquivalentFCPXMLFractionalDuration() throws {
+    let directory = FileManager.default.temporaryDirectory
+      .appendingPathComponent(UUID().uuidString, isDirectory: true)
+    let source = directory.appendingPathComponent("fractional.fcpxml")
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let xml =
+      #"<fcpxml version="1.13"><library><event name="Event"><project name="Pass 1"><sequence duration="5005/24000s"/></project></event></library></fcpxml>"#
+    try Data(xml.utf8).write(to: source)
+    let exported = try XCTUnwrap(FCPXMLProjectReader().read(path: source.path))
+    let timebase = try XCTUnwrap(FinalCutTimebase(formatDescription: "1920 x 1080 | 23.98p"))
+    let status = LiveTimelineStatus(
+      project: "Pass 1", hours: 0, minutes: 0, seconds: 0, frames: 5,
+      timebase: timebase
+    )
+    let location = FinalCutProjectLocation(
+      library: "Canary", event: "Event", project: "Pass 1"
+    )
+    let expected = ProjectIdentity(
+      library: location.library,
+      event: location.event,
+      project: exported.project,
+      duration: exported.duration
+    )
+
+    XCTAssertNotEqual(status.duration, exported.duration)
+    XCTAssertTrue(
+      ActiveProjectResolver.matches(status: status, location: location, expected: expected)
+    )
+    XCTAssertFalse(
+      ActiveProjectResolver.matches(
+        status: status,
+        location: location,
+        expected: ProjectIdentity(
+          library: expected.library,
+          event: expected.event,
+          project: expected.project,
+          duration: expected.duration + timebase.frameDuration
+        )
+      )
+    )
+  }
+
+  func testOpenProjectAcceptsEquivalentFractionalFCPXMLDuration() throws {
+    let expectedDuration = 5_005.0 / 24_000.0
+    let expected = ProjectIdentity(
+      library: "Canary", event: "Event", project: "Pass 1", duration: expectedDuration
+    )
+    let system = FakeActionSystem(
+      active: ProjectIdentity(
+        library: expected.library,
+        event: expected.event,
+        project: expected.project,
+        duration: expected.duration.nextUp
+      )
+    )
+    system.importMatchCount = 1
+
+    let result = try Actions(system: system).openProject(expected: expected, timeout: 2)
+
+    XCTAssertEqual(result, expected)
+  }
+
+  func testActionSystemMatchUsesFractionalDurationToleranceThroughExistential() throws {
+    let expected = ProjectIdentity(
+      library: "Canary", event: "Event", project: "Pass 1", duration: 5_005.0 / 24_000.0
+    )
+    let system: any FinalCutActionSystem = FakeActionSystem(
+      active: ProjectIdentity(
+        library: expected.library,
+        event: expected.event,
+        project: expected.project,
+        duration: expected.duration.nextUp
+      )
+    )
+
+    XCTAssertTrue(try system.activeProjectMatches(expected, timeout: 2))
+
+    let materiallyDifferent: any FinalCutActionSystem = FakeActionSystem(
+      active: ProjectIdentity(
+        library: expected.library,
+        event: expected.event,
+        project: expected.project,
+        duration: expected.duration + (1.0 / 24.0)
+      )
+    )
+    XCTAssertFalse(try materiallyDifferent.activeProjectMatches(expected, timeout: 2))
+  }
+
   func testActiveProjectResolutionRejectsSameNameAcrossLocations() throws {
     let timebase = try XCTUnwrap(FinalCutTimebase(formatDescription: "1920 x 1080 | 25p"))
     let status = LiveTimelineStatus(
@@ -606,6 +771,16 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
     return active
   }
 
+  func activeProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool {
+    guard let active = try activeProject(timeout: timeout) else { return false }
+    return active.library == expected.library
+      && active.event == expected.event
+      && active.project == expected.project
+      && abs(active.duration - expected.duration) < 0.000_001
+  }
+
   func projectMatchCount(_ identity: ProjectIdentity, timeout: TimeInterval) throws -> Int {
     if identity.project.contains("copy") || identity.project.contains("Before AI") {
       let count = duplicateMatchCounts.isEmpty ? 0 : duplicateMatchCounts.removeFirst()
@@ -779,6 +954,10 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
     _ title: String, children: [FakeFinalCutAXElement] = []
   ) -> FakeFinalCutAXElement {
     FakeFinalCutAXElement(role: kAXRowRole as String, title: title, children: children)
+  }
+
+  static func group(children: [FakeFinalCutAXElement]) -> FakeFinalCutAXElement {
+    FakeFinalCutAXElement(role: kAXGroupRole as String, children: children)
   }
 
   static func textField() -> FakeFinalCutAXElement {
