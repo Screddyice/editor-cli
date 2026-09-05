@@ -442,6 +442,128 @@ def test_atomic_update_preserves_failed_new_config_and_restores_absence(tmp_path
     assert recoveries
 
 
+def test_atomic_update_exchanges_back_competitor_swapped_during_absent_recovery(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    desired = b"[installed]\nvalue = 3\n"
+    competitor = b"[competitor]\nvalue = 4\n"
+    real_exchange = setup_lib._atomic_exchange
+    injected = False
+
+    def fail_installed_config(path):
+        if Path(path) == config:
+            raise SetupError("post-write validation failed")
+
+    def exchange_after_swap(source, destination):
+        nonlocal injected
+        if Path(destination) == config and not injected:
+            injected = True
+            config.write_bytes(competitor)
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", exchange_after_swap)
+
+    with pytest.raises(SetupError, match="competitor"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=fail_installed_config,
+            expected=None,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert config.read_bytes() == competitor
+
+
+def test_atomic_update_recovers_existing_config_after_install_fsync_failure(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    original = b"[existing]\nvalue = 1\n"
+    config.write_bytes(original)
+    real_exchange = setup_lib._atomic_exchange
+    real_fsync = setup_lib._fsync_directory
+    installed = False
+    failed = False
+
+    def record_install(source, destination):
+        nonlocal installed
+        real_exchange(source, destination)
+        if Path(destination) == config and not installed:
+            installed = True
+
+    def fail_after_install(path):
+        nonlocal failed
+        if installed and not failed:
+            failed = True
+            raise OSError("directory fsync failed")
+        real_fsync(path)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", record_install)
+    monkeypatch.setattr(setup_lib, "_fsync_directory", fail_after_install)
+
+    with pytest.raises(SetupError, match="fsync"):
+        setup_lib.atomic_config_update(
+            config,
+            b"[installed]\nvalue = 3\n",
+            parse=setup_lib.tomllib.loads,
+            expected=original,
+            expected_backup=None,
+        )
+
+    assert failed
+    assert config.read_bytes() == original
+    assert config.with_suffix(".toml.editor-cli.bak").read_bytes() == original
+
+
+def test_atomic_update_recovers_absence_after_install_fsync_failure(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    desired = b"[installed]\nvalue = 3\n"
+    real_move = setup_lib._atomic_move_no_replace
+    real_fsync = setup_lib._fsync_directory
+    installed = False
+    failed = False
+
+    def record_install(source, destination):
+        nonlocal installed
+        real_move(source, destination)
+        if Path(destination) == config:
+            installed = True
+
+    def fail_after_install(path):
+        nonlocal failed
+        if installed and not failed:
+            failed = True
+            raise OSError("directory fsync failed")
+        real_fsync(path)
+
+    monkeypatch.setattr(setup_lib, "_atomic_move_no_replace", record_install)
+    monkeypatch.setattr(setup_lib, "_fsync_directory", fail_after_install)
+
+    with pytest.raises(SetupError, match="fsync"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            expected=None,
+            expected_backup=None,
+        )
+
+    recoveries = [
+        path
+        for path in tmp_path.glob(f".{config.name}.*")
+        if path.read_bytes() == desired
+    ]
+    assert failed
+    assert not config.exists()
+    assert recoveries
+
+
 def test_atomic_update_keeps_valid_competitor_and_displaced_original(
     tmp_path,
 ):
@@ -476,6 +598,62 @@ def test_atomic_update_keeps_valid_competitor_and_displaced_original(
     assert injected
     assert config.read_bytes() == competitor
     assert recoveries
+
+
+def test_atomic_update_revalidates_backup_after_config_verification(
+    tmp_path,
+):
+    config = tmp_path / "config.toml"
+    backup = config.with_suffix(".toml.editor-cli.bak")
+    original = b"[existing]\nvalue = 1\n"
+    competitor = b"[competitor]\nvalue = 2\n"
+    desired = b"[installed]\nvalue = 3\n"
+    config.write_bytes(original)
+
+    def replace_backup_after_install(path):
+        if Path(path) == config:
+            backup.write_bytes(competitor)
+
+    with pytest.raises(SetupError, match="backup changed"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=replace_backup_after_install,
+            expected=original,
+            expected_backup=None,
+        )
+
+    assert config.read_bytes() == original
+    assert backup.read_bytes() == competitor
+
+
+def test_snapshot_regular_file_rejects_symlink_swapped_before_open(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    target = tmp_path / "competitor.toml"
+    config.write_bytes(b"[existing]\nvalue = 1\n")
+    target.write_bytes(b"[competitor]\nvalue = 2\n")
+    real_open = setup_lib.os.open
+    injected = False
+
+    def swap_before_open(path, flags, *args):
+        nonlocal injected
+        if Path(path) == config and not injected:
+            injected = True
+            config.unlink()
+            config.symlink_to(target)
+        return real_open(path, flags, *args)
+
+    monkeypatch.setattr(setup_lib.os, "open", swap_before_open)
+
+    with pytest.raises(SetupError, match="changed while setup read"):
+        setup_lib._snapshot_regular_file(config, label="Config")
+
+    assert injected
+    assert config.is_symlink()
+    assert config.resolve() == target.resolve()
 
 
 def test_atomic_update_refuses_partial_backup_before_config_exchange(

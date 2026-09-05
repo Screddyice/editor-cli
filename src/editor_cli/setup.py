@@ -482,13 +482,44 @@ def _snapshot_regular_file(path: Path, *, label: str) -> bytes | None:
         return None
     if not stat.S_ISREG(before.st_mode):
         raise SetupError(f"{label} must be a regular file: {path}")
+
+    flags = os.O_RDONLY
+    flags |= getattr(os, "O_CLOEXEC", 0)
+    flags |= getattr(os, "O_NOFOLLOW", 0)
+    flags |= getattr(os, "O_NONBLOCK", 0)
     try:
-        content = path.read_bytes()
-        after = path.lstat()
+        descriptor = os.open(path, flags)
     except OSError as exc:
         raise SetupError(f"{label} changed while setup read it: {path}") from exc
-    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
-    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode):
+            raise SetupError(f"{label} must be a regular file: {path}")
+        with os.fdopen(descriptor, "rb", closefd=False) as handle:
+            content = handle.read()
+        after = os.fstat(descriptor)
+        current = path.lstat()
+    except OSError as exc:
+        raise SetupError(f"{label} changed while setup read it: {path}") from exc
+    finally:
+        os.close(descriptor)
+
+    def identity(value: os.stat_result) -> tuple[int, ...]:
+        return (
+            value.st_dev,
+            value.st_ino,
+            value.st_mode,
+            value.st_nlink,
+            value.st_uid,
+            value.st_gid,
+            value.st_size,
+            value.st_mtime_ns,
+            value.st_ctime_ns,
+        )
+
+    if identity(before) != identity(opened) or identity(opened) != identity(after):
+        raise SetupError(f"{label} changed while setup read it: {path}")
+    if identity(after) != identity(current):
         raise SetupError(f"{label} changed while setup read it: {path}")
     return content
 
@@ -580,17 +611,108 @@ def _exchange_back_if_owned(path: Path, displaced: Path, installed: bytes) -> bo
         return False
     try:
         _atomic_exchange(displaced, path)
-        _fsync_directory(path.parent)
     except (OSError, SetupError):
         return False
+    try:
+        _fsync_directory(path.parent)
+    except OSError:
+        pass
     if _regular_file_matches(displaced, installed):
         return True
     try:
         _atomic_exchange(displaced, path)
-        _fsync_directory(path.parent)
     except (OSError, SetupError):
+        return False
+    try:
+        _fsync_directory(path.parent)
+    except OSError:
         pass
     return False
+
+
+def _recover_absent_config(path: Path, installed_content: bytes) -> Path:
+    sentinel_content = b"editor-cli recovery sentinel\0" + os.urandom(32)
+    displaced = _write_sibling_temp(path, sentinel_content, mode=0o600)
+    preserve_displaced = False
+    cleanup: Path | None = None
+    try:
+        _atomic_exchange(displaced, path)
+        preserve_displaced = True
+        try:
+            _fsync_directory(path.parent)
+        except OSError:
+            pass
+
+        current_displaced = _snapshot_regular_file(displaced, label="Displaced config")
+        if current_displaced != installed_content:
+            if _exchange_back_if_owned(path, displaced, sentinel_content):
+                preserve_displaced = False
+                raise SetupError(f"Config competitor changed during recovery: {path}")
+            raise SetupError(
+                "Config competitor changed during recovery; displaced material "
+                f"preserved at {displaced}"
+            )
+
+        descriptor, raw_cleanup = tempfile.mkstemp(
+            prefix=f".{path.name}.recovery.", dir=path.parent
+        )
+        os.close(descriptor)
+        cleanup = Path(raw_cleanup)
+        cleanup.unlink()
+        _atomic_move_no_replace(path, cleanup)
+        try:
+            _fsync_directory(path.parent)
+        except OSError:
+            pass
+
+        moved = _snapshot_regular_file(cleanup, label="Recovery sentinel")
+        if moved != sentinel_content:
+            try:
+                _atomic_move_no_replace(cleanup, path)
+                _fsync_directory(path.parent)
+            except (FileExistsError, OSError, SetupError) as exc:
+                raise SetupError(
+                    "Config competitor changed while setup restored absence; "
+                    f"displaced material preserved at {cleanup}"
+                ) from exc
+            raise SetupError(f"Config competitor changed during recovery: {path}")
+
+        cleanup.unlink()
+        cleanup = None
+        try:
+            _fsync_directory(path.parent)
+        except OSError as exc:
+            raise SetupError(
+                "Config absence was restored but its directory could not be "
+                f"fsynced; failed config preserved at {displaced}"
+            ) from exc
+        return displaced
+    finally:
+        if not preserve_displaced:
+            displaced.unlink(missing_ok=True)
+        if cleanup is not None and _regular_file_matches(cleanup, sentinel_content):
+            cleanup.unlink(missing_ok=True)
+
+
+def _verify_fixed_backup(
+    backup: Path,
+    expected_content: bytes,
+    *,
+    parse: Callable[[str], object],
+) -> None:
+    try:
+        current = _snapshot_regular_file(backup, label="Config backup")
+    except SetupError as exc:
+        raise SetupError(
+            f"Config backup changed after config verification: {backup}"
+        ) from exc
+    if current != expected_content:
+        raise SetupError(f"Config backup changed after config verification: {backup}")
+    _parse_config_bytes(
+        current,
+        parse,
+        error=f"Config backup is invalid after config verification: {backup}",
+    )
 
 
 def _restore_fixed_backup(
@@ -680,7 +802,19 @@ def atomic_config_update(
                 raise SetupError(
                     f"Config changed after setup preflight: {path}"
                 ) from exc
-            _fsync_directory(path.parent)
+            try:
+                _fsync_directory(path.parent)
+            except OSError as exc:
+                try:
+                    recovery = _recover_absent_config(path, content)
+                except SetupError as recovery_error:
+                    raise SetupError(
+                        f"Failed to fsync installed config: {path}; {recovery_error}"
+                    ) from recovery_error
+                raise SetupError(
+                    "Failed to fsync installed config: "
+                    f"{path}; failed config preserved at {recovery}"
+                ) from exc
         else:
             backup = _publish_fixed_backup(
                 path,
@@ -690,7 +824,19 @@ def atomic_config_update(
             )
             _atomic_exchange(temp, path)
             displaced = True
-            _fsync_directory(path.parent)
+            try:
+                _fsync_directory(path.parent)
+            except OSError as exc:
+                preserve_temp = displaced
+                if _exchange_back_if_owned(path, temp, content):
+                    raise SetupError(
+                        "Failed to fsync installed config: "
+                        f"{path}; failed config preserved at {temp}"
+                    ) from exc
+                raise SetupError(
+                    "Failed to fsync installed config and could not restore the "
+                    f"preflight config; displaced material preserved at {temp}"
+                ) from exc
             if not _regular_file_matches(temp, expected_content):
                 if not _exchange_back_if_owned(path, temp, content):
                     preserve_temp = True
@@ -714,14 +860,12 @@ def atomic_config_update(
                 ) from exc
             if backup is None and expected_content is None:
                 try:
-                    _atomic_move_no_replace(path, temp)
-                    _fsync_directory(path.parent)
-                except (FileExistsError, SetupError) as recovery_error:
-                    raise SetupError(
-                        f"{exc}; failed config remains at {path}"
-                    ) from recovery_error
-                preserve_temp = True
-                raise SetupError(f"{exc}; failed config preserved at {temp}") from exc
+                    recovery = _recover_absent_config(path, content)
+                except SetupError as recovery_error:
+                    raise SetupError(f"{exc}; {recovery_error}") from recovery_error
+                raise SetupError(
+                    f"{exc}; failed config preserved at {recovery}"
+                ) from exc
             if backup is not None:
                 fixed_backup_content = (
                     expected_backup_content
@@ -754,6 +898,32 @@ def atomic_config_update(
                         f"{exc}; displaced config preserved at {temp}"
                     ) from exc
             raise
+
+        if backup is not None:
+            fixed_backup_content = (
+                expected_backup_content
+                if expected_backup_content is not None
+                else expected_content
+            )
+            if fixed_backup_content is None:
+                raise SetupError(f"Config backup state is unavailable: {backup}")
+            try:
+                _verify_fixed_backup(
+                    backup,
+                    fixed_backup_content,
+                    parse=parse,
+                )
+            except SetupError as exc:
+                preserve_temp = displaced
+                if displaced and _exchange_back_if_owned(path, temp, content):
+                    displaced = False
+                    preserve_temp = False
+                    raise
+                if displaced:
+                    raise SetupError(
+                        f"{exc}; displaced config preserved at {temp}"
+                    ) from exc
+                raise
     except Exception as exc:
         if isinstance(exc, SetupError):
             raise
