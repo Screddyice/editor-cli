@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
+import stat
 import sys
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -77,29 +79,52 @@ def _is_sha256(value: object) -> bool:
     )
 
 
-def _sha256(path: Path) -> str:
-    digest = hashlib.sha256()
-    with path.open("rb") as handle:
-        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-            digest.update(chunk)
-    return digest.hexdigest()
+def _lexical_path(path: Path) -> Path:
+    return Path(os.path.abspath(path.expanduser()))
+
+
+def _is_regular_path(path: Path) -> bool:
+    try:
+        return stat.S_ISREG(path.lstat().st_mode)
+    except OSError:
+        return False
+
+
+def _read_regular_no_follow(path: Path) -> bytes:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise OSError("O_NOFOLLOW is unavailable")
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | no_follow)
+    try:
+        before = os.fstat(descriptor)
+        if not stat.S_ISREG(before.st_mode):
+            raise OSError("path is not a regular file")
+        chunks: list[bytes] = []
+        while chunk := os.read(descriptor, 1024 * 1024):
+            chunks.append(chunk)
+        after = os.fstat(descriptor)
+        if (
+            (before.st_dev, before.st_ino, before.st_mode, before.st_size)
+            != (after.st_dev, after.st_ino, after.st_mode, after.st_size)
+            or before.st_mtime_ns != after.st_mtime_ns
+            or before.st_ctime_ns != after.st_ctime_ns
+        ):
+            raise OSError("file changed while it was being read")
+        return b"".join(chunks)
+    finally:
+        os.close(descriptor)
 
 
 def _native_metadata(
     config: ControllerConfig,
 ) -> tuple[dict[str, Any] | None, str | None]:
-    helper = config.native_helper.expanduser().resolve()
+    helper = _lexical_path(config.native_helper)
     metadata_path = helper.with_suffix(".json")
-    if (
-        not helper.is_file()
-        or helper.is_symlink()
-        or not metadata_path.is_file()
-        or metadata_path.is_symlink()
-    ):
-        return None, None
     try:
-        value = json.loads(metadata_path.read_text(encoding="utf-8"))
-        helper_sha256 = _sha256(helper)
+        helper_bytes = _read_regular_no_follow(helper)
+        metadata_bytes = _read_regular_no_follow(metadata_path)
+        value = json.loads(metadata_bytes.decode("utf-8"))
+        helper_sha256 = hashlib.sha256(helper_bytes).hexdigest()
     except (json.JSONDecodeError, OSError, UnicodeError):
         return None, None
     if (
@@ -124,12 +149,12 @@ def device_report(
     probe: Callable[[Path], NativeProbe] | None = None,
 ) -> dict[str, Any]:
     config = config or load_controller_config()
-    helper = config.native_helper.expanduser().resolve()
+    helper = _lexical_path(config.native_helper)
     metadata, installed_sha256 = _native_metadata(config)
     report: dict[str, Any] = {
         "native_helper": {
             "path": str(helper),
-            "installed": helper.is_file() and not helper.is_symlink(),
+            "installed": _is_regular_path(helper),
             "metadata_path": str(helper.with_suffix(".json")),
             "metadata_valid": metadata is not None,
             "sha256": installed_sha256,
@@ -140,7 +165,8 @@ def device_report(
         },
         "final_cut": {"bundle_id": None, "version": None, "compatible": False},
         "permissions": {"accessibility": False, "automation": False},
-        "dialogs": [],
+        "dialogs": None,
+        "dialogs_checked": False,
         "ready": False,
     }
     if metadata is None:
@@ -186,6 +212,7 @@ def device_report(
         "automation": state.automation,
     }
     report["dialogs"] = dialogs
+    report["dialogs_checked"] = True
     report["ready"] = bool(
         helper_compatible
         and final_cut_compatible

@@ -12,7 +12,11 @@ from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ToolError
 
 import editor_cli.mcp_server as mcp_server_module
-from editor_cli.adapters.native_final_cut import BlockingDialog, NativeProbe
+from editor_cli.adapters.native_final_cut import (
+    BlockingDialog,
+    NativeFinalCutClient,
+    NativeProbe,
+)
 from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import ServiceRegistry, create_mcp, device_report
 
@@ -154,6 +158,7 @@ def test_device_report_requires_native_helper_and_no_paid_app(tmp_path):
     }
     assert report["permissions"] == {"accessibility": True, "automation": True}
     assert report["dialogs"] == []
+    assert report["dialogs_checked"] is True
     assert "commandpost" not in report
     assert "license_app" not in json.dumps(report).lower()
     probe.assert_called_once_with(config.session_root)
@@ -195,7 +200,80 @@ def test_device_report_rejects_missing_or_invalid_helper_metadata(tmp_path, meta
 
     assert report["ready"] is False
     assert report["native_helper"]["metadata_valid"] is False
+    assert report["dialogs"] is None
+    assert report["dialogs_checked"] is False
     probe.assert_not_called()
+
+
+@pytest.mark.parametrize("symlink", ["helper", "metadata"])
+def test_device_report_rejects_symlinked_native_artifacts_before_probe(
+    tmp_path, symlink
+):
+    config, digest = native_config(tmp_path)
+    selected = (
+        config.native_helper
+        if symlink == "helper"
+        else config.native_helper.with_suffix(".json")
+    )
+    target = tmp_path / f"target-{symlink}"
+    target.write_bytes(selected.read_bytes())
+    selected.unlink()
+    selected.symlink_to(target)
+    probe = Mock(return_value=valid_probe(digest))
+
+    report = device_report(config=config, probe=probe)
+
+    assert report["ready"] is False
+    assert report["native_helper"]["metadata_valid"] is False
+    assert report["dialogs_checked"] is False
+    probe.assert_not_called()
+
+
+def test_device_report_binds_readiness_to_executed_helper_inode_during_race(tmp_path):
+    config, digest = native_config(tmp_path)
+    reviewed_bytes = config.native_helper.read_bytes()
+    replacement_bytes = b"different helper"
+    observed = {}
+
+    def racing_runner(*args, **_kwargs):
+        displaced = tmp_path / "displaced-helper"
+        attacker = tmp_path / "attacker-helper"
+        attacker.write_bytes(replacement_bytes)
+        config.native_helper.replace(displaced)
+        attacker.replace(config.native_helper)
+        try:
+            observed["executed"] = Path(args[0][0]).read_bytes()
+        finally:
+            config.native_helper.unlink()
+            displaced.replace(config.native_helper)
+        stdout = (
+            json.dumps(
+                {
+                    "ok": True,
+                    "result": {
+                        "protocolVersion": 1,
+                        "bundleIdentifier": "com.apple.FinalCutApp",
+                        "version": "12.3",
+                        "ready": True,
+                        "accessibilityTrusted": True,
+                        "automationAuthorized": True,
+                        "libraryNames": [],
+                        "activeProject": None,
+                        "dialogs": [],
+                    },
+                }
+            )
+            + "\n"
+        )
+        return subprocess.CompletedProcess(args[0], 0, stdout, "")
+
+    client = NativeFinalCutClient(config.native_helper, runner=racing_runner)
+    report = device_report(config=config, probe=client.probe)
+
+    assert observed["executed"] == reviewed_bytes
+    assert observed["executed"] != replacement_bytes
+    assert report["native_helper"]["sha256"] == digest
+    assert report["ready"] is True
 
 
 @pytest.mark.anyio

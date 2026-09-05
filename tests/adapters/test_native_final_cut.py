@@ -1,4 +1,6 @@
+import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 from typing import Literal, get_type_hints
@@ -52,9 +54,17 @@ class FakeRunner:
         self.returncode = returncode
         self.stderr = stderr
         self.calls: list[tuple[tuple[object, ...], dict[str, object]]] = []
+        self.execution_identity: tuple[int, int] | None = None
 
     def __call__(self, *args: object, **kwargs: object):
         self.calls.append((args, kwargs))
+        if kwargs.get("pass_fds"):
+            descriptor = kwargs["pass_fds"][0]  # type: ignore[index]
+            executable = Path(args[0][0])  # type: ignore[index]
+            self.execution_identity = (
+                os.stat(executable).st_ino,
+                os.fstat(descriptor).st_ino,  # type: ignore[arg-type]
+            )
         return subprocess.CompletedProcess(
             args=args[0],
             returncode=self.returncode,
@@ -86,7 +96,13 @@ def test_native_client_sends_one_strict_request(tmp_path):
 
     assert len(runner.calls) == 1
     args, kwargs = runner.calls[0]
-    assert args == ([str((tmp_path / "bridge").resolve())],)
+    descriptor = kwargs["pass_fds"][0]
+    executable = Path(args[0][0])
+    assert executable.name == "bridge"
+    assert executable.parent.name.startswith(".bridge.run-")
+    assert runner.execution_identity is not None
+    assert runner.execution_identity[0] == runner.execution_identity[1]
+    assert kwargs["pass_fds"] == (descriptor,)
     assert kwargs["text"] is True
     assert kwargs["capture_output"] is True
     assert kwargs["timeout"] == 7
@@ -99,8 +115,71 @@ def test_native_client_sends_one_strict_request(tmp_path):
         "sessionRoot": str((tmp_path / "session").resolve()),
         "payload": {},
     }
+    assert not executable.parent.exists()
     assert result.active_project == identity()
     assert len(result.helper_sha256) == 64
+
+
+def test_native_client_rejects_symlinked_helper_before_execution(tmp_path):
+    target = tmp_path / "target"
+    target.write_bytes(b"native helper")
+    helper = tmp_path / "bridge"
+    helper.symlink_to(target)
+    runner = FakeRunner(probe_response())
+    native = NativeFinalCutClient(helper, runner=runner)
+
+    with pytest.raises(NativeFinalCutError, match="regular file"):
+        native.probe(tmp_path / "session")
+
+    assert runner.calls == []
+
+
+def test_native_client_removes_snapshot_after_runner_failure(tmp_path):
+    helper = tmp_path / "bridge"
+    helper.write_bytes(b"native helper")
+    snapshot_parent = None
+
+    def failing_runner(*args, **_kwargs):
+        nonlocal snapshot_parent
+        snapshot_parent = Path(args[0][0]).parent
+        raise OSError("launch failed")
+
+    native = NativeFinalCutClient(helper, runner=failing_runner)
+
+    with pytest.raises(NativeFinalCutError, match="launch failed"):
+        native.probe(tmp_path / "session")
+
+    assert snapshot_parent is not None
+    assert not snapshot_parent.exists()
+
+
+def test_native_probe_hash_is_bound_to_executed_descriptor_during_path_race(tmp_path):
+    helper = tmp_path / "bridge"
+    original = b"reviewed native helper"
+    replacement = b"different native helper"
+    helper.write_bytes(original)
+    observed = {}
+
+    def racing_runner(*args, **kwargs):
+        displaced = tmp_path / "displaced"
+        attack = tmp_path / "attack"
+        attack.write_bytes(replacement)
+        helper.replace(displaced)
+        attack.replace(helper)
+        try:
+            observed["executed"] = Path(args[0][0]).read_bytes()
+        finally:
+            helper.unlink()
+            displaced.replace(helper)
+        return subprocess.CompletedProcess(args[0], 0, probe_response(), "")
+
+    result = NativeFinalCutClient(helper, runner=racing_runner).probe(
+        tmp_path / "session"
+    )
+
+    assert observed["executed"] == original
+    assert observed["executed"] != replacement
+    assert result.helper_sha256 == hashlib.sha256(original).hexdigest()
 
 
 @pytest.mark.parametrize(

@@ -56,3 +56,15 @@ def test_controller_config_resolves_native_helper_override(tmp_path):
         env={"EDITOR_CLI_NATIVE_HELPER": str(tmp_path / "bridge")}
     )
     assert cfg.native_helper == (tmp_path / "bridge").resolve()
+
+
+def test_controller_config_preserves_lexical_native_helper_symlink(tmp_path):
+    target = tmp_path / "target-helper"
+    target.write_bytes(b"target")
+    helper = tmp_path / "editor-fcp-bridge"
+    helper.symlink_to(target)
+
+    cfg = load_controller_config(env={"EDITOR_CLI_NATIVE_HELPER": str(helper)})
+
+    assert cfg.native_helper == helper.absolute()
+    assert cfg.native_helper != target

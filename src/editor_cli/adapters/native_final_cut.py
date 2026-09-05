@@ -5,7 +5,11 @@ from __future__ import annotations
 import hashlib
 import json
 import math
+import os
+import shutil
+import stat
 import subprocess
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
@@ -76,12 +80,12 @@ class NativeFinalCutClient:
             raise ValueError(
                 "Native Final Cut action timeout must be between 0 and 3,600 seconds"
             )
-        self._executable = executable.expanduser().resolve()
+        self._executable = Path(os.path.abspath(executable.expanduser()))
         self._runner = runner
         self._action_timeout = action_timeout
 
     def probe(self, session_root: Path) -> NativeProbe:
-        result = self._invoke("probe", {}, session_root)
+        result, helper_sha256 = self._invoke_bound("probe", {}, session_root)
         _require_keys(
             result,
             {
@@ -108,7 +112,7 @@ class NativeFinalCutClient:
         active = None if raw_active is None else _decode_identity(raw_active)
         return NativeProbe(
             protocol_version=PROTOCOL_VERSION,
-            helper_sha256=self._helper_sha256(),
+            helper_sha256=helper_sha256,
             final_cut_bundle_id=_string(
                 result["bundleIdentifier"], "bundle identifier"
             ),
@@ -220,9 +224,20 @@ class NativeFinalCutClient:
         _require_keys(result, {"protocolVersion", "dialogs"}, "dialog result")
         return _decode_dialogs(result["dialogs"])
 
+    def request_permissions(self) -> subprocess.CompletedProcess[str]:
+        """Run the CLI-only permission helper mode outside the JSON action protocol."""
+        completed, _helper_sha256 = self._run_bound(["--request-permissions"])
+        return completed
+
     def _invoke(
         self, action: str, payload: dict[str, Any], session_root: Path
     ) -> dict[str, Any]:
+        result, _helper_sha256 = self._invoke_bound(action, payload, session_root)
+        return result
+
+    def _invoke_bound(
+        self, action: str, payload: dict[str, Any], session_root: Path
+    ) -> tuple[dict[str, Any], str]:
         root = _session_root(session_root)
         request = json.dumps(
             {
@@ -234,25 +249,7 @@ class NativeFinalCutClient:
             allow_nan=False,
             separators=(",", ":"),
         )
-        try:
-            completed = self._runner(
-                [str(self._executable)],
-                input=request,
-                text=True,
-                capture_output=True,
-                timeout=self._action_timeout,
-                check=False,
-            )
-        except subprocess.TimeoutExpired as exc:
-            raise NativeFinalCutError("Native Final Cut action timed out") from exc
-        except UnicodeError as exc:
-            raise NativeFinalCutError(
-                "Native Final Cut helper returned an invalid text response"
-            ) from exc
-        except OSError as exc:
-            raise NativeFinalCutError(
-                f"Unable to start native Final Cut helper: {exc}"
-            ) from exc
+        completed, helper_sha256 = self._run_bound([], input_text=request)
 
         response = completed.stdout
         if not isinstance(response, str):
@@ -285,7 +282,109 @@ class NativeFinalCutClient:
             raise NativeFinalCutError(
                 "Native Final Cut response protocol version is invalid"
             )
-        return result
+        return result, helper_sha256
+
+    def _run_bound(
+        self,
+        arguments: list[str],
+        *,
+        input_text: str | None = None,
+    ) -> tuple[subprocess.CompletedProcess[str], str]:
+        try:
+            descriptor = _open_regular_no_follow(self._executable)
+        except OSError as exc:
+            raise NativeFinalCutError(
+                f"Native Final Cut helper must be a regular file: {exc}"
+            ) from exc
+
+        snapshot_directory: Path | None = None
+        try:
+            source_state = os.fstat(descriptor)
+            source_sha256 = _descriptor_sha256(descriptor)
+            if not _same_file_state(source_state, os.fstat(descriptor)):
+                raise NativeFinalCutError(
+                    "Native Final Cut helper changed while it was being verified"
+                )
+            snapshot_directory = Path(
+                tempfile.mkdtemp(
+                    prefix=f".{self._executable.name}.run-",
+                    dir=self._executable.parent,
+                )
+            )
+            snapshot_directory.chmod(0o700)
+            snapshot = snapshot_directory / self._executable.name
+            snapshot_writer = os.open(
+                snapshot,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_CLOEXEC,
+                0o700,
+            )
+            try:
+                _copy_descriptor(descriptor, snapshot_writer)
+                os.fchmod(snapshot_writer, 0o700)
+                os.fsync(snapshot_writer)
+            finally:
+                os.close(snapshot_writer)
+            if not _same_file_state(
+                source_state, os.fstat(descriptor)
+            ) or source_sha256 != _descriptor_sha256(descriptor):
+                raise NativeFinalCutError(
+                    "Native Final Cut helper changed before execution"
+                )
+
+            execution_descriptor = _open_regular_no_follow(snapshot)
+            try:
+                execution_state = os.fstat(execution_descriptor)
+                helper_sha256 = _descriptor_sha256(execution_descriptor)
+                if helper_sha256 != source_sha256:
+                    raise NativeFinalCutError(
+                        "Native Final Cut helper snapshot does not match its source"
+                    )
+                linked_before = snapshot.lstat()
+                if not _same_file_identity(execution_state, linked_before):
+                    raise NativeFinalCutError(
+                        "Native Final Cut helper snapshot changed before execution"
+                    )
+                runner_kwargs: dict[str, Any] = {
+                    "text": True,
+                    "capture_output": True,
+                    "timeout": self._action_timeout,
+                    "check": False,
+                    "pass_fds": (execution_descriptor,),
+                }
+                if input_text is not None:
+                    runner_kwargs["input"] = input_text
+                completed = self._runner(
+                    [str(snapshot), *arguments],
+                    **runner_kwargs,
+                )
+                after = os.fstat(execution_descriptor)
+                linked_after = snapshot.lstat()
+                after_sha256 = _descriptor_sha256(execution_descriptor)
+                if (
+                    not _same_file_state(execution_state, after)
+                    or not _same_file_identity(execution_state, linked_after)
+                    or helper_sha256 != after_sha256
+                ):
+                    raise NativeFinalCutError(
+                        "Native Final Cut helper changed during execution"
+                    )
+            finally:
+                os.close(execution_descriptor)
+        except subprocess.TimeoutExpired as exc:
+            raise NativeFinalCutError("Native Final Cut action timed out") from exc
+        except UnicodeError as exc:
+            raise NativeFinalCutError(
+                "Native Final Cut helper returned an invalid text response"
+            ) from exc
+        except OSError as exc:
+            raise NativeFinalCutError(
+                f"Unable to start native Final Cut helper: {exc}"
+            ) from exc
+        finally:
+            os.close(descriptor)
+            if snapshot_directory is not None:
+                shutil.rmtree(snapshot_directory, ignore_errors=True)
+        return completed, helper_sha256
 
     def _bound_project(
         self, result: dict[str, Any], expected: ProjectIdentity
@@ -313,17 +412,51 @@ class NativeFinalCutClient:
         receipt_output = _receipt_path(result["output"], root, output)
         return ExportReceipt("fcpxml_export", project, receipt_output)
 
-    def _helper_sha256(self) -> str:
-        digest = hashlib.sha256()
-        try:
-            with self._executable.open("rb") as handle:
-                for chunk in iter(lambda: handle.read(1024 * 1024), b""):
-                    digest.update(chunk)
-        except OSError as exc:
-            raise NativeFinalCutError(
-                f"Unable to hash native Final Cut helper: {exc}"
-            ) from exc
-        return digest.hexdigest()
+
+def _open_regular_no_follow(path: Path) -> int:
+    no_follow = getattr(os, "O_NOFOLLOW", None)
+    if no_follow is None:
+        raise OSError("O_NOFOLLOW is unavailable")
+    descriptor = os.open(path, os.O_RDONLY | os.O_CLOEXEC | no_follow)
+    if not stat.S_ISREG(os.fstat(descriptor).st_mode):
+        os.close(descriptor)
+        raise OSError("path is not a regular file")
+    return descriptor
+
+
+def _descriptor_sha256(descriptor: int) -> str:
+    digest = hashlib.sha256()
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    for chunk in iter(lambda: os.read(descriptor, 1024 * 1024), b""):
+        digest.update(chunk)
+    os.lseek(descriptor, 0, os.SEEK_SET)
+    return digest.hexdigest()
+
+
+def _copy_descriptor(source: int, destination: int) -> None:
+    os.lseek(source, 0, os.SEEK_SET)
+    while chunk := os.read(source, 1024 * 1024):
+        view = memoryview(chunk)
+        while view:
+            written = os.write(destination, view)
+            if written <= 0:
+                raise OSError("unable to copy native helper")
+            view = view[written:]
+    os.lseek(source, 0, os.SEEK_SET)
+
+
+def _same_file_identity(left: os.stat_result, right: os.stat_result) -> bool:
+    return (left.st_dev, left.st_ino) == (right.st_dev, right.st_ino)
+
+
+def _same_file_state(left: os.stat_result, right: os.stat_result) -> bool:
+    return _same_file_identity(left, right) and (
+        left.st_mode,
+        left.st_size,
+    ) == (
+        right.st_mode,
+        right.st_size,
+    )
 
 
 def _decode_response(stdout: str) -> dict[str, Any]:

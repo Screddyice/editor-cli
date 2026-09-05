@@ -35,6 +35,11 @@ class ControllerConfig:
     max_passes: int = 3
 
 
+def _lexical_absolute(path: Path) -> Path:
+    """Make a path absolute without following its final or parent symlinks."""
+    return Path(os.path.abspath(path.expanduser()))
+
+
 def _parse_dotenv(start: Path | None = None) -> dict[str, str]:
     """Walk up from ``start`` (or cwd) looking for a .env; parse KEY=VALUE lines."""
     here = (start or Path.cwd()).resolve()
@@ -108,7 +113,7 @@ def load_controller_config(
 
     return ControllerConfig(
         session_root=root.expanduser().resolve(),
-        native_helper=helper.expanduser().resolve(),
+        native_helper=_lexical_absolute(helper),
         native_protocol_version=1,
         native_action_timeout_seconds=native_timeout,
         max_passes=max_passes,

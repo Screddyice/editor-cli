@@ -1,4 +1,6 @@
 import subprocess
+from pathlib import Path
+from unittest.mock import Mock
 
 from typer.testing import CliRunner
 
@@ -45,6 +47,7 @@ def test_doctor_reports_final_cut_version(monkeypatch):
                 "installed": True,
                 "metadata_valid": True,
                 "protocol_version": 1,
+                "compatible": True,
             },
             "final_cut": {
                 "bundle_id": "com.apple.FinalCutApp",
@@ -53,16 +56,43 @@ def test_doctor_reports_final_cut_version(monkeypatch):
             },
             "permissions": {"accessibility": True, "automation": True},
             "dialogs": [],
+            "dialogs_checked": True,
             "ready": True,
         },
     )
     res = CliRunner().invoke(app, ["doctor"])
     assert res.exit_code == 0
     assert "Final Cut Pro 12.3" in res.output
-    assert "Native helper protocol 1" in res.output
+    assert "✓ Native helper protocol 1" in res.output
     assert "Accessibility" in res.output
     assert "Automation" in res.output
     assert "CommandPost" not in res.output
+
+
+def test_doctor_does_not_report_clear_dialogs_when_probe_did_not_run(monkeypatch):
+    monkeypatch.setattr(
+        "editor_cli.mcp_server.device_report",
+        lambda: {
+            "native_helper": {
+                "installed": False,
+                "metadata_valid": False,
+                "protocol_version": None,
+                "compatible": False,
+            },
+            "final_cut": {"bundle_id": None, "version": None, "compatible": False},
+            "permissions": {"accessibility": False, "automation": False},
+            "dialogs": None,
+            "dialogs_checked": False,
+            "ready": False,
+            "error": "Native helper metadata is invalid",
+        },
+    )
+
+    result = CliRunner().invoke(app, ["doctor"])
+
+    assert result.exit_code == 1
+    assert "No blocking dialogs" not in result.output
+    assert "Blocking dialog inspection unavailable" in result.output
 
 
 def test_permission_request_invokes_only_installed_helper_argv_mode(
@@ -83,15 +113,33 @@ def test_permission_request_invokes_only_installed_helper_argv_mode(
     result = CliRunner().invoke(app, ["permissions", "request"])
 
     assert result.exit_code == 0
-    assert calls == [
-        (
-            ([str(helper.resolve()), "--request-permissions"],),
-            {
-                "capture_output": True,
-                "check": False,
-                "text": True,
-                "timeout": 120,
-            },
-        )
-    ]
+    assert len(calls) == 1
+    args, kwargs = calls[0]
+    assert args[0][1:] == ["--request-permissions"]
+    assert Path(args[0][0]).name == helper.name
+    assert kwargs["capture_output"] is True
+    assert kwargs["check"] is False
+    assert kwargs["text"] is True
+    assert kwargs["timeout"] == 120
+    assert len(kwargs["pass_fds"]) == 1
+    assert "input" not in kwargs
     assert "Permissions requested." in result.output
+
+
+def test_permission_request_rejects_symlinked_helper_before_execution(
+    monkeypatch, tmp_path
+):
+    target = tmp_path / "target-helper"
+    target.write_bytes(b"helper")
+    helper = tmp_path / "editor-fcp-bridge"
+    helper.symlink_to(target)
+    config = ControllerConfig(session_root=tmp_path / "sessions", native_helper=helper)
+    run = Mock()
+    monkeypatch.setattr("editor_cli.config.load_controller_config", lambda: config)
+    monkeypatch.setattr("editor_cli.cli.subprocess.run", run)
+
+    result = CliRunner().invoke(app, ["permissions", "request"])
+
+    assert result.exit_code == 1
+    assert "regular file" in result.output
+    run.assert_not_called()

@@ -70,7 +70,9 @@ def doctor() -> None:
     )
     typer.echo(f"{'✓' if permissions['automation'] else '✗'} Automation permission")
     dialogs = report["dialogs"]
-    if dialogs:
+    if not report["dialogs_checked"]:
+        typer.echo("✗ Blocking dialog inspection unavailable")
+    elif dialogs:
         typer.echo(
             "✗ Blocking dialogs: " + ", ".join(item["title"] for item in dialogs)
         )
@@ -85,18 +87,20 @@ def doctor() -> None:
 @permissions_app.command("request")
 def request_permissions() -> None:
     """Ask macOS for Accessibility and Final Cut Automation permission."""
+    from editor_cli.adapters.native_final_cut import (
+        NativeFinalCutClient,
+        NativeFinalCutError,
+    )
     from editor_cli.config import load_controller_config
 
     config = load_controller_config()
     try:
-        completed = subprocess.run(
-            [str(config.native_helper), "--request-permissions"],
-            capture_output=True,
-            check=False,
-            text=True,
-            timeout=config.native_action_timeout_seconds,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
+        completed = NativeFinalCutClient(
+            config.native_helper,
+            runner=subprocess.run,
+            action_timeout=config.native_action_timeout_seconds,
+        ).request_permissions()
+    except (NativeFinalCutError, OSError, subprocess.TimeoutExpired) as exc:
         typer.secho(f"Permission request failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
     if completed.stdout:
