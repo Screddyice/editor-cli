@@ -1,3 +1,5 @@
+import json
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -5,6 +7,7 @@ import pytest
 from editor_cli.adapters.final_cut_control import FinalCutControl, FinalCutControlError
 from editor_cli.adapters.native_final_cut import (
     ExportReceipt,
+    NativeFinalCutClient,
     NativeFinalCutError,
     NativeProbe,
     ShareReceipt,
@@ -104,6 +107,11 @@ def control(tmp_path: Path, native: FakeNative | None = None):
     native = native or FakeNative()
     fcpxml = FakeFCPXML()
     return FinalCutControl(native, fcpxml, session_root=tmp_path), native, fcpxml
+
+
+def test_final_cut_control_rejects_filesystem_root_session():
+    with pytest.raises(FinalCutControlError, match="session root"):
+        FinalCutControl(FakeNative(), FakeFCPXML(), session_root=Path("/"))
 
 
 @pytest.mark.anyio
@@ -217,6 +225,42 @@ async def test_render_preview_never_falls_back_to_diagnostic_proxy(tmp_path):
 
     assert fcpxml.calls == []
     assert not destination.exists()
+
+
+@pytest.mark.anyio
+async def test_render_preview_translates_nul_receipt_path_error(tmp_path):
+    root = tmp_path / "session"
+    root.mkdir()
+    bridge = tmp_path / "bridge"
+    bridge.write_bytes(b"native helper")
+    response = {
+        "ok": True,
+        "result": {
+            "protocolVersion": 1,
+            "kind": "final_cut_share",
+            "project": {
+                "library": "Canary Library",
+                "event": "Canary Event",
+                "project": "Demo",
+                "duration_seconds": 12.0,
+            },
+            "output": str(root / "bad\x00.mov"),
+        },
+    }
+
+    def runner(*args, **kwargs):
+        return subprocess.CompletedProcess(
+            args=args[0],
+            returncode=0,
+            stdout=json.dumps(response) + "\n",
+            stderr="",
+        )
+
+    native = NativeFinalCutClient(bridge, runner=runner)
+    adapter = FinalCutControl(native, FakeFCPXML(), session_root=root)
+
+    with pytest.raises(FinalCutControlError, match="output"):
+        await adapter.render_preview(project(), root / "pass.mov")
 
 
 @pytest.mark.anyio

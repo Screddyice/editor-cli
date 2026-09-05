@@ -1,12 +1,15 @@
 import json
 import subprocess
 from pathlib import Path
+from typing import Literal, get_type_hints
 
 import pytest
 
 from editor_cli.adapters.native_final_cut import (
+    ExportReceipt,
     NativeFinalCutClient,
     NativeFinalCutError,
+    ShareReceipt,
 )
 from editor_cli.session.models import ProjectIdentity
 
@@ -216,6 +219,38 @@ def test_native_client_rejects_unbound_share_result(tmp_path):
         native.share_preview(identity(), destination, root)
 
 
+def test_native_client_rejects_huge_integer_identity_duration(tmp_path):
+    huge_identity = identity_json()
+    huge_identity["duration_seconds"] = 10**400
+    native = client(
+        tmp_path,
+        FakeRunner(response({"project": huge_identity})),
+    )
+
+    with pytest.raises(NativeFinalCutError, match="duration"):
+        native.open_project(identity(), tmp_path / "session")
+
+
+def test_native_client_rejects_nul_in_receipt_path(tmp_path):
+    root = tmp_path / "session"
+    destination = root / "pass.mov"
+    native = client(
+        tmp_path,
+        FakeRunner(
+            response(
+                {
+                    "kind": "final_cut_share",
+                    "project": identity_json(),
+                    "output": str(root / "bad\x00.mov"),
+                }
+            )
+        ),
+    )
+
+    with pytest.raises(NativeFinalCutError, match="output"):
+        native.share_preview(identity(), destination, root)
+
+
 def test_native_client_rejects_relative_receipt_output(tmp_path, monkeypatch):
     root = tmp_path / "session"
     root.mkdir()
@@ -351,3 +386,19 @@ def test_native_client_decodes_sanitized_dialogs(tmp_path):
         ("AXSheet", "Missing Media"),
         ("AXDialog", "Relink Files"),
     ]
+
+
+def test_native_client_accepts_empty_dialog_title(tmp_path):
+    native = client(
+        tmp_path,
+        FakeRunner(response({"dialogs": [{"role": "AXSheet", "title": ""}]})),
+    )
+
+    dialogs = native.inspect_dialogs(tmp_path / "session")
+
+    assert [(item.role, item.title) for item in dialogs] == [("AXSheet", "")]
+
+
+def test_receipt_kind_annotations_match_runtime_contract():
+    assert get_type_hints(ExportReceipt)["kind"] == Literal["fcpxml_export"]
+    assert get_type_hints(ShareReceipt)["kind"] == Literal["final_cut_share"]

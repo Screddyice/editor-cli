@@ -45,7 +45,13 @@ class FinalCutControl:
     ):
         self.native = native
         self.fcpxml = fcpxml
-        self.session_root = session_root.expanduser().resolve()
+        try:
+            root = session_root.expanduser().resolve()
+        except (OSError, RuntimeError, ValueError) as exc:
+            raise FinalCutControlError("Final Cut session root is invalid") from exc
+        if not root.is_absolute() or root == Path(root.anchor):
+            raise FinalCutControlError("Final Cut session root is invalid")
+        self.session_root = root
 
     async def active_projects(self) -> tuple[ProjectIdentity, ...]:
         probe = await self._call_native(self.native.probe, self.session_root)

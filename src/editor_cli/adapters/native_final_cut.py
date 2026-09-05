@@ -9,7 +9,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from editor_cli.session.models import ProjectIdentity
 
@@ -43,14 +43,14 @@ class NativeProbe:
 
 @dataclass(frozen=True)
 class ExportReceipt:
-    kind: str
+    kind: Literal["fcpxml_export"]
     project: ProjectIdentity
     output: Path
 
 
 @dataclass(frozen=True)
 class ShareReceipt:
-    kind: str
+    kind: Literal["final_cut_share"]
     project: ProjectIdentity
     output: Path
 
@@ -368,14 +368,20 @@ def _reject_non_json_number(value: str) -> None:
 
 
 def _session_root(path: Path) -> Path:
-    root = path.expanduser().resolve()
+    try:
+        root = path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise NativeFinalCutError("Native Final Cut session root is invalid") from exc
     if not root.is_absolute() or root == Path(root.anchor):
         raise NativeFinalCutError("Native Final Cut session root is invalid")
     return root
 
 
 def _contained_path(path: Path, root: Path) -> Path:
-    resolved = path.expanduser().resolve()
+    try:
+        resolved = path.expanduser().resolve()
+    except (OSError, RuntimeError, ValueError) as exc:
+        raise NativeFinalCutError("Native Final Cut path is invalid") from exc
     if resolved == root or not resolved.is_relative_to(root):
         raise NativeFinalCutError("Native Final Cut path is outside the session root")
     return resolved
@@ -384,10 +390,15 @@ def _contained_path(path: Path, root: Path) -> Path:
 def _receipt_path(value: Any, root: Path, expected: Path) -> Path:
     if not isinstance(value, str) or not value:
         raise NativeFinalCutError("Native Final Cut receipt output is invalid")
-    candidate = Path(value).expanduser()
-    if not candidate.is_absolute():
-        raise NativeFinalCutError("Native Final Cut receipt output must be absolute")
-    output = _contained_path(candidate, root)
+    try:
+        candidate = Path(value).expanduser()
+        if not candidate.is_absolute():
+            raise NativeFinalCutError(
+                "Native Final Cut receipt output must be absolute"
+            )
+        output = _contained_path(candidate, root)
+    except (NativeFinalCutError, OSError, RuntimeError, ValueError) as exc:
+        raise NativeFinalCutError("Native Final Cut receipt output is invalid") from exc
     if output != expected:
         raise NativeFinalCutError("Native Final Cut receipt output changed")
     return output
@@ -411,18 +422,12 @@ def _decode_identity(value: Any) -> ProjectIdentity:
         {"library", "event", "project", "duration_seconds"},
         "identity",
     )
-    duration = value["duration_seconds"]
-    if (
-        isinstance(duration, bool)
-        or not isinstance(duration, (int, float))
-        or not math.isfinite(duration)
-    ):
-        raise NativeFinalCutError("Native Final Cut identity duration is invalid")
+    duration = _finite_duration(value["duration_seconds"])
     identity = ProjectIdentity(
         library=_string(value["library"], "identity library"),
         event=_string(value["event"], "identity event"),
         project=_string(value["project"], "identity project"),
-        duration_seconds=float(duration),
+        duration_seconds=duration,
     )
     _validate_identity(identity)
     return identity
@@ -436,11 +441,23 @@ def _validate_identity(identity: ProjectIdentity) -> None:
         or not identity.event
         or not isinstance(identity.project, str)
         or not identity.project
-        or isinstance(identity.duration_seconds, bool)
-        or not isinstance(identity.duration_seconds, (int, float))
-        or not math.isfinite(identity.duration_seconds)
     ):
         raise NativeFinalCutError("Native Final Cut identity is invalid")
+    _finite_duration(identity.duration_seconds)
+
+
+def _finite_duration(value: Any) -> float:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        raise NativeFinalCutError("Native Final Cut identity duration is invalid")
+    try:
+        duration = float(value)
+    except (OverflowError, TypeError, ValueError) as exc:
+        raise NativeFinalCutError(
+            "Native Final Cut identity duration is invalid"
+        ) from exc
+    if not math.isfinite(duration):
+        raise NativeFinalCutError("Native Final Cut identity duration is invalid")
+    return duration
 
 
 def _require_identity(value: Any, expected: ProjectIdentity) -> ProjectIdentity:
@@ -463,7 +480,7 @@ def _decode_dialogs(value: Any) -> tuple[BlockingDialog, ...]:
         dialogs.append(
             BlockingDialog(
                 role=_string(item["role"], "dialog role"),
-                title=_string(item["title"], "dialog title"),
+                title=_string(item["title"], "dialog title", allow_empty=True),
             )
         )
     return tuple(dialogs)
@@ -474,8 +491,8 @@ def _require_keys(value: dict[str, Any], expected: set[str], label: str) -> None
         raise NativeFinalCutError(f"Native Final Cut {label} has invalid keys")
 
 
-def _string(value: Any, label: str) -> str:
-    if not isinstance(value, str) or not value:
+def _string(value: Any, label: str, *, allow_empty: bool = False) -> str:
+    if not isinstance(value, str) or (not allow_empty and not value):
         raise NativeFinalCutError(f"Native Final Cut {label} is invalid")
     return value
 
