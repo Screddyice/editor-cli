@@ -1,4 +1,6 @@
 import json
+import os
+import stat
 from pathlib import Path
 
 import pytest
@@ -478,6 +480,81 @@ def test_atomic_update_exchanges_back_competitor_swapped_during_absent_recovery(
     assert config.read_bytes() == competitor
 
 
+def test_atomic_update_exchanges_back_symlink_swapped_during_absent_recovery(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    target = tmp_path / "competitor.toml"
+    desired = b"[installed]\nvalue = 3\n"
+    target.write_bytes(b"[competitor]\nvalue = 4\n")
+    real_exchange = setup_lib._atomic_exchange
+    injected = False
+
+    def fail_installed_config(path):
+        if Path(path) == config:
+            raise SetupError("post-write validation failed")
+
+    def exchange_after_swap(source, destination):
+        nonlocal injected
+        if Path(destination) == config and not injected:
+            injected = True
+            config.unlink()
+            config.symlink_to(target)
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", exchange_after_swap)
+
+    with pytest.raises(SetupError, match="competitor"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=fail_installed_config,
+            expected=None,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert config.is_symlink()
+    assert config.resolve() == target.resolve()
+
+
+def test_atomic_update_exchanges_back_fifo_swapped_during_absent_recovery(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    desired = b"[installed]\nvalue = 3\n"
+    real_exchange = setup_lib._atomic_exchange
+    injected = False
+
+    def fail_installed_config(path):
+        if Path(path) == config:
+            raise SetupError("post-write validation failed")
+
+    def exchange_after_swap(source, destination):
+        nonlocal injected
+        if Path(destination) == config and not injected:
+            injected = True
+            config.unlink()
+            os.mkfifo(config)
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", exchange_after_swap)
+
+    with pytest.raises(SetupError, match="competitor"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=fail_installed_config,
+            expected=None,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert stat.S_ISFIFO(config.lstat().st_mode)
+
+
 def test_atomic_update_recovers_existing_config_after_install_fsync_failure(
     tmp_path, monkeypatch
 ):
@@ -626,6 +703,38 @@ def test_atomic_update_revalidates_backup_after_config_verification(
 
     assert config.read_bytes() == original
     assert backup.read_bytes() == competitor
+
+
+def test_atomic_update_revalidates_preexisting_backup_for_absent_config(tmp_path):
+    config = tmp_path / "config.toml"
+    backup = config.with_suffix(".toml.editor-cli.bak")
+    saved = b"[saved]\nvalue = 1\n"
+    competitor = b"[competitor]\nvalue = 2\n"
+    desired = b"[installed]\nvalue = 3\n"
+    backup.write_bytes(saved)
+
+    def replace_backup_after_install(path):
+        if Path(path) == config:
+            backup.write_bytes(competitor)
+
+    with pytest.raises(SetupError, match="backup changed"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=replace_backup_after_install,
+            expected=None,
+            expected_backup=saved,
+        )
+
+    recoveries = [
+        path
+        for path in tmp_path.glob(f".{config.name}.*")
+        if path.is_file() and not path.is_symlink() and path.read_bytes() == desired
+    ]
+    assert not config.exists()
+    assert backup.read_bytes() == competitor
+    assert recoveries
 
 
 def test_snapshot_regular_file_rejects_symlink_swapped_before_open(

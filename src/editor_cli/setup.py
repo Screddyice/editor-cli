@@ -643,7 +643,20 @@ def _recover_absent_config(path: Path, installed_content: bytes) -> Path:
         except OSError:
             pass
 
-        current_displaced = _snapshot_regular_file(displaced, label="Displaced config")
+        try:
+            current_displaced = _snapshot_regular_file(
+                displaced, label="Displaced config"
+            )
+        except (OSError, SetupError) as exc:
+            if _exchange_back_if_owned(path, displaced, sentinel_content):
+                preserve_displaced = False
+                raise SetupError(
+                    f"Config competitor changed during recovery: {path}"
+                ) from exc
+            raise SetupError(
+                "Config competitor changed during recovery; displaced material "
+                f"preserved at {displaced}"
+            ) from exc
         if current_displaced != installed_content:
             if _exchange_back_if_owned(path, displaced, sentinel_content):
                 preserve_displaced = False
@@ -899,21 +912,34 @@ def atomic_config_update(
                     ) from exc
             raise
 
-        if backup is not None:
+        backup_to_verify = backup
+        if backup_to_verify is None and expected_backup_content is not None:
+            backup_to_verify = backup_path
+        if backup_to_verify is not None:
             fixed_backup_content = (
                 expected_backup_content
                 if expected_backup_content is not None
                 else expected_content
             )
             if fixed_backup_content is None:
-                raise SetupError(f"Config backup state is unavailable: {backup}")
+                raise SetupError(
+                    f"Config backup state is unavailable: {backup_to_verify}"
+                )
             try:
                 _verify_fixed_backup(
-                    backup,
+                    backup_to_verify,
                     fixed_backup_content,
                     parse=parse,
                 )
             except SetupError as exc:
+                if expected_content is None:
+                    try:
+                        recovery = _recover_absent_config(path, content)
+                    except SetupError as recovery_error:
+                        raise SetupError(f"{exc}; {recovery_error}") from recovery_error
+                    raise SetupError(
+                        f"{exc}; failed config preserved at {recovery}"
+                    ) from exc
                 preserve_temp = displaced
                 if displaced and _exchange_back_if_owned(path, temp, content):
                     displaced = False
