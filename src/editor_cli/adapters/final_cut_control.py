@@ -1,99 +1,61 @@
-"""Concrete Final Cut control built from CommandPost and the FCPXML MCP."""
+"""Final Cut control backed by the fixed native helper protocol."""
 
 from __future__ import annotations
 
-from collections.abc import Callable, Sequence
+import asyncio
+from collections.abc import Callable
+from dataclasses import dataclass
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal, TypeVar
 
-from fcpxml.live import list_fcp_libraries
 from fcpxml.parser import FCPXMLParser
-from fcpxml.safe_xml import safe_parse
-from fcpxml.writer import write_fcpxml
 
-from editor_cli.adapters.commandpost import CommandPostClient, CommandPostError
 from editor_cli.adapters.fcpxml_mcp import FCPXMLMCPClient
+from editor_cli.adapters.native_final_cut import (
+    NativeFinalCutClient,
+    NativeFinalCutError,
+    ShareReceipt,
+)
 from editor_cli.session.models import ProjectIdentity
+
+T = TypeVar("T")
 
 
 class FinalCutControlError(RuntimeError):
-    """Raised when Final Cut state cannot be mapped to one safe project."""
+    """Raised when native Final Cut control cannot prove its postcondition."""
 
 
-class CommandPostFinalCutControl:
+@dataclass(frozen=True)
+class DiagnosticProxyReceipt:
+    """A proxy render that cannot serve as review evidence."""
+
+    kind: Literal["diagnostic_proxy"]
+    output: Path
+    review_eligible: Literal[False] = False
+
+
+class FinalCutControl:
     def __init__(
         self,
-        commandpost: CommandPostClient,
+        native: NativeFinalCutClient,
         fcpxml: FCPXMLMCPClient,
         *,
-        library_reader: Callable[[], list[dict[str, Any]]] = list_fcp_libraries,
+        session_root: Path,
     ):
-        self.commandpost = commandpost
+        self.native = native
         self.fcpxml = fcpxml
-        self.library_reader = library_reader
-        self._active_library_path: Path | None = None
+        self.session_root = session_root.expanduser().resolve()
 
-    async def active_projects(self) -> Sequence[ProjectIdentity]:
-        response = await self.commandpost.request(
-            self.commandpost.controller_message("active_project")
+    async def active_projects(self) -> tuple[ProjectIdentity, ...]:
+        probe = await self._call_native(self.native.probe, self.session_root)
+        return (probe.active_project,) if probe.active_project is not None else ()
+
+    async def export_xml(self, identity: ProjectIdentity, destination: Path) -> None:
+        output = destination.expanduser().resolve()
+        await self._call_native(
+            self.native.export_xml, identity, output, self.session_root
         )
-        result = response.get("result")
-        if not isinstance(result, dict):
-            raise FinalCutControlError("CommandPost returned no active-project state")
-        project = result.get("project")
-        duration = result.get("durationSeconds")
-        if (
-            not isinstance(project, str)
-            or not project
-            or not isinstance(duration, (int, float))
-        ):
-            raise FinalCutControlError(
-                "CommandPost returned incomplete project identity"
-            )
-
-        matches: list[tuple[str, str]] = []
-        for library in self.library_reader():
-            for event in library.get("events", []):
-                if project in event.get("projects", []):
-                    matches.append((library["name"], event["name"]))
-        if len(matches) != 1:
-            raise FinalCutControlError(
-                "The active project name must identify one open Final Cut event"
-            )
-
-        paths = [
-            Path(value).expanduser().resolve()
-            for value in result.get("libraryPaths", [])
-            if isinstance(value, str)
-        ]
-        library_name, event_name = matches[0]
-        matching_paths = [path for path in paths if path.stem == library_name]
-        if len(matching_paths) != 1:
-            raise FinalCutControlError(
-                "CommandPost did not identify one path for the active Final Cut library"
-            )
-        self._active_library_path = matching_paths[0]
-        return (
-            ProjectIdentity(
-                library=library_name,
-                event=event_name,
-                project=project,
-                duration_seconds=float(duration),
-            ),
-        )
-
-    async def export_xml(self, _identity: ProjectIdentity, destination: Path) -> None:
-        destination = destination.expanduser().resolve()
-        if destination.exists():
-            raise FinalCutControlError("Refusing to replace an existing FCPXML export")
-        await self.commandpost.request(
-            self.commandpost.controller_message(
-                "export_xml", destination=str(destination)
-            )
-        )
-        if not destination.is_file():
-            raise FinalCutControlError("Final Cut did not create the requested FCPXML")
 
     async def inspect_xml(self, path: Path):
         parsed = FCPXMLParser().parse_file(str(path))
@@ -106,68 +68,81 @@ class CommandPostFinalCutControl:
             frame_seconds=1 / timeline.frame_rate,
         )
 
-    async def duplicate_project(self, _identity: ProjectIdentity, name: str) -> None:
-        await self.commandpost.request(
-            self.commandpost.controller_message("duplicate_project", name=name)
+    async def duplicate_project(
+        self, identity: ProjectIdentity, name: str
+    ) -> ProjectIdentity:
+        return await self._call_native(
+            self.native.duplicate_project,
+            identity,
+            name,
+            self.session_root,
         )
 
-    async def import_project(self, path: Path, project_name: str) -> None:
-        if self._active_library_path is None:
-            await self.active_projects()
-        assert self._active_library_path is not None
-        imported = path.with_name(f"{path.stem}.import.fcpxml")
-        if imported.exists():
-            raise FinalCutControlError(
-                "Refusing to replace an existing import candidate"
-            )
-        tree = safe_parse(str(path))
-        projects = tree.getroot().findall(".//project")
-        if len(projects) != 1:
-            raise FinalCutControlError("The candidate FCPXML must contain one project")
-        projects[0].set("name", project_name)
-        write_fcpxml(tree.getroot(), str(imported))
-        await self.fcpxml.call(
-            "deliver",
-            {
-                "action": "push_to_fcp",
-                "args": {
-                    "filepath": str(imported),
-                    "library_location": str(self._active_library_path),
-                    "suppress_warnings": True,
-                    "copy_assets": False,
-                    "confirm_unreviewed": True,
-                },
-            },
+    async def import_project(
+        self, path: Path, expected_identity: ProjectIdentity
+    ) -> ProjectIdentity:
+        source = path.expanduser().resolve()
+        return await self._call_native(
+            self.native.import_xml,
+            expected_identity,
+            source,
+            self.session_root,
         )
 
-    async def render_preview(self, project_name: str, destination: Path) -> None:
-        candidate = (
-            destination.parent.parent
-            / "candidates"
-            / destination.with_suffix(".fcpxml").name
+    async def render_preview(
+        self, identity: ProjectIdentity, destination: Path
+    ) -> ShareReceipt:
+        output = destination.expanduser().resolve()
+        return await self._call_native(
+            self.native.share_preview,
+            identity,
+            output,
+            self.session_root,
         )
-        if not candidate.is_file():
+
+    async def render_diagnostic_proxy(
+        self, candidate: Path, destination: Path
+    ) -> DiagnosticProxyReceipt:
+        """Render a debugging proxy that the review path cannot accept."""
+        source = self._session_path(candidate)
+        output = self._session_path(destination)
+        if not source.is_file():
             raise FinalCutControlError(
-                f"Candidate XML for {project_name!r} is unavailable"
+                "Candidate XML for diagnostic proxy is unavailable"
             )
         await self.fcpxml.call(
             "preview",
             {
                 "action": "preview_render",
                 "args": {
-                    "filepath": str(candidate),
-                    "output_path": str(destination),
+                    "filepath": str(source),
+                    "output_path": str(output),
                     "height": 720,
                 },
             },
         )
-        if not destination.is_file():
-            raise FinalCutControlError("FCPXML preview renderer did not create a video")
-
-    async def open_project(self, project_name: str) -> None:
-        try:
-            await self.commandpost.request(
-                self.commandpost.controller_message("open_project", name=project_name)
+        if not output.is_file():
+            raise FinalCutControlError(
+                "FCPXML diagnostic proxy renderer did not create a video"
             )
-        except CommandPostError as exc:
+        return DiagnosticProxyReceipt("diagnostic_proxy", output)
+
+    async def open_project(self, identity: ProjectIdentity) -> ProjectIdentity:
+        return await self._call_native(
+            self.native.open_project, identity, self.session_root
+        )
+
+    def _session_path(self, path: Path) -> Path:
+        resolved = path.expanduser().resolve()
+        if resolved == self.session_root or not resolved.is_relative_to(
+            self.session_root
+        ):
+            raise FinalCutControlError("Diagnostic proxy path is outside the session")
+        return resolved
+
+    @staticmethod
+    async def _call_native(operation: Callable[..., T], *args: Any) -> T:
+        try:
+            return await asyncio.to_thread(operation, *args)
+        except NativeFinalCutError as exc:
             raise FinalCutControlError(str(exc)) from exc
