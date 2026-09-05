@@ -10,7 +10,6 @@ from __future__ import annotations
 import os
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Optional
 
 
 class ConfigError(RuntimeError):
@@ -24,7 +23,24 @@ class Config:
     gemini_model: str = "gemini-2.5-pro"
 
 
-def _parse_dotenv(start: Optional[Path] = None) -> dict[str, str]:
+@dataclass(frozen=True)
+class ControllerConfig:
+    session_root: Path
+    native_helper: Path = Path(
+        "~/Library/Application Support/Editor CLI/bin/editor-fcp-bridge"
+    )
+    native_protocol_version: int = 1
+    native_action_timeout_seconds: int = 120
+    fcpxml_command: tuple[str, ...] = ("uvx", "fcp-mcp-server==0.22.1")
+    max_passes: int = 3
+
+
+def _lexical_absolute(path: Path) -> Path:
+    """Make a path absolute without following its final or parent symlinks."""
+    return Path(os.path.abspath(path.expanduser()))
+
+
+def _parse_dotenv(start: Path | None = None) -> dict[str, str]:
     """Walk up from ``start`` (or cwd) looking for a .env; parse KEY=VALUE lines."""
     here = (start or Path.cwd()).resolve()
     for d in [here, *here.parents]:
@@ -42,8 +58,8 @@ def _parse_dotenv(start: Optional[Path] = None) -> dict[str, str]:
 
 
 def load_config(
-    env: Optional[dict[str, str]] = None,
-    dotenv_start: Optional[Path] = None,
+    env: dict[str, str] | None = None,
+    dotenv_start: Path | None = None,
     require_elevenlabs: bool = True,
 ) -> Config:
     if env is None:
@@ -66,4 +82,39 @@ def load_config(
     model = src.get("EDITOR1_GEMINI_MODEL", "gemini-2.5-pro")
     return Config(
         gemini_api_key=gemini, elevenlabs_api_key=elevenlabs or "", gemini_model=model
+    )
+
+
+def load_controller_config(
+    env: dict[str, str] | None = None,
+) -> ControllerConfig:
+    """Load local Final Cut controller settings without requiring cloud keys."""
+    src = dict(os.environ if env is None else env)
+    root = Path(src.get("EDITOR_CLI_SESSION_ROOT", "~/Movies/Editor CLI Sessions"))
+    helper = Path(
+        src.get(
+            "EDITOR_CLI_NATIVE_HELPER",
+            "~/Library/Application Support/Editor CLI/bin/editor-fcp-bridge",
+        )
+    )
+    try:
+        native_timeout = int(src.get("EDITOR_CLI_NATIVE_ACTION_TIMEOUT_SECONDS", "120"))
+    except ValueError as exc:
+        raise ConfigError(
+            "EDITOR_CLI_NATIVE_ACTION_TIMEOUT_SECONDS must be an integer"
+        ) from exc
+    if native_timeout <= 0 or native_timeout > 3_600:
+        raise ConfigError(
+            "EDITOR_CLI_NATIVE_ACTION_TIMEOUT_SECONDS must be between 1 and 3,600"
+        )
+    max_passes = int(src.get("EDITOR_CLI_MAX_PASSES", "3"))
+    if max_passes != 3:
+        raise ConfigError("EDITOR_CLI_MAX_PASSES must be 3 for the initial release")
+
+    return ControllerConfig(
+        session_root=root.expanduser().resolve(),
+        native_helper=_lexical_absolute(helper),
+        native_protocol_version=1,
+        native_action_timeout_seconds=native_timeout,
+        max_passes=max_passes,
     )
