@@ -4,27 +4,29 @@ from __future__ import annotations
 
 import hashlib
 import json
-import plistlib
+import os
 import shutil
 import subprocess
 import sys
 import tempfile
-import tomllib
-import urllib.request
 from dataclasses import dataclass, field
+from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Protocol
 
+from editor_cli.resources import final_cut_skill, native_source
 
-COMMANDPOST_VERSION = "2.1.0"
-COMMANDPOST_DMG_URL = (
-    "https://github.com/CommandPost/CommandPost/releases/download/2.1.0/"
-    "CommandPost_2.1.0.dmg"
-)
-COMMANDPOST_DMG_SHA256 = (
-    "b1a3ca256053a083b59dd1d1db59b68d9b2ea8b83dc2e5214d0eba921eba5e64"
-)
+if sys.version_info >= (3, 11):
+    import tomllib
+else:
+    import tomli as tomllib
+
+
 WATCH_RELEASE = "v0.2.0"
+NATIVE_PROTOCOL_VERSION = 1
+NATIVE_HELPER_NAME = "editor-fcp-bridge"
+NATIVE_BUILD_PRODUCT = "FinalCutBridge"
+NATIVE_SIGNING_IDENTIFIER = "com.screddy.editorcli.finalcutbridge"
 CODEX_BLOCK_START = "# BEGIN editor-cli managed MCP"
 CODEX_BLOCK_END = "# END editor-cli managed MCP"
 
@@ -40,11 +42,14 @@ class SetupPaths:
     claude_config: Path
     codex_skills: Path
     claude_skills: Path
-    commandpost_plugins: Path
-    applications: Path = Path("/Applications")
+    application_support: Path = field(
+        default_factory=lambda: Path(
+            "~/Library/Application Support/Editor CLI"
+        ).expanduser()
+    )
 
     @classmethod
-    def defaults(cls, repo_root: Path | None = None) -> "SetupPaths":
+    def defaults(cls, repo_root: Path | None = None) -> SetupPaths:
         root = (repo_root or Path(__file__).resolve().parents[2]).resolve()
         return cls(
             repo_root=root,
@@ -52,25 +57,19 @@ class SetupPaths:
             claude_config=Path("~/.claude.json").expanduser(),
             codex_skills=Path("~/.codex/skills").expanduser(),
             claude_skills=Path("~/.claude/skills").expanduser(),
-            commandpost_plugins=Path(
-                "~/Library/Application Support/CommandPost/Plugins"
-            ).expanduser(),
-            applications=Path("/Applications"),
         )
 
 
 @dataclass
 class SetupResult:
-    changed: list[str] = field(default_factory=list)
+    changed: list[str | Path] = field(default_factory=list)
     planned: list[str] = field(default_factory=list)
     backups: list[Path] = field(default_factory=list)
     checks: dict[str, bool] = field(default_factory=dict)
 
 
 class SetupPlatform(Protocol):
-    def commandpost_version(self, applications: Path) -> str | None: ...
-
-    def install_commandpost(self, applications: Path) -> None: ...
+    def run(self, command: tuple[str, ...], *, cwd: Path | None = None) -> None: ...
 
     def install_watch(self, paths: SetupPaths) -> None: ...
 
@@ -109,11 +108,20 @@ def _watch_version(path: Path) -> str | None:
         return None
     for line in skill.read_text(encoding="utf-8").splitlines():
         if line.startswith("version:"):
-            return line.partition(":")[2].strip().strip('"\'')
+            return line.partition(":")[2].strip().strip("\"'")
     return None
 
 
-def _ensure_symlink(link: Path, target: Path, result: SetupResult, dry_run: bool) -> None:
+def _resource_path(resource: Traversable) -> Path:
+    path = Path(str(resource))
+    if not path.exists():
+        raise SetupError(f"Packaged resource is unavailable: {resource}")
+    return path.resolve()
+
+
+def _ensure_symlink(
+    link: Path, target: Path, result: SetupResult, dry_run: bool
+) -> None:
     target = target.resolve()
     if link.is_symlink() and link.resolve() == target:
         return
@@ -160,7 +168,9 @@ def _merge_codex_config(path: Path, python: Path, repo_root: Path) -> str | None
             raise SetupError(
                 "Codex already has an unmanaged editor-cli MCP entry; remove or rename it"
             )
-        updated = existing.rstrip() + ("\n\n" if existing.strip() else "") + block + "\n"
+        updated = (
+            existing.rstrip() + ("\n\n" if existing.strip() else "") + block + "\n"
+        )
     tomllib.loads(updated)
     return None if updated == existing else updated
 
@@ -176,16 +186,55 @@ def _merge_claude_config(path: Path, python: Path, repo_root: Path) -> str | Non
     if not isinstance(value, dict):
         raise SetupError("Claude config must contain a JSON object")
     servers = value.setdefault("mcpServers", {})
+    if not isinstance(servers, dict):
+        raise SetupError("Claude mcpServers must contain a JSON object")
     desired = {
         "type": "stdio",
         "command": str(python),
         "args": ["-m", "editor_cli.mcp_server"],
         "cwd": str(repo_root),
     }
-    if servers.get("editor-cli") == desired:
+    current = servers.get("editor-cli")
+    if current == desired:
         return None
+    if current is not None:
+        raise SetupError(
+            "Claude already has an unmanaged editor-cli entry; remove or rename it"
+        )
     servers["editor-cli"] = desired
     return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+
+
+def _fsync_directory(path: Path) -> None:
+    descriptor = os.open(path, os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_write_bytes(path: Path, content: bytes, *, mode: int = 0o600) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_temp = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
+    temp = Path(raw_temp)
+    try:
+        with os.fdopen(descriptor, "wb") as handle:
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        temp.chmod(mode)
+        os.replace(temp, path)
+        _fsync_directory(path.parent)
+    finally:
+        temp.unlink(missing_ok=True)
+
+
+def _validate_config_file(path: Path) -> None:
+    content = path.read_text(encoding="utf-8")
+    if path.suffix == ".toml":
+        tomllib.loads(content)
+    else:
+        json.loads(content)
 
 
 def _write_config(
@@ -199,69 +248,183 @@ def _write_config(
     backup = backup_before_write(path)
     if backup is not None:
         result.backups.append(backup)
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(content, encoding="utf-8")
+    existed = path.exists()
+    try:
+        _atomic_write_bytes(path, content.encode("utf-8"))
+        _validate_config_file(path)
+    except Exception:
+        if backup is not None:
+            _atomic_write_bytes(path, backup.read_bytes())
+        elif not existed:
+            path.unlink(missing_ok=True)
+        raise
     result.changed.append(f"configure {path}")
 
 
-class LocalPlatform:
-    def commandpost_version(self, applications: Path) -> str | None:
-        info = applications / "CommandPost.app" / "Contents" / "Info.plist"
-        if not info.is_file():
-            return None
-        with info.open("rb") as handle:
-            return plistlib.load(handle).get("CFBundleShortVersionString")
+def _copy_resource_tree(source: Traversable, destination: Path) -> None:
+    destination.mkdir(mode=0o700)
+    destination.chmod(0o700)
+    for child in source.iterdir():
+        target = destination / child.name
+        if child.is_dir():
+            _copy_resource_tree(child, target)
+        elif child.is_file():
+            with child.open("rb") as source_file, target.open("wb") as target_file:
+                shutil.copyfileobj(source_file, target_file)
 
-    def install_commandpost(self, applications: Path) -> None:
-        applications.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix="editor-cli-commandpost-") as raw:
-            temp = Path(raw)
-            dmg = temp / "CommandPost_2.1.0.dmg"
-            with urllib.request.urlopen(COMMANDPOST_DMG_URL, timeout=120) as response:
-                with dmg.open("wb") as handle:
-                    shutil.copyfileobj(response, handle)
-            digest = hashlib.sha256(dmg.read_bytes()).hexdigest()
-            if digest != COMMANDPOST_DMG_SHA256:
-                raise SetupError("CommandPost DMG checksum mismatch")
-            mount = temp / "mount"
-            mount.mkdir()
-            attached = False
-            try:
-                subprocess.run(
-                    [
-                        "hdiutil",
-                        "attach",
-                        str(dmg),
-                        "-nobrowse",
-                        "-readonly",
-                        "-mountpoint",
-                        str(mount),
-                    ],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-                attached = True
-                apps = list(mount.glob("CommandPost*.app"))
-                if len(apps) != 1:
-                    raise SetupError("CommandPost DMG did not contain one application")
-                subprocess.run(
-                    ["ditto", str(apps[0]), str(applications / "CommandPost.app")],
-                    check=True,
-                    capture_output=True,
-                    text=True,
-                )
-            finally:
-                if attached:
-                    subprocess.run(
-                        ["hdiutil", "detach", str(mount)],
-                        check=False,
-                        capture_output=True,
-                        text=True,
-                    )
-        app = applications / "CommandPost.app"
+
+def _resource_tree_sha256(source: Traversable) -> str:
+    digest = hashlib.sha256()
+
+    def add_tree(node: Traversable, prefix: str) -> None:
+        for child in sorted(node.iterdir(), key=lambda item: item.name):
+            relative = f"{prefix}/{child.name}" if prefix else child.name
+            if child.is_dir():
+                add_tree(child, relative)
+            elif child.is_file():
+                digest.update(relative.encode("utf-8"))
+                digest.update(b"\0")
+                with child.open("rb") as handle:
+                    for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+                        digest.update(chunk)
+                digest.update(b"\0")
+
+    add_tree(source, "")
+    return digest.hexdigest()
+
+
+def _built_helper(source: Path) -> Path:
+    direct = source / ".build" / "release" / NATIVE_BUILD_PRODUCT
+    if direct.is_file():
+        return direct
+    matches = tuple(source.glob(f".build/*/release/{NATIVE_BUILD_PRODUCT}"))
+    if len(matches) != 1:
+        raise SetupError("Swift build did not produce one FinalCutBridge executable")
+    return matches[0]
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _install_native_helper(
+    source_binary: Path,
+    destination: Path,
+    platform: SetupPlatform,
+    result: SetupResult,
+    source_sha256: str,
+) -> None:
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    descriptor, raw_staged = tempfile.mkstemp(
+        prefix=f".{destination.name}.", dir=destination.parent
+    )
+    os.close(descriptor)
+    staged = Path(raw_staged)
+    try:
+        shutil.copyfile(source_binary, staged)
+        staged.chmod(0o700)
+        platform.run(
+            (
+                "codesign",
+                "--force",
+                "--sign",
+                "-",
+                "--identifier",
+                NATIVE_SIGNING_IDENTIFIER,
+                str(staged),
+            )
+        )
+        digest = _sha256(staged)
+        changed = not destination.is_file() or _sha256(destination) != digest
+        if changed:
+            os.replace(staged, destination)
+            destination.chmod(0o700)
+            _fsync_directory(destination.parent)
+            result.changed.append(destination)
+        metadata = destination.with_suffix(".json")
+        content = (
+            json.dumps(
+                {
+                    "protocol_version": NATIVE_PROTOCOL_VERSION,
+                    "sha256": digest,
+                    "source_sha256": source_sha256,
+                },
+                indent=2,
+                sort_keys=True,
+            )
+            + "\n"
+        ).encode("utf-8")
+        if not metadata.is_file() or metadata.read_bytes() != content:
+            _atomic_write_bytes(metadata, content)
+            result.changed.append(metadata)
+    finally:
+        staged.unlink(missing_ok=True)
+
+
+def _installed_helper_matches(destination: Path, source_sha256: str) -> bool:
+    metadata = destination.with_suffix(".json")
+    if not destination.is_file() or not metadata.is_file():
+        return False
+    try:
+        value = json.loads(metadata.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, OSError):
+        return False
+    return (
+        value.get("protocol_version") == NATIVE_PROTOCOL_VERSION
+        and value.get("source_sha256") == source_sha256
+        and value.get("sha256") == _sha256(destination)
+        and destination.stat().st_mode & 0o777 == 0o700
+    )
+
+
+def _build_and_install_native_helper(
+    paths: SetupPaths,
+    platform: SetupPlatform,
+    result: SetupResult,
+    dry_run: bool,
+) -> None:
+    destination = paths.application_support / "bin" / NATIVE_HELPER_NAME
+    result.planned.append(f"build and install {destination}")
+    if dry_run:
+        result.checks["native_helper"] = True
+        return
+    packaged_source = native_source()
+    source_sha256 = _resource_tree_sha256(packaged_source)
+    if _installed_helper_matches(destination, source_sha256):
+        result.checks["native_helper"] = True
+        return
+    with tempfile.TemporaryDirectory(prefix="editor-cli-native-") as raw_temp:
+        source = Path(raw_temp) / "source"
+        _copy_resource_tree(packaged_source, source)
+        platform.run(
+            (
+                "swift",
+                "build",
+                "--package-path",
+                str(source),
+                "-c",
+                "release",
+            )
+        )
+        _install_native_helper(
+            _built_helper(source),
+            destination,
+            platform,
+            result,
+            source_sha256,
+        )
+    result.checks["native_helper"] = destination.is_file()
+
+
+class LocalPlatform:
+    def run(self, command: tuple[str, ...], *, cwd: Path | None = None) -> None:
         subprocess.run(
-            ["codesign", "--verify", "--deep", "--strict", str(app)],
+            command,
+            cwd=cwd,
             check=True,
             capture_output=True,
             text=True,
@@ -293,6 +456,8 @@ def run_setup(
     dry_run: bool = False,
     upgrade_commandpost: bool = False,
 ) -> SetupResult:
+    """Build the native helper and configure both local agent hosts."""
+    del upgrade_commandpost  # Retained for CLI compatibility during the migration.
     paths = paths or SetupPaths.defaults()
     platform = platform or LocalPlatform()
     result = SetupResult()
@@ -300,20 +465,7 @@ def run_setup(
     if not python.is_file():
         python = Path(sys.executable)
 
-    version = platform.commandpost_version(paths.applications)
-    if version != COMMANDPOST_VERSION:
-        if version is not None and not upgrade_commandpost:
-            raise SetupError(
-                f"CommandPost {version} is installed; pass --upgrade-commandpost "
-                f"to install {COMMANDPOST_VERSION}"
-            )
-        result.planned.append(f"install CommandPost {COMMANDPOST_VERSION}")
-        if not dry_run:
-            platform.install_commandpost(paths.applications)
-            result.changed.append(f"install CommandPost {COMMANDPOST_VERSION}")
-    result.checks["commandpost"] = dry_run or (
-        platform.commandpost_version(paths.applications) == COMMANDPOST_VERSION
-    )
+    _build_and_install_native_helper(paths, platform, result, dry_run)
 
     watch_ready = all(
         _watch_version(root) == WATCH_RELEASE.removeprefix("v")
@@ -329,23 +481,12 @@ def run_setup(
         for root in (paths.codex_skills, paths.claude_skills)
     )
 
+    skill_source = _resource_path(final_cut_skill())
     _ensure_symlink(
-        paths.codex_skills / "final-cut-editor",
-        paths.repo_root / "skills/final-cut-editor",
-        result,
-        dry_run,
+        paths.codex_skills / "final-cut-editor", skill_source, result, dry_run
     )
     _ensure_symlink(
-        paths.claude_skills / "final-cut-editor",
-        paths.repo_root / "skills/final-cut-editor",
-        result,
-        dry_run,
-    )
-    _ensure_symlink(
-        paths.commandpost_plugins / "editor-cli-bridge",
-        paths.repo_root / "commandpost/editor-cli-bridge",
-        result,
-        dry_run,
+        paths.claude_skills / "final-cut-editor", skill_source, result, dry_run
     )
 
     _write_config(

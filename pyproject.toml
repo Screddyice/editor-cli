@@ -12,8 +12,8 @@ dependencies = [
     "google-genai>=2.8.0",
     "mcp>=1.3.0,<3",
     "pillow>=10",
+    "tomli>=2; python_version < '3.11'",
     "typer>=0.12",
-    "websockets>=16,<17",
     "yt-dlp>=2026.6.9",
 ]
 
@@ -37,6 +37,15 @@ package-dir = { "" = "src" }
 
 [tool.setuptools.packages.find]
 where = ["src"]
+
+[tool.setuptools.package-data]
+"editor_cli.resources" = [
+    "native/Package.swift",
+    "native/Sources/FinalCutBridge/*.swift",
+    "native/Tests/FinalCutBridgeTests/*.swift",
+    "skills/final-cut-editor/SKILL.md",
+    "canary/fcp_live_canary.py",
+]
 
 [tool.pytest.ini_options]
 # Only our own tests — never recurse into the vendored OpenMontage submodule,
