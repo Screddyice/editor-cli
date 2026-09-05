@@ -9,7 +9,7 @@ from enum import Enum
 from itertools import pairwise
 from math import isfinite
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, cast
 
 
 class FrozenDict(dict[str, Any]):
@@ -29,10 +29,10 @@ class FrozenDict(dict[str, Any]):
 
     __setitem__ = _immutable
     __delitem__ = _immutable
-    __ior__ = _immutable
+    __ior__ = _immutable  # type: ignore[assignment]
     clear = _immutable
     pop = _immutable
-    popitem = _immutable
+    popitem = _immutable  # type: ignore[assignment]
     setdefault = _immutable
     update = _immutable
 
@@ -61,8 +61,8 @@ class FrozenList(list[Any]):
 
     __setitem__ = _immutable
     __delitem__ = _immutable
-    __iadd__ = _immutable
-    __imul__ = _immutable
+    __iadd__ = _immutable  # type: ignore[assignment]
+    __imul__ = _immutable  # type: ignore[assignment]
     append = _immutable
     clear = _immutable
     extend = _immutable
@@ -138,6 +138,60 @@ class EditRequest:
                 "Each required verification check must be a lowercase identifier"
             )
         object.__setattr__(self, "required_operations", checks)
+
+
+BASE_REQUIRED_CHECKS = frozenset(
+    {
+        "source_unchanged",
+        "candidate_xml_valid",
+        "preview_rendered",
+        "preview_watched",
+    }
+)
+
+_OPERATION_REQUIRED_CHECKS = {
+    "gaps": "gap_removed",
+    "remove_gaps": "gap_removed",
+    "fill_gaps": "gap_removed",
+    "gap_removed": "gap_removed",
+    "add_title": "title_visible",
+    "title": "title_visible",
+    "title_visible": "title_visible",
+    "insert_reaction": "reaction_insert_visible",
+    "add_reaction": "reaction_insert_visible",
+    "reaction": "reaction_insert_visible",
+    "reaction_visible": "reaction_insert_visible",
+    "reaction_insert_visible": "reaction_insert_visible",
+    "meme_visible": "meme_visible",
+    "insert_clip": "clip_insert_visible",
+    "delete_clips": "requested_clips_removed",
+    "trim_clip": "clip_trimmed",
+    "split_clip": "clip_split",
+    "reorder_clips": "clip_order_correct",
+    "change_speed": "speed_change_visible",
+    "add_transition": "transition_visible",
+    "add_audio": "audio_insert_audible",
+    "add_connected_clip": "connected_clip_visible",
+    "assign_role": "role_assigned",
+    "fix_flash_frames": "flash_frames_fixed",
+    "remove_silence_candidates": "silence_removed",
+    "add_marker": "marker_visible",
+    "batch_add_markers": "markers_visible",
+    "apply_template": "template_visible",
+}
+
+
+def required_checks_for_operations(operations: tuple[str, ...]) -> tuple[str, ...]:
+    """Return the controller-owned acceptance keys for requested operations."""
+    checks = set(BASE_REQUIRED_CHECKS)
+    for operation in operations:
+        try:
+            checks.add(_OPERATION_REQUIRED_CHECKS[operation])
+        except KeyError:
+            raise ValueError(
+                f"Unsupported required edit operation: {operation}"
+            ) from None
+    return tuple(sorted(checks))
 
 
 ALLOWED_EDIT_ACTIONS = frozenset(
@@ -350,7 +404,7 @@ def _validated_arguments(
 ) -> dict[str, Any]:
     key = (operation.group, operation.action)
     fields = _ACTION_FIELDS[key]
-    arguments = operation.arguments.thaw()
+    arguments = cast(FrozenDict, operation.arguments).thaw()
     if not isinstance(arguments, dict):
         raise TypeError(f"Edit arguments for {operation.action} must be an object")
     unknown = set(arguments) - set(fields)
@@ -539,6 +593,46 @@ class EvidenceBinding:
                 "Evidence binding frame timestamps must be strictly ordered"
             )
         object.__setattr__(self, "frame_timestamps", timestamps)
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "session_id": self.session_id,
+            "pass_number": self.pass_number,
+            "state_version": self.state_version,
+            "project_name": self.project_name,
+            "candidate_sha256": self.candidate_sha256,
+            "preview_sha256": self.preview_sha256,
+            "manifest_sha256": self.manifest_sha256,
+            "frame_timestamps": list(self.frame_timestamps),
+        }
+
+    @classmethod
+    def from_dict(cls, value: Any) -> EvidenceBinding:
+        fields = {
+            "session_id",
+            "pass_number",
+            "state_version",
+            "project_name",
+            "candidate_sha256",
+            "preview_sha256",
+            "manifest_sha256",
+            "frame_timestamps",
+        }
+        if not isinstance(value, dict) or set(value) != fields:
+            raise ValueError("Evidence binding must contain the exact required fields")
+        timestamps = value["frame_timestamps"]
+        if not isinstance(timestamps, list):
+            raise TypeError("Evidence binding frame timestamps must be a list")
+        return cls(
+            session_id=value["session_id"],
+            pass_number=value["pass_number"],
+            state_version=value["state_version"],
+            project_name=value["project_name"],
+            candidate_sha256=value["candidate_sha256"],
+            preview_sha256=value["preview_sha256"],
+            manifest_sha256=value["manifest_sha256"],
+            frame_timestamps=tuple(timestamps),
+        )
 
 
 @dataclass(frozen=True)

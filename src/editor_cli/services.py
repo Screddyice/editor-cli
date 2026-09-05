@@ -8,9 +8,9 @@ from pathlib import Path
 from typing import Any
 
 from editor_cli.acquire.internet import InternetAcquirer
-from editor_cli.adapters.commandpost import CommandPostClient
 from editor_cli.adapters.fcpxml_mcp import FCPXMLMCPClient
-from editor_cli.adapters.final_cut_control import CommandPostFinalCutControl
+from editor_cli.adapters.final_cut_control import FinalCutControl
+from editor_cli.adapters.native_final_cut import NativeFinalCutClient
 from editor_cli.adapters.timeline_engine import FCPXMLTimelineEngine
 from editor_cli.adapters.watch import WatchAdapter
 from editor_cli.config import ControllerConfig, load_controller_config
@@ -18,6 +18,7 @@ from editor_cli.session.controller import (
     Candidate,
     ControllerDeps,
     EditSessionController,
+    SessionError,
     SessionHandle,
     SessionRepository,
     SessionResult,
@@ -26,13 +27,29 @@ from editor_cli.session.models import (
     EditOperation,
     EditProgram,
     EditRequest,
+    EvidenceBinding,
     SessionState,
 )
-from editor_cli.verification.review import (
-    combine_reports,
-    parse_creative_review,
+from editor_cli.verification.review import parse_creative_review
+from editor_cli.verification.technical import (
+    inspect_candidate_fcpxml,
+    inspect_preview,
 )
-from editor_cli.verification.technical import inspect_preview
+
+
+class ServiceError(ValueError):
+    """Raised when a service request violates a controller-owned contract."""
+
+
+class _LazyWatch:
+    def __init__(self, script: Path):
+        self.script = script
+        self._adapter: WatchAdapter | None = None
+
+    def analyze(self, *args: Any, **kwargs: Any):
+        if self._adapter is None:
+            self._adapter = WatchAdapter(self.script)
+        return self._adapter.analyze(*args, **kwargs)
 
 
 def _candidate(value: Candidate | None) -> dict[str, Any] | None:
@@ -48,6 +65,10 @@ def _candidate(value: Candidate | None) -> dict[str, Any] | None:
         "observations": list(value.observations),
         "score": value.score,
         "verified": value.verified,
+        "binding": value.binding.to_dict() if value.binding is not None else None,
+        "required_check_names": list(value.required_check_names),
+        "duration_seconds": value.duration_seconds,
+        "media_references": [str(path) for path in value.media_references],
     }
 
 
@@ -94,7 +115,12 @@ class SessionService:
         self.doctor = doctor
 
     async def dispatch(
-        self, action: str, *, prompt: str | None, session_id: str | None
+        self,
+        action: str,
+        *,
+        prompt: str | None,
+        session_id: str | None,
+        required_operations: list[str] | tuple[str, ...] | None = None,
     ) -> dict[str, Any]:
         if action == "doctor":
             return self.doctor()
@@ -105,7 +131,14 @@ class SessionService:
                 )
             if session_id is not None:
                 raise ValueError("A new session cannot reuse a session ID")
-            return _handle(await self.controller.start(EditRequest(prompt or "")))
+            return _handle(
+                await self.controller.start(
+                    EditRequest(
+                        prompt or "",
+                        required_operations=tuple(required_operations or ()),
+                    )
+                )
+            )
         if not session_id:
             raise ValueError(f"editor_session {action} requires session_id")
         if action == "status":
@@ -270,8 +303,12 @@ class VerifyService:
         if action == "preview":
             technical = inspect_preview(
                 Path(candidate["preview_path"]),
-                expected_duration=float(record["analysis"]["duration_seconds"]),
-                fcpxml_qc=Path(candidate["fcpxml_path"]).is_file(),
+                expected_duration=float(candidate["duration_seconds"]),
+                fcpxml_qc=bool(
+                    candidate.get("controller_checks", {}).get(
+                        "candidate_xml_valid", False
+                    )
+                ),
             )
             return {
                 "candidate": candidate,
@@ -297,18 +334,18 @@ class VerifyService:
         if action == "record":
             if not isinstance(report, dict):
                 raise ValueError("Verification record requires a report object")
-            creative = parse_creative_review(
-                json.dumps(report), tuple((report.get("required") or {}).keys())
-            )
-            technical = inspect_preview(
-                Path(candidate["preview_path"]),
-                expected_duration=float(record["analysis"]["duration_seconds"]),
-                fcpxml_qc=Path(candidate["fcpxml_path"]).is_file(),
-            )
-            combined = combine_reports(technical, creative)
-            result = await self.controller.record_review(
-                session_id, candidate["number"], combined
-            )
+            try:
+                expected_binding = EvidenceBinding.from_dict(candidate["binding"])
+                creative = parse_creative_review(
+                    json.dumps(report),
+                    tuple(record["required_checks"]),
+                    expected_binding=expected_binding,
+                )
+                result = await self.controller.record_review(
+                    session_id, candidate["number"], creative
+                )
+            except (KeyError, SessionError, TypeError, ValueError) as exc:
+                raise ServiceError(str(exc)) from exc
             return _result(result)
         raise ValueError(f"Unknown editor_verify action: {action}")
 
@@ -327,16 +364,35 @@ def build_services(
         journal_root=config.session_root / ".fcp-mcp-journal",
         allowed_roots=(config.session_root,),
     )
-    commandpost = CommandPostClient(config.commandpost_url)
-    final_cut = CommandPostFinalCutControl(commandpost, fcpxml)
+    native = NativeFinalCutClient(
+        config.native_helper,
+        action_timeout=config.native_action_timeout_seconds,
+    )
+    final_cut = FinalCutControl(
+        native,
+        fcpxml,
+        session_root=config.session_root,
+    )
     timeline = FCPXMLTimelineEngine(fcpxml)
-    watch = WatchAdapter(Path("~/.codex/skills/watch/scripts/watch.py").expanduser())
+    watch = _LazyWatch(Path("~/.codex/skills/watch/scripts/watch.py").expanduser())
+
+    async def validate_candidate(path: Path):
+        upstream = await fcpxml.call(
+            "diagnose",
+            {
+                "action": "validate_timeline",
+                "args": {"filepath": str(path)},
+            },
+        )
+        return inspect_candidate_fcpxml(path, upstream_validation=upstream)
+
     controller = EditSessionController(
         deps=ControllerDeps(
             sessions=sessions,
             fcp=final_cut,
             timeline=timeline,
             watch=watch,
+            candidate_validator=validate_candidate,
         )
     )
     return ServiceRegistry(

@@ -3,8 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import math
 import re
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Protocol
@@ -14,12 +17,19 @@ from editor_cli.session.capture import capture_active_project, file_sha256
 from editor_cli.session.models import (
     EditProgram,
     EditRequest,
+    EvidenceBinding,
     ProjectIdentity,
     SessionState,
+    required_checks_for_operations,
 )
 from editor_cli.session.paths import SessionPaths
 from editor_cli.session.store import SessionStore
 from editor_cli.verification.review import ReviewReport
+from editor_cli.verification.technical import (
+    CandidateFCPXMLInspection,
+    inspect_candidate_fcpxml,
+    inspect_preview,
+)
 
 
 class SessionError(RuntimeError):
@@ -49,6 +59,10 @@ class ControllerDeps:
     fcp: Any
     timeline: TimelineEngine
     watch: VideoEvidence
+    candidate_validator: (
+        Callable[[Path], Awaitable[CandidateFCPXMLInspection]] | None
+    ) = None
+    preview_inspector: Callable[..., ReviewReport] | None = None
 
 
 @dataclass(frozen=True)
@@ -71,6 +85,10 @@ class Candidate:
     required_checks: dict[str, bool]
     observations: tuple[str, ...]
     score: float | None
+    binding: EvidenceBinding | None = None
+    required_check_names: tuple[str, ...] = ()
+    duration_seconds: float | None = None
+    media_references: tuple[Path, ...] = ()
 
     @property
     def verified(self) -> bool:
@@ -92,6 +110,7 @@ class SessionRepository:
         self.root = config.session_root.expanduser().resolve()
 
     def create(self, request: EditRequest) -> dict[str, Any]:
+        required_checks = required_checks_for_operations(request.required_operations)
         session_id = uuid.uuid4().hex
         paths = SessionPaths.create(self.root, session_id)
         record: dict[str, Any] = {
@@ -102,10 +121,10 @@ class SessionRepository:
             "identity": None,
             "capture": None,
             "analysis": {},
+            "required_checks": list(required_checks),
             "candidates": [],
         }
-        SessionStore(paths.root).save_state(record)
-        return record
+        return SessionStore(paths.root).save_state(record)
 
     def paths(self, session_id: str) -> SessionPaths:
         if not re.fullmatch(r"[a-f0-9]{32}", session_id):
@@ -125,7 +144,9 @@ class SessionRepository:
         return record
 
     def save(self, record: dict[str, Any]) -> None:
-        self.store(record["id"]).save_state(record)
+        saved = self.store(record["id"]).save_state(record)
+        record.clear()
+        record.update(saved)
 
 
 def select_best_pass(candidates: list[dict[str, Any]]) -> dict[str, Any]:
@@ -179,7 +200,7 @@ class EditSessionController:
         paths = self.deps.sessions.paths(session_id)
         number = int(record["pass_count"]) + 1
         identity = ProjectIdentity(**record["identity"])
-        project_name = f"{identity.project} - AI Pass {number}"
+        project_name = f"{identity.project} - {session_id[:8]} - AI Pass {number}"
         source = (
             Path(record["candidates"][-1]["fcpxml_path"])
             if record["candidates"]
@@ -194,26 +215,64 @@ class EditSessionController:
         if written != destination.resolve() or not written.is_file():
             raise SessionError("Timeline engine wrote outside the candidate path")
 
+        candidate_qc = await self._inspect_candidate(written)
+        if not candidate_qc.required.get("fcpxml_parseable", False):
+            raise SessionError(
+                "Candidate XML is malformed or does not contain one timeline"
+            )
+        if not candidate_qc.required.get("media_online", False):
+            details = "; ".join(candidate_qc.observations)
+            raise SessionError(f"Candidate XML references missing media: {details}")
+        if not candidate_qc.required.get("timeline_valid", False):
+            raise SessionError("Candidate XML failed timeline validation")
+        if candidate_qc.duration_seconds is None:
+            raise SessionError("Candidate XML has no usable duration")
+        candidate_identity = ProjectIdentity(
+            library=identity.library,
+            event=identity.event,
+            project=project_name,
+            duration_seconds=candidate_qc.duration_seconds,
+        )
+        candidate_sha256 = file_sha256(written)
+
         self._transition(record, SessionState.IMPORT)
         await self._external(
             session_id,
-            "finalcut.import",
-            {"path": str(written), "project_name": project_name},
-            self.deps.fcp.import_project(written, project_name),
+            "finalcut.import_xml",
+            {"path": str(written), "identity": asdict(candidate_identity)},
+            self.deps.fcp.import_project(written, candidate_identity),
+            expected_identity=candidate_identity,
+            idempotency={
+                "candidate_sha256": candidate_sha256,
+                "project_name": project_name,
+            },
         )
 
         self._transition(record, SessionState.PREVIEW)
         preview = paths.previews / f"pass-{number:02d}.mp4"
         await self._external(
             session_id,
-            "finalcut.preview",
-            {"project_name": project_name, "destination": str(preview)},
-            self.deps.fcp.render_preview(project_name, preview),
+            "finalcut.share_preview",
+            {"identity": asdict(candidate_identity), "destination": str(preview)},
+            self.deps.fcp.render_preview(candidate_identity, preview),
+            expected_identity=candidate_identity,
+            idempotency={
+                "candidate_sha256": candidate_sha256,
+                "destination": str(preview),
+            },
         )
         if not preview.is_file():
             raise SessionError("Final Cut did not create the requested preview")
 
-        self._transition(record, SessionState.VERIFY)
+        preview_inspector = self.deps.preview_inspector or inspect_preview
+        preview_qc = await asyncio.to_thread(
+            preview_inspector,
+            preview,
+            expected_duration=candidate_qc.duration_seconds,
+            fcpxml_qc=candidate_qc.verified,
+        )
+        preview_sha256 = file_sha256(preview)
+
         evidence = await asyncio.to_thread(
             self.deps.watch.analyze,
             preview,
@@ -224,6 +283,26 @@ class EditSessionController:
         if not manifest.is_file() or not manifest.is_relative_to(paths.evidence):
             raise SessionError("Watch evidence is outside the session")
         self._require_original(record)
+        frame_timestamps = self._validate_evidence_manifest(
+            manifest, preview, preview_sha256, paths.evidence
+        )
+        manifest_sha256 = file_sha256(manifest)
+        binding = EvidenceBinding(
+            session_id=session_id,
+            pass_number=number,
+            state_version=int(record["version"]) + 1,
+            project_name=project_name,
+            candidate_sha256=candidate_sha256,
+            preview_sha256=preview_sha256,
+            manifest_sha256=manifest_sha256,
+            frame_timestamps=frame_timestamps,
+        )
+        controller_checks = {
+            "source_unchanged": True,
+            "candidate_xml_valid": candidate_qc.verified,
+            "preview_rendered": preview_qc.verified,
+            "preview_watched": True,
+        }
 
         raw_candidate = {
             "number": number,
@@ -231,8 +310,15 @@ class EditSessionController:
             "fcpxml_path": str(written),
             "preview_path": str(preview),
             "evidence_manifest": str(manifest),
+            "identity": asdict(candidate_identity),
+            "duration_seconds": candidate_qc.duration_seconds,
+            "media_references": [str(path) for path in candidate_qc.media_references],
+            "binding": binding.to_dict(),
+            "required_check_names": list(record["required_checks"]),
+            "controller_checks": controller_checks,
+            "technical_checks": dict(preview_qc.required),
             "required_checks": {},
-            "observations": [],
+            "observations": list(candidate_qc.observations + preview_qc.observations),
             "score": None,
         }
         record["candidates"].append(raw_candidate)
@@ -252,12 +338,33 @@ class EditSessionController:
         if candidate["number"] != pass_number:
             raise SessionError("Review pass does not match the current candidate")
 
-        candidate["required_checks"] = dict(report.required)
-        candidate["observations"] = list(report.observations)
-        candidate["score"] = report.score
+        required_check_names = tuple(record["required_checks"])
+        if set(report.required) != set(required_check_names):
+            raise SessionError("Review must contain the exact required checks")
+        if any(type(value) is not bool for value in report.required.values()):
+            raise SessionError("Review check results must be strict booleans")
+        expected_binding = EvidenceBinding.from_dict(candidate["binding"])
+        self._require_review_binding(
+            record, candidate, report.binding, expected_binding
+        )
+
+        accepted_checks = dict(report.required)
+        accepted_checks.update(candidate["controller_checks"])
+        accepted_report = ReviewReport(
+            required=accepted_checks,
+            observations=tuple(report.observations),
+            changed_ranges=tuple(report.changed_ranges),
+            binding=expected_binding,
+        )
+
+        candidate["required_checks"] = dict(accepted_report.required)
+        candidate["observations"] = list(candidate["observations"]) + list(
+            accepted_report.observations
+        )
+        candidate["score"] = accepted_report.score
         self.deps.sessions.save(record)
 
-        if report.verified:
+        if accepted_report.verified:
             await self._open_project(record, candidate)
             self._transition(record, SessionState.READY)
             return self._result(record, candidate)
@@ -295,8 +402,10 @@ class EditSessionController:
         await self._external(
             record["id"],
             "finalcut.open_project",
-            {"project_name": candidate["project_name"]},
-            self.deps.fcp.open_project(candidate["project_name"]),
+            {"identity": candidate["identity"]},
+            self.deps.fcp.open_project(ProjectIdentity(**candidate["identity"])),
+            expected_identity=ProjectIdentity(**candidate["identity"]),
+            idempotency={"project_name": candidate["project_name"]},
         )
 
     async def _external(
@@ -305,11 +414,148 @@ class EditSessionController:
         action: str,
         arguments: dict[str, Any],
         operation,
-    ) -> None:
+        *,
+        expected_identity: ProjectIdentity,
+        idempotency: dict[str, Any],
+    ) -> Any:
         store = self.deps.sessions.store(session_id)
-        token = store.begin_external_action(action, arguments)
-        await operation
-        store.complete_external_action(token)
+        token = store.begin_external_action(
+            action,
+            arguments,
+            expected_identity=asdict(expected_identity),
+            idempotency=idempotency,
+        )
+        result = await operation
+        store.complete_external_action(token, self._external_result(result))
+        return result
+
+    async def _inspect_candidate(self, path: Path) -> CandidateFCPXMLInspection:
+        if self.deps.candidate_validator is not None:
+            return await self.deps.candidate_validator(path)
+        return inspect_candidate_fcpxml(
+            path, upstream_validation={"text": "## Health Score: 100%"}
+        )
+
+    @staticmethod
+    def _validate_evidence_manifest(
+        manifest: Path,
+        preview: Path,
+        preview_sha256: str,
+        evidence_root: Path,
+    ) -> tuple[float, ...]:
+        try:
+            value = json.loads(manifest.read_text(encoding="utf-8"))
+            preview_data = value["preview"]
+            if (
+                not isinstance(value, dict)
+                or not isinstance(preview_data, dict)
+                or Path(preview_data["path"]).expanduser().resolve() != preview
+                or preview_data["sha256"] != preview_sha256
+            ):
+                raise ValueError
+            frames = value["frames"]
+            if not isinstance(frames, list) or not frames:
+                raise ValueError
+            timestamps: set[float] = set()
+            for frame in frames:
+                if not isinstance(frame, dict):
+                    raise TypeError
+                frame_path = Path(frame["path"]).expanduser().resolve()
+                timestamp = frame["timestamp_seconds"]
+                if (
+                    not frame_path.is_file()
+                    or not frame_path.is_relative_to(evidence_root)
+                    or isinstance(timestamp, bool)
+                    or not isinstance(timestamp, (int, float))
+                    or not math.isfinite(timestamp)
+                    or timestamp < 0
+                ):
+                    raise ValueError
+                timestamps.add(float(timestamp))
+            if not timestamps:
+                raise ValueError
+            return tuple(sorted(timestamps))
+        except (KeyError, OSError, TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise SessionError(
+                "Watch evidence manifest does not bind the rendered preview"
+            ) from exc
+
+    @staticmethod
+    def _require_review_binding(
+        record: dict[str, Any],
+        candidate: dict[str, Any],
+        supplied: EvidenceBinding | None,
+        expected: EvidenceBinding,
+    ) -> None:
+        if supplied is None:
+            raise SessionError("Review requires the candidate evidence binding")
+        if supplied.preview_sha256 != expected.preview_sha256:
+            raise SessionError("Review preview hash does not match the candidate")
+        if supplied.candidate_sha256 != expected.candidate_sha256:
+            raise SessionError("Review candidate hash does not match the candidate")
+        if supplied.manifest_sha256 != expected.manifest_sha256:
+            raise SessionError("Review manifest hash does not match the evidence")
+        if supplied != expected:
+            raise SessionError("Review binding does not match the current candidate")
+        if int(record.get("version", -1)) != expected.state_version:
+            raise SessionError("Review state version is stale")
+        EditSessionController._require_artifact_hash(
+            Path(candidate["fcpxml_path"]),
+            expected.candidate_sha256,
+            "Candidate XML hash changed after inspection",
+        )
+        EditSessionController._require_artifact_hash(
+            Path(candidate["preview_path"]),
+            expected.preview_sha256,
+            "Review preview hash changed after inspection",
+        )
+        EditSessionController._require_artifact_hash(
+            Path(candidate["evidence_manifest"]),
+            expected.manifest_sha256,
+            "Review manifest hash changed after inspection",
+        )
+
+    @staticmethod
+    def _require_artifact_hash(path: Path, expected: str, message: str) -> None:
+        try:
+            actual = file_sha256(path)
+        except OSError as exc:
+            raise SessionError(message) from exc
+        if actual != expected:
+            raise SessionError(message)
+
+    @classmethod
+    def _external_result(cls, value: Any) -> dict[str, Any]:
+        if value is None:
+            return {}
+        if isinstance(value, ProjectIdentity):
+            return {"identity": asdict(value)}
+        if isinstance(value, dict):
+            return cls._json_value(value)
+        if hasattr(value, "kind") and hasattr(value, "output"):
+            result: dict[str, Any] = {
+                "kind": value.kind,
+                "output": str(value.output),
+            }
+            project = getattr(value, "project", None)
+            if isinstance(project, ProjectIdentity):
+                result["identity"] = asdict(project)
+            return result
+        return {"result_type": type(value).__name__}
+
+    @classmethod
+    def _json_value(cls, value: Any) -> Any:
+        if isinstance(value, Path):
+            return str(value)
+        if isinstance(value, ProjectIdentity):
+            return asdict(value)
+        if isinstance(value, dict):
+            return {key: cls._json_value(item) for key, item in value.items()}
+        if isinstance(value, (list, tuple)):
+            return [cls._json_value(item) for item in value]
+        if value is None or isinstance(value, (str, int, float, bool)):
+            return value
+        return str(value)
 
     def _transition(self, record: dict[str, Any], state: SessionState) -> None:
         record["state"] = state.value
@@ -329,6 +575,16 @@ class EditSessionController:
             required_checks=dict(value["required_checks"]),
             observations=tuple(value["observations"]),
             score=value["score"],
+            binding=(
+                EvidenceBinding.from_dict(value["binding"])
+                if value.get("binding") is not None
+                else None
+            ),
+            required_check_names=tuple(value.get("required_check_names", ())),
+            duration_seconds=value.get("duration_seconds"),
+            media_references=tuple(
+                Path(path) for path in value.get("media_references", ())
+            ),
         )
 
     def _handle(self, record: dict[str, Any]) -> SessionHandle:

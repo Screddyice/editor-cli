@@ -1,4 +1,5 @@
 import json
+from hashlib import sha256
 from types import SimpleNamespace
 
 import pytest
@@ -11,6 +12,7 @@ from editor_cli.session.controller import (
     SessionRepository,
 )
 from editor_cli.session.models import (
+    BASE_REQUIRED_CHECKS,
     EditOperation,
     EditProgram,
     EditRequest,
@@ -28,9 +30,15 @@ def anyio_backend():
 class FakeFinalCut:
     def __init__(self):
         self.identity = ProjectIdentity("Library", "Event", "Demo", 12.0)
-        self.source_bytes = b'<fcpxml><project name="Demo"/></fcpxml>'
+        self.source_bytes = b"""<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
+        </resources><library><event name="Event"><project name="Demo">
+        <sequence format="r1" duration="12s"><spine/></sequence>
+        </project></event></library></fcpxml>"""
         self.opened_project = None
         self.imported = []
+        self.rendered = []
+        self.duplicated = []
 
     async def active_projects(self):
         return (self.identity,)
@@ -46,39 +54,59 @@ class FakeFinalCut:
         )
 
     async def duplicate_project(self, _identity, _name):
-        return None
+        self.duplicated.append(_name)
+        return ProjectIdentity("Library", "Event", _name, 12.0)
 
-    async def import_project(self, path, project_name):
-        self.imported.append((path, project_name))
+    async def import_project(self, path, expected_identity):
+        self.imported.append((path, expected_identity.project))
+        self.identity = expected_identity
 
-    async def render_preview(self, _project_name, destination):
+    async def render_preview(self, identity, destination):
+        self.rendered.append(identity)
         destination.write_bytes(b"rendered preview")
 
-    async def open_project(self, project_name):
-        self.opened_project = project_name
+    async def open_project(self, identity):
+        self.opened_project = identity.project
+        self.identity = identity
 
 
 class FakeTimeline:
+    def __init__(self):
+        self.candidate_xml = None
+
     async def analyze(self, _source):
         return {"duration_seconds": 12.0, "clips": 2, "gaps": 1}
 
     async def apply(self, source, program, destination):
-        destination.write_text(
+        value = self.candidate_xml or (
             source.read_text(encoding="utf-8")
-            + f"\n<!-- {program.operations[0].action} -->\n",
-            encoding="utf-8",
+            + f"\n<!-- {program.operations[0].action} -->\n"
         )
+        destination.write_text(value, encoding="utf-8")
         return destination
 
 
 class FakeWatch:
     def analyze(self, preview, out, changed_ranges):
         out.mkdir(parents=True, exist_ok=True)
+        frame = out / "frame-0001.jpg"
+        frame.write_bytes(b"frame")
         manifest = out / "manifest.json"
         manifest.write_text(
             json.dumps(
                 {
-                    "preview": str(preview),
+                    "preview": {
+                        "path": str(preview),
+                        "sha256": sha256(preview.read_bytes()).hexdigest(),
+                    },
+                    "frames": [
+                        {
+                            "path": str(frame),
+                            "timestamp_seconds": 2.5,
+                            "reason": "changed range",
+                            "scope": "full",
+                        }
+                    ],
                     "changed_ranges": changed_ranges,
                 }
             ),
@@ -95,6 +123,9 @@ def controller_deps(tmp_path):
         fcp=fcp,
         timeline=FakeTimeline(),
         watch=FakeWatch(),
+        preview_inspector=lambda *_args, **_kwargs: ReviewReport(
+            required={"preview_usable": True}, observations=()
+        ),
     )
 
 
@@ -105,19 +136,33 @@ def valid_edit_program():
     )
 
 
-def verified_report():
+def verified_report(candidate):
     return ReviewReport(
-        required={"preview_rendered": True, "gap_removed": True},
+        required={name: True for name in candidate.required_check_names},
         observations=(),
         changed_ranges=((2.0, 3.0),),
+        binding=candidate.binding,
     )
 
 
-def failed_report(score):
-    passed = round(score * 10)
+def failed_report(candidate, score):
+    operation_checks = tuple(
+        name
+        for name in candidate.required_check_names
+        if name not in BASE_REQUIRED_CHECKS
+    )
+    passed = round(score * len(operation_checks))
     return ReviewReport(
-        required={f"check_{index}": index < passed for index in range(10)},
+        required={
+            name: (
+                True
+                if name in BASE_REQUIRED_CHECKS
+                else operation_checks.index(name) < passed
+            )
+            for name in candidate.required_check_names
+        },
         observations=("One or more required checks failed",),
+        binding=candidate.binding,
     )
 
 
@@ -125,10 +170,12 @@ def failed_report(score):
 async def test_controller_finishes_after_verified_first_pass(tmp_path):
     deps = controller_deps(tmp_path)
     controller = EditSessionController(deps)
-    session = await controller.start(EditRequest("remove gaps"))
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
     candidate = await controller.apply(session.id, valid_edit_program())
     result = await controller.record_review(
-        session.id, candidate.number, verified_report()
+        session.id, candidate.number, verified_report(candidate)
     )
     assert result.state is SessionState.READY
     assert result.passes == 1
@@ -140,14 +187,151 @@ async def test_controller_finishes_after_verified_first_pass(tmp_path):
 
 
 @pytest.mark.anyio
+async def test_controller_persists_exact_required_checks_at_session_start(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+
+    session = await controller.start(
+        EditRequest(
+            "remove gaps and add a reaction title",
+            required_operations=("remove_gaps", "add_title", "insert_reaction"),
+        )
+    )
+
+    record = deps.sessions.load(session.id)
+    assert record["required_checks"] == [
+        "candidate_xml_valid",
+        "gap_removed",
+        "preview_rendered",
+        "preview_watched",
+        "reaction_insert_visible",
+        "source_unchanged",
+        "title_visible",
+    ]
+
+
+def test_repository_rejects_unknown_operation_without_creating_session(tmp_path):
+    sessions_root = tmp_path / "sessions"
+    repository = SessionRepository(ControllerConfig(session_root=sessions_root))
+
+    with pytest.raises(ValueError, match="Unsupported required edit operation"):
+        repository.create(
+            EditRequest("do something unsupported", required_operations=("unknown",))
+        )
+
+    assert not sessions_root.exists()
+
+
+@pytest.mark.anyio
+async def test_candidate_binding_persists_current_version_and_artifact_hashes(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+
+    candidate = await controller.apply(session.id, valid_edit_program())
+    record = deps.sessions.load(session.id)
+
+    assert candidate.binding.state_version == record["version"]
+    assert (
+        candidate.binding.candidate_sha256
+        == sha256(candidate.fcpxml_path.read_bytes()).hexdigest()
+    )
+    assert (
+        candidate.binding.preview_sha256
+        == sha256(candidate.preview_path.read_bytes()).hexdigest()
+    )
+    assert (
+        candidate.binding.manifest_sha256
+        == sha256(candidate.evidence_manifest.read_bytes()).hexdigest()
+    )
+    assert candidate.binding.frame_timestamps == (2.5,)
+
+
+@pytest.mark.parametrize(
+    ("artifact", "message"),
+    [
+        ("fcpxml_path", "Candidate XML hash changed after inspection"),
+        ("preview_path", "Review preview hash changed after inspection"),
+        ("evidence_manifest", "Review manifest hash changed after inspection"),
+    ],
+)
+@pytest.mark.anyio
+async def test_controller_reports_missing_bound_artifact_as_session_error(
+    tmp_path, artifact, message
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+    getattr(candidate, artifact).unlink()
+
+    with pytest.raises(SessionError, match=message):
+        await controller.record_review(
+            session.id, candidate.number, verified_report(candidate)
+        )
+
+
+@pytest.mark.anyio
+async def test_controller_uses_candidate_duration_for_native_identity(tmp_path):
+    deps = controller_deps(tmp_path)
+    deps.timeline.candidate_xml = deps.fcp.source_bytes.decode().replace(
+        'duration="12s"', 'duration="7s"'
+    )
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+
+    candidate = await controller.apply(session.id, valid_edit_program())
+
+    assert candidate.duration_seconds == 7.0
+    assert deps.fcp.imported[-1][1] == candidate.project_name
+    assert deps.fcp.rendered[-1].duration_seconds == 7.0
+
+
+@pytest.mark.anyio
+async def test_controller_rejects_candidate_with_missing_media_before_import(tmp_path):
+    deps = controller_deps(tmp_path)
+    missing = tmp_path / "missing.mov"
+    deps.timeline.candidate_xml = deps.fcp.source_bytes.decode().replace(
+        "<resources>",
+        f'<resources><asset id="r2"><media-rep src="{missing.as_uri()}"/></asset>',
+    )
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("insert reaction", required_operations=("insert_reaction",))
+    )
+
+    with pytest.raises(SessionError, match="missing media"):
+        await controller.apply(session.id, valid_edit_program())
+
+    assert deps.fcp.imported == []
+
+
+@pytest.mark.anyio
 async def test_controller_caps_at_three_and_leaves_best_candidate(tmp_path):
     deps = controller_deps(tmp_path)
     controller = EditSessionController(deps)
-    session = await controller.start(EditRequest("make it funny"))
+    session = await controller.start(
+        EditRequest(
+            "make it funny",
+            required_operations=(
+                "meme_visible",
+                "add_title",
+                "insert_reaction",
+                "change_speed",
+                "add_transition",
+            ),
+        )
+    )
     for score in (0.4, 0.7, 0.6):
         candidate = await controller.apply(session.id, valid_edit_program())
         result = await controller.record_review(
-            session.id, candidate.number, failed_report(score)
+            session.id, candidate.number, failed_report(candidate, score)
         )
     assert result.state is SessionState.BLOCKED
     assert result.passes == 3
@@ -161,7 +345,9 @@ async def test_controller_caps_at_three_and_leaves_best_candidate(tmp_path):
 async def test_controller_resumes_from_persisted_state(tmp_path):
     deps = controller_deps(tmp_path)
     first = EditSessionController(deps)
-    session = await first.start(EditRequest("remove gaps"))
+    session = await first.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
 
     resumed = EditSessionController(deps)
     status = resumed.status(session.id)
@@ -174,7 +360,9 @@ async def test_controller_resumes_from_persisted_state(tmp_path):
 async def test_controller_resume_revalidates_the_active_project(tmp_path):
     deps = controller_deps(tmp_path)
     controller = EditSessionController(deps)
-    session = await controller.start(EditRequest("remove gaps"))
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
 
     resumed = await EditSessionController(deps).resume(session.id)
 
@@ -187,8 +375,58 @@ async def test_controller_resume_revalidates_the_active_project(tmp_path):
 async def test_controller_resume_rejects_a_different_active_project(tmp_path):
     deps = controller_deps(tmp_path)
     controller = EditSessionController(deps)
-    session = await controller.start(EditRequest("remove gaps"))
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
     deps.fcp.identity = ProjectIdentity("Library", "Event", "Other", 12.0)
 
     with pytest.raises(SessionError, match="active project changed"):
         await EditSessionController(deps).resume(session.id)
+
+
+@pytest.mark.anyio
+async def test_controller_rejects_review_keys_or_binding_not_owned_by_candidate(
+    tmp_path,
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+
+    with pytest.raises(SessionError, match="required checks"):
+        await controller.record_review(
+            session.id,
+            candidate.number,
+            ReviewReport(
+                required={"caller_invented": True},
+                observations=(),
+                binding=candidate.binding,
+            ),
+        )
+    stale = candidate.binding.to_dict()
+    stale["preview_sha256"] = "f" * 64
+    with pytest.raises(SessionError, match="preview hash"):
+        await controller.record_review(
+            session.id,
+            candidate.number,
+            ReviewReport(
+                required={name: True for name in candidate.required_check_names},
+                observations=(),
+                binding=type(candidate.binding).from_dict(stale),
+            ),
+        )
+
+
+@pytest.mark.anyio
+async def test_controller_names_candidates_with_short_session_id(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+
+    candidate = await controller.apply(session.id, valid_edit_program())
+
+    assert session.id[:8] in candidate.project_name

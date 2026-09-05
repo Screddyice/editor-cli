@@ -2,7 +2,11 @@ import json
 import subprocess
 from pathlib import Path
 
-from editor_cli.verification.technical import inspect_preview
+from editor_cli.verification.technical import (
+    inspect_candidate,
+    inspect_candidate_fcpxml,
+    inspect_preview,
+)
 
 
 class FakeMediaRunner:
@@ -14,7 +18,9 @@ class FakeMediaRunner:
 
     def __call__(self, argv, timeout):
         if argv[0] == "ffprobe":
-            return subprocess.CompletedProcess(argv, 0, stdout=json.dumps(self.probe), stderr="")
+            return subprocess.CompletedProcess(
+                argv, 0, stdout=json.dumps(self.probe), stderr=""
+            )
         is_black = "blackdetect" in " ".join(argv)
         stderr = self.black_stderr if is_black else self.silence_stderr
         return subprocess.CompletedProcess(
@@ -75,3 +81,95 @@ def test_video_only_preview_does_not_invent_unexpected_silence():
     )
     report = inspect_preview(Path("preview.mp4"), runner=runner)
     assert report.required["no_unexpected_silence"] is True
+
+
+def test_candidate_qc_parses_duration_and_checks_missing_media(tmp_path):
+    present = tmp_path / "present.mov"
+    present.write_bytes(b"media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
+        <asset id="r2" name="Present"><media-rep src="{present.as_uri()}"/></asset>
+        <asset id="r3" name="Missing"><media-rep src="{(tmp_path / "missing.mov").as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="7s"><spine/></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.duration_seconds == 7.0
+    assert qc.required["fcpxml_parseable"] is True
+    assert qc.required["timeline_valid"] is True
+    assert qc.required["media_online"] is False
+    assert str(tmp_path / "missing.mov") in "\n".join(qc.observations)
+
+
+def test_candidate_qc_rejects_malformed_xml(tmp_path):
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text("<fcpxml>", encoding="utf-8")
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.duration_seconds is None
+    assert qc.required["fcpxml_parseable"] is False
+    assert qc.required["timeline_valid"] is False
+
+
+def test_candidate_qc_checks_media_resources_not_only_asset_resources(tmp_path):
+    missing = tmp_path / "missing.mov"
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <media id="r2"><media-rep src="{missing.as_uri()}"/></media>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine/></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is False
+    assert qc.media_references == (missing,)
+
+
+def test_technical_qc_uses_candidate_duration_instead_of_source_duration(tmp_path):
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        """<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine/></sequence>
+        </project></event></library></fcpxml>""",
+        encoding="utf-8",
+    )
+    preview = tmp_path / "preview.mp4"
+    preview.write_bytes(b"preview")
+    runner = FakeMediaRunner(
+        {
+            "streams": [{"codec_type": "video", "width": 1920, "height": 1080}],
+            "format": {"duration": "12.0"},
+        }
+    )
+
+    result = inspect_candidate(
+        candidate,
+        preview,
+        expected_source_duration=20.0,
+        upstream_validation={"text": "## Health Score: 100%"},
+        runner=runner,
+    )
+
+    assert result.expected_duration == 12.0
+    assert result.fcpxml_valid is True
+    assert result.report.required["duration_matches"] is True

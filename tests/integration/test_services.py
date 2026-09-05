@@ -1,12 +1,20 @@
+import json
+from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 
+from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import build_default_services
-from editor_cli.services import SessionService, TimelineService
-from editor_cli.session.controller import Candidate, SessionResult
-from editor_cli.session.models import SessionState
+from editor_cli.services import (
+    ServiceError,
+    SessionService,
+    TimelineService,
+    VerifyService,
+)
+from editor_cli.session.controller import Candidate, SessionRepository, SessionResult
+from editor_cli.session.models import EditRequest, EvidenceBinding, SessionState
 
 
 @pytest.fixture
@@ -19,7 +27,7 @@ class FakeController:
         self.calls = []
 
     async def start(self, request):
-        self.calls.append(("start", request.prompt))
+        self.calls.append(("start", request.prompt, request.required_operations))
         return SimpleNamespace(
             id="a" * 32,
             state=SessionState.APPLY,
@@ -93,6 +101,21 @@ async def test_session_service_serializes_start_status_and_resume():
 
 
 @pytest.mark.anyio
+async def test_session_service_persists_controller_owned_required_checks():
+    controller = FakeController()
+    service = SessionService(controller, doctor=lambda: {"ready": True})
+
+    await service.dispatch(
+        "start",
+        prompt="remove gaps",
+        session_id=None,
+        required_operations=["gap_removed"],
+    )
+
+    assert controller.calls == [("start", "remove gaps", ("gap_removed",))]
+
+
+@pytest.mark.anyio
 async def test_session_service_refuses_start_when_device_is_not_ready():
     service = SessionService(
         FakeController(),
@@ -127,3 +150,141 @@ def test_default_mcp_registry_has_concrete_services():
     assert type(services.timeline).__name__ == "TimelineService"
     assert type(services.media).__name__ == "MediaService"
     assert type(services.verify).__name__ == "VerifyService"
+
+
+def test_default_service_construction_does_not_require_watch_install(monkeypatch):
+    def fail_if_eager(*_args, **_kwargs):
+        raise FileNotFoundError("watch is not installed")
+
+    monkeypatch.setattr("editor_cli.services.WatchAdapter.__init__", fail_if_eager)
+
+    services = build_default_services()
+
+    assert type(services.verify).__name__ == "VerifyService"
+
+
+class RejectOnlyReviewController:
+    async def record_review(self, *_args, **_kwargs):
+        raise AssertionError("invalid review reached the controller")
+
+
+@pytest.fixture
+def ready_verify_service(tmp_path):
+    sessions = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    created = sessions.create(
+        EditRequest("remove gaps", required_operations=("remove_gaps",))
+    )
+    record = sessions.load(created["id"])
+    paths = sessions.paths(record["id"])
+    candidate_path = paths.candidates / "pass-01.fcpxml"
+    candidate_path.write_text(
+        """<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine/></sequence>
+        </project></event></library></fcpxml>""",
+        encoding="utf-8",
+    )
+    preview = paths.previews / "pass-01.mp4"
+    preview.write_bytes(b"preview")
+    evidence_root = paths.evidence / "pass-01"
+    evidence_root.mkdir()
+    frame = evidence_root / "frame-0001.jpg"
+    frame.write_bytes(b"frame")
+    manifest = evidence_root / "manifest.json"
+    manifest.write_text(
+        json.dumps(
+            {
+                "preview": {
+                    "path": str(preview),
+                    "sha256": sha256(preview.read_bytes()).hexdigest(),
+                },
+                "frames": [{"path": str(frame), "timestamp_seconds": 1.0}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    required_checks = (
+        "candidate_xml_valid",
+        "gap_removed",
+        "preview_rendered",
+        "preview_watched",
+        "source_unchanged",
+    )
+    binding = EvidenceBinding(
+        session_id=record["id"],
+        pass_number=1,
+        state_version=record["version"] + 1,
+        project_name=f"Demo - {record['id'][:8]} - AI Pass 1",
+        candidate_sha256=sha256(candidate_path.read_bytes()).hexdigest(),
+        preview_sha256=sha256(preview.read_bytes()).hexdigest(),
+        manifest_sha256=sha256(manifest.read_bytes()).hexdigest(),
+        frame_timestamps=(1.0,),
+    )
+    record.update(
+        {
+            "state": "verify",
+            "required_checks": list(required_checks),
+            "candidates": [
+                {
+                    "number": 1,
+                    "project_name": binding.project_name,
+                    "fcpxml_path": str(candidate_path),
+                    "preview_path": str(preview),
+                    "evidence_manifest": str(manifest),
+                    "duration_seconds": 12.0,
+                    "media_references": [],
+                    "binding": binding.to_dict(),
+                    "controller_checks": {
+                        "candidate_xml_valid": True,
+                        "preview_rendered": True,
+                        "preview_watched": True,
+                        "source_unchanged": True,
+                    },
+                    "required_checks": {},
+                    "observations": [],
+                    "score": None,
+                }
+            ],
+        }
+    )
+    sessions.save(record)
+    service = VerifyService(RejectOnlyReviewController(), sessions, fcpxml=None)
+    return SimpleNamespace(
+        service=service,
+        session_id=record["id"],
+        binding=binding,
+        required_checks=required_checks,
+    )
+
+
+@pytest.mark.anyio
+async def test_review_cannot_replace_controller_required_checks(ready_verify_service):
+    with pytest.raises(ServiceError, match="exact required checks"):
+        await ready_verify_service.service.dispatch(
+            "record",
+            session_id=ready_verify_service.session_id,
+            pass_number=1,
+            report={
+                "required": {"looks_good": True},
+                "binding": ready_verify_service.binding.to_dict(),
+            },
+        )
+
+
+@pytest.mark.anyio
+async def test_review_rejects_stale_preview_hash(ready_verify_service):
+    binding = ready_verify_service.binding.to_dict()
+    binding["preview_sha256"] = "0" * 64
+    with pytest.raises(ServiceError, match="preview hash"):
+        await ready_verify_service.service.dispatch(
+            "record",
+            session_id=ready_verify_service.session_id,
+            pass_number=1,
+            report={
+                "required": {
+                    name: True for name in ready_verify_service.required_checks
+                },
+                "binding": binding,
+            },
+        )
