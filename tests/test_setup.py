@@ -215,6 +215,26 @@ def test_setup_refuses_marked_codex_entry_with_other_command(tmp_path):
     assert not paths.application_support.exists()
 
 
+def test_setup_refuses_reversed_codex_ownership_markers(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.codex_config.parent.mkdir(parents=True)
+    paths.codex_config.write_text(
+        "\n".join(
+            (
+                setup_lib.CODEX_BLOCK_END,
+                setup_lib.CODEX_BLOCK_START,
+                '[mcp_servers."editor-cli"]',
+                f"command = {json.dumps(str(paths.repo_root / '.venv/bin/python'))}",
+                "",
+            )
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SetupError, match="ownership marker is malformed"):
+        run_setup(paths, platform=FakePlatform())
+
+
 def test_setup_marks_claude_entry_and_preserves_unrelated_keys(tmp_path):
     paths = setup_paths(tmp_path)
     paths.claude_config.write_text(
@@ -294,6 +314,236 @@ def test_setup_does_not_clobber_config_created_after_preflight(tmp_path):
     assert json.loads(paths.claude_config.read_text(encoding="utf-8")) == collision
 
 
+def test_atomic_update_exchanges_back_existing_config_changed_at_boundary(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    original = b"[existing]\nvalue = 1\n"
+    competitor = b"[competitor]\nvalue = 2\n"
+    desired = b"[installed]\nvalue = 3\n"
+    config.write_bytes(original)
+    real_exchange = setup_lib._atomic_exchange
+    injected = False
+
+    def exchange_after_change(source, destination):
+        nonlocal injected
+        if Path(destination) == config and not injected:
+            injected = True
+            config.write_bytes(competitor)
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", exchange_after_change)
+
+    with pytest.raises(SetupError, match="changed after setup preflight"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            expected=original,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert config.read_bytes() == competitor
+    assert config.with_suffix(".toml.editor-cli.bak").read_bytes() == original
+
+
+def test_atomic_update_restores_symlink_swapped_at_exchange_boundary(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    original = b"[existing]\nvalue = 1\n"
+    target = tmp_path / "competitor.toml"
+    target.write_bytes(b"[competitor]\nvalue = 2\n")
+    config.write_bytes(original)
+    real_exchange = setup_lib._atomic_exchange
+    injected = False
+
+    def exchange_after_swap(source, destination):
+        nonlocal injected
+        if Path(destination) == config and not injected:
+            injected = True
+            config.unlink()
+            config.symlink_to(target)
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", exchange_after_swap)
+
+    with pytest.raises(SetupError, match="changed after setup preflight"):
+        setup_lib.atomic_config_update(
+            config,
+            b"[installed]\nvalue = 3\n",
+            parse=setup_lib.tomllib.loads,
+            expected=original,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert config.is_symlink()
+    assert config.resolve() == target.resolve()
+
+
+def test_atomic_update_does_not_replace_config_created_at_no_replace_boundary(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    competitor = b"[competitor]\nvalue = 2\n"
+    desired = b"[installed]\nvalue = 3\n"
+    real_move = setup_lib._atomic_move_no_replace
+    injected = False
+
+    def move_after_create(source, destination):
+        nonlocal injected
+        if Path(destination) == config and not injected:
+            injected = True
+            config.write_bytes(competitor)
+        real_move(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_move_no_replace", move_after_create)
+
+    with pytest.raises(SetupError, match="changed after setup preflight"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            expected=None,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert config.read_bytes() == competitor
+    assert not config.with_suffix(".toml.editor-cli.bak").exists()
+
+
+def test_atomic_update_preserves_failed_new_config_and_restores_absence(tmp_path):
+    config = tmp_path / "config.toml"
+    desired = b"[installed]\nvalue = 3\n"
+
+    def fail_installed_config(path):
+        if Path(path) == config:
+            raise SetupError("post-write validation failed")
+
+    with pytest.raises(SetupError, match="failed config preserved"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=fail_installed_config,
+            expected=None,
+            expected_backup=None,
+        )
+
+    recoveries = [
+        path
+        for path in tmp_path.glob(f".{config.name}.*")
+        if path.read_bytes() == desired
+    ]
+    assert not config.exists()
+    assert recoveries
+
+
+def test_atomic_update_keeps_valid_competitor_and_displaced_original(
+    tmp_path,
+):
+    config = tmp_path / "config.toml"
+    original = b"[existing]\nvalue = 1\n"
+    competitor = b"[competitor]\nvalue = 2\n"
+    desired = b"[installed]\nvalue = 3\n"
+    config.write_bytes(original)
+    injected = False
+
+    def replace_during_verification(path):
+        nonlocal injected
+        if Path(path) == config and not injected:
+            injected = True
+            config.write_bytes(competitor)
+
+    with pytest.raises(SetupError, match="displaced config preserved"):
+        setup_lib.atomic_config_update(
+            config,
+            desired,
+            parse=setup_lib.tomllib.loads,
+            verify=replace_during_verification,
+            expected=original,
+            expected_backup=None,
+        )
+
+    recoveries = [
+        path
+        for path in tmp_path.glob(f".{config.name}.*")
+        if path.read_bytes() == original
+    ]
+    assert injected
+    assert config.read_bytes() == competitor
+    assert recoveries
+
+
+def test_atomic_update_refuses_partial_backup_before_config_exchange(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    original = b"[existing]\nvalue = 1\n"
+    backup = config.with_suffix(".toml.editor-cli.bak")
+    config.write_bytes(original)
+    backup.write_bytes(b"not toml")
+    exchanges = 0
+    real_exchange = setup_lib._atomic_exchange
+
+    def record_exchange(source, destination):
+        nonlocal exchanges
+        exchanges += 1
+        real_exchange(source, destination)
+
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", record_exchange)
+
+    with pytest.raises(SetupError, match="backup is invalid"):
+        setup_lib.atomic_config_update(
+            config,
+            b"[installed]\nvalue = 3\n",
+            parse=setup_lib.tomllib.loads,
+            expected=original,
+            expected_backup=b"not toml",
+        )
+
+    assert exchanges == 0
+    assert config.read_bytes() == original
+    assert backup.read_bytes() == b"not toml"
+
+
+def test_atomic_update_rechecks_new_backup_after_no_replace_publication(
+    tmp_path, monkeypatch
+):
+    config = tmp_path / "config.toml"
+    backup = config.with_suffix(".toml.editor-cli.bak")
+    original = b"[existing]\nvalue = 1\n"
+    competitor = b"[competitor]\nvalue = 2\n"
+    config.write_bytes(original)
+    real_move = setup_lib._atomic_move_no_replace
+    injected = False
+
+    def move_then_replace(source, destination):
+        nonlocal injected
+        real_move(source, destination)
+        if Path(destination) == backup and not injected:
+            injected = True
+            backup.write_bytes(competitor)
+
+    monkeypatch.setattr(setup_lib, "_atomic_move_no_replace", move_then_replace)
+
+    with pytest.raises(SetupError, match="backup changed"):
+        setup_lib.atomic_config_update(
+            config,
+            b"[installed]\nvalue = 3\n",
+            parse=setup_lib.tomllib.loads,
+            expected=original,
+            expected_backup=None,
+        )
+
+    assert injected
+    assert config.read_bytes() == original
+    assert backup.read_bytes() == competitor
+
+
 def test_atomic_config_update_validates_temp_before_replacement(tmp_path, monkeypatch):
     config = tmp_path / "config.toml"
     original = b"[existing]\nvalue = 1\n"
@@ -340,7 +590,7 @@ def test_setup_restores_fixed_backup_after_later_verification_failure(
     real_validate = setup_lib._validate_config_file
     failed = False
     replacements = []
-    real_replace = setup_lib.os.replace
+    real_exchange = setup_lib._atomic_exchange
 
     def fail_once(path):
         nonlocal failed
@@ -349,20 +599,21 @@ def test_setup_restores_fixed_backup_after_later_verification_failure(
             raise SetupError("post-write parse failed")
         return real_validate(path)
 
-    def record_replace(source, destination):
+    def record_exchange(source, destination):
         if Path(destination) == paths.codex_config:
             replacements.append(Path(source))
-        real_replace(source, destination)
+        real_exchange(source, destination)
 
     monkeypatch.setattr(setup_lib, "_validate_config_file", fail_once)
-    monkeypatch.setattr(setup_lib.os, "replace", record_replace)
+    monkeypatch.setattr(setup_lib, "_atomic_exchange", record_exchange)
 
-    with pytest.raises(SetupError, match="post-write parse failed"):
+    with pytest.raises(SetupError, match="post-write parse failed") as error:
         run_setup(paths, platform=platform)
 
     assert paths.codex_config.read_text(encoding="utf-8") == original
     assert len(replacements) == 2
     assert all(source.parent == paths.codex_config.parent for source in replacements)
+    assert "displaced config preserved at" in str(error.value)
 
 
 def test_setup_rolls_back_config_when_post_write_validation_fails(

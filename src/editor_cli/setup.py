@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import ctypes
+import errno
 import hashlib
 import json
 import os
@@ -35,6 +36,7 @@ NATIVE_MANAGED_BY = "editor-cli.native-final-cut-helper"
 MCP_MANAGED_BY = "editor-cli.mcp-server"
 CODEX_BLOCK_START = "# BEGIN editor-cli managed MCP"
 CODEX_BLOCK_END = "# END editor-cli managed MCP"
+_UNSPECIFIED = object()
 
 
 class SetupError(RuntimeError):
@@ -106,16 +108,6 @@ def watch_install_command() -> tuple[str, ...]:
         "watch",
         "-y",
     )
-
-
-def backup_before_write(path: Path) -> Path | None:
-    if not path.exists():
-        return None
-    backup = path.with_suffix(path.suffix + ".editor-cli.bak")
-    if not backup.exists():
-        backup.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(path, backup)
-    return backup
 
 
 def _watch_version(path: Path) -> str | None:
@@ -217,6 +209,59 @@ def _atomic_exchange(source: Path, destination: Path) -> None:
         raise SetupError(f"Atomic skill migration failed: {os.strerror(error_number)}")
 
 
+def _atomic_move_no_replace(source: Path, destination: Path) -> None:
+    if sys.platform == "darwin":
+        function_name = "renameatx_np"
+        flags = 0x00000004
+    elif sys.platform.startswith("linux"):
+        function_name = "renameat2"
+        flags = 0x00000001
+    else:
+        raise SetupError(
+            "Atomic no-replace installation is unavailable on this platform"
+        )
+
+    library = ctypes.CDLL(None, use_errno=True)
+    try:
+        rename = getattr(library, function_name)
+    except AttributeError as exc:
+        raise SetupError(
+            "Atomic no-replace installation is unavailable on this platform"
+        ) from exc
+    rename.argtypes = (
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_int,
+        ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    rename.restype = ctypes.c_int
+
+    directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+    source_directory = os.open(source.parent, directory_flags)
+    try:
+        destination_directory = os.open(destination.parent, directory_flags)
+        try:
+            result = rename(
+                source_directory,
+                os.fsencode(source.name),
+                destination_directory,
+                os.fsencode(destination.name),
+                flags,
+            )
+        finally:
+            os.close(destination_directory)
+    finally:
+        os.close(source_directory)
+    if result != 0:
+        error_number = ctypes.get_errno()
+        if error_number == errno.EEXIST:
+            raise FileExistsError(error_number, os.strerror(error_number), destination)
+        raise SetupError(
+            f"Atomic no-replace installation failed: {os.strerror(error_number)}"
+        )
+
+
 def _replace_legacy_symlink(link: Path, target: Path, plan: _SymlinkPlan) -> Path:
     link.parent.mkdir(parents=True, exist_ok=True)
     quarantine = Path(
@@ -309,7 +354,11 @@ def _merge_codex_config(path: Path, python: Path, repo_root: Path) -> str | None
     start_count = existing.count(CODEX_BLOCK_START)
     end_count = existing.count(CODEX_BLOCK_END)
     if start_count or end_count:
-        if start_count != 1 or end_count != 1:
+        if (
+            start_count != 1
+            or end_count != 1
+            or existing.index(CODEX_BLOCK_END) < existing.index(CODEX_BLOCK_START)
+        ):
             raise SetupError("Codex editor-cli MCP ownership marker is malformed")
         before, remainder = existing.split(CODEX_BLOCK_START, 1)
         managed_text, after = remainder.split(CODEX_BLOCK_END, 1)
@@ -426,20 +475,161 @@ def _parse_config_path(path: Path, parse: Callable[[str], object]) -> None:
         raise SetupError(f"Refusing to install invalid configuration: {path}") from exc
 
 
-def _atomic_validated_replace(
+def _snapshot_regular_file(path: Path, *, label: str) -> bytes | None:
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode):
+        raise SetupError(f"{label} must be a regular file: {path}")
+    try:
+        content = path.read_bytes()
+        after = path.lstat()
+    except OSError as exc:
+        raise SetupError(f"{label} changed while setup read it: {path}") from exc
+    identity = (before.st_dev, before.st_ino, before.st_size, before.st_mtime_ns)
+    if identity != (after.st_dev, after.st_ino, after.st_size, after.st_mtime_ns):
+        raise SetupError(f"{label} changed while setup read it: {path}")
+    return content
+
+
+def _regular_file_matches(path: Path, content: bytes) -> bool:
+    try:
+        return _snapshot_regular_file(path, label="Config") == content
+    except (OSError, SetupError):
+        return False
+
+
+def _parse_config_bytes(
+    content: bytes,
+    parse: Callable[[str], object],
+    *,
+    error: str,
+) -> None:
+    try:
+        parse(content.decode("utf-8"))
+    except Exception as exc:
+        raise SetupError(error) from exc
+
+
+def _verify_installed_config(
+    path: Path,
+    content: bytes,
+    parse: Callable[[str], object],
+    verify: Callable[[Path], None] | None,
+) -> None:
+    installed = _snapshot_regular_file(path, label="Installed config")
+    if installed != content:
+        raise SetupError(f"Installed config bytes changed before verification: {path}")
+    _parse_config_path(path, parse)
+    if verify is not None:
+        verify(path)
+    if not _regular_file_matches(path, content):
+        raise SetupError(f"Installed config bytes changed during verification: {path}")
+
+
+def _publish_fixed_backup(
     path: Path,
     content: bytes,
     *,
     parse: Callable[[str], object],
-    mode: int = 0o600,
-) -> None:
-    temp = _write_sibling_temp(path, content, mode=mode)
+    expected: bytes | None,
+) -> Path:
+    backup = path.with_suffix(path.suffix + ".editor-cli.bak")
+    if expected is not None:
+        current = _snapshot_regular_file(backup, label="Config backup")
+        if current != expected:
+            raise SetupError(f"Config backup changed after setup preflight: {backup}")
+        _parse_config_bytes(
+            current,
+            parse,
+            error=f"Config backup is invalid: {backup}",
+        )
+        return backup
+
+    temp = _write_sibling_temp(backup, content, mode=0o600)
     try:
         _parse_config_path(temp, parse)
-        os.replace(temp, path)
-        _fsync_directory(path.parent)
+        try:
+            _atomic_move_no_replace(temp, backup)
+        except FileExistsError as exc:
+            raise SetupError(
+                f"Config backup changed after setup preflight: {backup}"
+            ) from exc
+        _fsync_directory(backup.parent)
+        try:
+            installed = _snapshot_regular_file(backup, label="Config backup")
+        except SetupError as exc:
+            raise SetupError(
+                f"Config backup changed after publication: {backup}"
+            ) from exc
+        if installed != content:
+            raise SetupError(f"Config backup changed after publication: {backup}")
+        _parse_config_bytes(
+            installed,
+            parse,
+            error=f"Config backup is invalid: {backup}",
+        )
     finally:
         temp.unlink(missing_ok=True)
+    return backup
+
+
+def _exchange_back_if_owned(path: Path, displaced: Path, installed: bytes) -> bool:
+    if not _regular_file_matches(path, installed):
+        return False
+    try:
+        _atomic_exchange(displaced, path)
+        _fsync_directory(path.parent)
+    except (OSError, SetupError):
+        return False
+    if _regular_file_matches(displaced, installed):
+        return True
+    try:
+        _atomic_exchange(displaced, path)
+        _fsync_directory(path.parent)
+    except (OSError, SetupError):
+        pass
+    return False
+
+
+def _restore_fixed_backup(
+    path: Path,
+    installed_content: bytes,
+    backup: Path,
+    backup_content: bytes,
+    *,
+    parse: Callable[[str], object],
+) -> None:
+    current_backup = _snapshot_regular_file(backup, label="Config backup")
+    if current_backup != backup_content:
+        raise SetupError(f"Config backup changed before recovery: {backup}")
+    _parse_config_bytes(
+        backup_content,
+        parse,
+        error=f"Config backup is invalid: {backup}",
+    )
+    rollback = _write_sibling_temp(path, backup_content, mode=0o600)
+    preserve_rollback = False
+    try:
+        _parse_config_path(rollback, parse)
+        if not _regular_file_matches(path, installed_content):
+            preserve_rollback = True
+            raise SetupError(
+                f"Installed config changed during recovery; rollback preserved at {rollback}"
+            )
+        _atomic_exchange(rollback, path)
+        _fsync_directory(path.parent)
+        if not _regular_file_matches(rollback, installed_content):
+            _exchange_back_if_owned(path, rollback, backup_content)
+            preserve_rollback = True
+            raise SetupError(
+                f"Config changed during recovery; displaced material preserved at {rollback}"
+            )
+        _verify_installed_config(path, backup_content, parse, None)
+    finally:
+        if not preserve_rollback:
+            rollback.unlink(missing_ok=True)
 
 
 def atomic_config_update(
@@ -448,43 +638,150 @@ def atomic_config_update(
     *,
     parse: Callable[[str], object],
     verify: Callable[[Path], None] | None = None,
+    expected: bytes | None | object = _UNSPECIFIED,
+    expected_backup: bytes | None | object = _UNSPECIFIED,
 ) -> Path | None:
     """Install validated config bytes and restore the fixed backup on failure."""
-    existed = path.exists()
-    replaced = False
+    if expected is _UNSPECIFIED:
+        expected_content = _snapshot_regular_file(path, label="Config")
+    elif isinstance(expected, bytes) or expected is None:
+        expected_content = expected
+    else:
+        raise TypeError("expected must be bytes or None")
+    backup_path = path.with_suffix(path.suffix + ".editor-cli.bak")
+    if expected_backup is _UNSPECIFIED:
+        expected_backup_content = _snapshot_regular_file(
+            backup_path, label="Config backup"
+        )
+    elif isinstance(expected_backup, bytes) or expected_backup is None:
+        expected_backup_content = expected_backup
+    else:
+        raise TypeError("expected_backup must be bytes or None")
+
     backup = None
+    displaced = False
+    preserve_temp = False
     temp = _write_sibling_temp(path, content, mode=0o600)
     try:
         _parse_config_path(temp, parse)
-        backup = backup_before_write(path)
-        os.replace(temp, path)
-        replaced = True
-        _fsync_directory(path.parent)
-        if verify is None:
-            _parse_config_path(path, parse)
+        if verify is not None:
+            verify(temp)
+
+        if expected_content is None:
+            if expected_backup_content is not None:
+                _parse_config_bytes(
+                    expected_backup_content,
+                    parse,
+                    error=f"Config backup is invalid: {backup_path}",
+                )
+            try:
+                _atomic_move_no_replace(temp, path)
+            except FileExistsError as exc:
+                raise SetupError(
+                    f"Config changed after setup preflight: {path}"
+                ) from exc
+            _fsync_directory(path.parent)
         else:
-            verify(path)
-    except Exception as exc:
-        if replaced:
+            backup = _publish_fixed_backup(
+                path,
+                expected_content,
+                parse=parse,
+                expected=expected_backup_content,
+            )
+            _atomic_exchange(temp, path)
+            displaced = True
+            _fsync_directory(path.parent)
+            if not _regular_file_matches(temp, expected_content):
+                if not _exchange_back_if_owned(path, temp, content):
+                    preserve_temp = True
+                    raise SetupError(
+                        "Config changed after setup preflight; displaced config "
+                        f"preserved at {temp}"
+                    )
+                displaced = False
+                raise SetupError(f"Config changed after setup preflight: {path}")
+
+        try:
+            _verify_installed_config(path, content, parse, verify)
+        except Exception as exc:
+            if not _regular_file_matches(path, content):
+                preserve_temp = displaced
+                location = (
+                    f"; displaced config preserved at {temp}" if displaced else ""
+                )
+                raise SetupError(
+                    f"Installed config changed before verification: {path}{location}"
+                ) from exc
+            if backup is None and expected_content is None:
+                try:
+                    _atomic_move_no_replace(path, temp)
+                    _fsync_directory(path.parent)
+                except (FileExistsError, SetupError) as recovery_error:
+                    raise SetupError(
+                        f"{exc}; failed config remains at {path}"
+                    ) from recovery_error
+                preserve_temp = True
+                raise SetupError(f"{exc}; failed config preserved at {temp}") from exc
             if backup is not None:
-                _atomic_validated_replace(path, backup.read_bytes(), parse=parse)
-            elif not existed:
-                path.unlink(missing_ok=True)
-                _fsync_directory(path.parent)
+                fixed_backup_content = (
+                    expected_backup_content
+                    if expected_backup_content is not None
+                    else expected_content
+                )
+                if fixed_backup_content is None:
+                    raise SetupError(f"Config backup state is unavailable: {backup}")
+                preserve_temp = displaced
+                try:
+                    _restore_fixed_backup(
+                        path,
+                        content,
+                        backup,
+                        fixed_backup_content,
+                        parse=parse,
+                    )
+                except SetupError as recovery_error:
+                    raise SetupError(
+                        f"{recovery_error}; displaced config preserved at {temp}"
+                    ) from recovery_error
+                if (
+                    displaced
+                    and _snapshot_regular_file(temp, label="Displaced config")
+                    == fixed_backup_content
+                ):
+                    preserve_temp = False
+                if preserve_temp:
+                    raise SetupError(
+                        f"{exc}; displaced config preserved at {temp}"
+                    ) from exc
+            raise
+    except Exception as exc:
         if isinstance(exc, SetupError):
             raise
         raise SetupError(f"Failed to update configuration: {path}") from exc
     finally:
-        temp.unlink(missing_ok=True)
+        if not preserve_temp:
+            temp.unlink(missing_ok=True)
     return backup
 
 
 def _validate_config_file(path: Path) -> None:
     content = path.read_text(encoding="utf-8")
-    if path.suffix == ".toml":
+    if ".toml" in path.suffixes:
         tomllib.loads(content)
     else:
         json.loads(content)
+
+
+def _validate_codex_managed_config(path: Path, python: Path, repo_root: Path) -> None:
+    _validate_config_file(path)
+    if _merge_codex_config(path, python, repo_root) is not None:
+        raise SetupError("Installed Codex config lost its managed MCP registration")
+
+
+def _validate_claude_managed_config(path: Path, python: Path, repo_root: Path) -> None:
+    _validate_config_file(path)
+    if _merge_claude_config(path, python, repo_root) is not None:
+        raise SetupError("Installed Claude config lost its managed MCP registration")
 
 
 def _write_config(
@@ -493,22 +790,23 @@ def _write_config(
     result: SetupResult,
     dry_run: bool,
     *,
-    expected: str | None,
+    expected: bytes | None,
+    expected_backup: bytes | None,
+    verify: Callable[[Path], None],
 ) -> None:
     if content is None:
         return
     result.planned.append(f"configure {path}")
     if dry_run:
         return
-    current = path.read_text(encoding="utf-8") if path.is_file() else None
-    if current != expected:
-        raise SetupError(f"Config changed after setup preflight: {path}")
     parse = tomllib.loads if path.suffix == ".toml" else json.loads
     backup = atomic_config_update(
         path,
         content.encode("utf-8"),
         parse=parse,
-        verify=_validate_config_file,
+        verify=verify,
+        expected=expected,
+        expected_backup=expected_backup,
     )
     if backup is not None:
         result.backups.append(backup)
@@ -860,16 +1158,28 @@ def run_setup(
     claude_skill = paths.claude_skills / "final-cut-editor"
     codex_skill_plan = _symlink_plan(codex_skill, skill_source, legacy_skill_source)
     claude_skill_plan = _symlink_plan(claude_skill, skill_source, legacy_skill_source)
-    codex_original = (
-        paths.codex_config.read_text(encoding="utf-8")
-        if paths.codex_config.is_file()
-        else None
+    codex_original = _snapshot_regular_file(paths.codex_config, label="Codex config")
+    claude_original = _snapshot_regular_file(paths.claude_config, label="Claude config")
+    codex_backup_path = paths.codex_config.with_suffix(
+        paths.codex_config.suffix + ".editor-cli.bak"
     )
-    claude_original = (
-        paths.claude_config.read_text(encoding="utf-8")
-        if paths.claude_config.is_file()
-        else None
+    claude_backup_path = paths.claude_config.with_suffix(
+        paths.claude_config.suffix + ".editor-cli.bak"
     )
+    codex_backup = _snapshot_regular_file(codex_backup_path, label="Codex backup")
+    claude_backup = _snapshot_regular_file(claude_backup_path, label="Claude backup")
+    if codex_backup is not None:
+        _parse_config_bytes(
+            codex_backup,
+            tomllib.loads,
+            error=f"Config backup is invalid: {codex_backup_path}",
+        )
+    if claude_backup is not None:
+        _parse_config_bytes(
+            claude_backup,
+            json.loads,
+            error=f"Config backup is invalid: {claude_backup_path}",
+        )
     codex_content = _merge_codex_config(paths.codex_config, python, paths.repo_root)
     claude_content = _merge_claude_config(paths.claude_config, python, paths.repo_root)
     helper = paths.application_support / "bin" / NATIVE_HELPER_NAME
@@ -917,6 +1227,10 @@ def run_setup(
         result,
         dry_run,
         expected=codex_original,
+        expected_backup=codex_backup,
+        verify=lambda path: _validate_codex_managed_config(
+            path, python, paths.repo_root
+        ),
     )
     _write_config(
         paths.claude_config,
@@ -924,6 +1238,10 @@ def run_setup(
         result,
         dry_run,
         expected=claude_original,
+        expected_backup=claude_backup,
+        verify=lambda path: _validate_claude_managed_config(
+            path, python, paths.repo_root
+        ),
     )
 
     if dry_run:
