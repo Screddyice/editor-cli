@@ -95,7 +95,10 @@ def test_candidate_qc_parses_duration_and_checks_missing_media(tmp_path):
         <asset id="r2" name="Present"><media-rep src="{present.as_uri()}"/></asset>
         <asset id="r3" name="Missing"><media-rep src="{(tmp_path / "missing.mov").as_uri()}"/></asset>
         </resources><library><event name="Event"><project name="Candidate">
-        <sequence format="r1" duration="7s"><spine/></sequence>
+        <sequence format="r1" duration="7s"><spine>
+        <asset-clip ref="r2" offset="0s" duration="6s"/>
+        <asset-clip ref="r3" offset="6s" duration="1s"/>
+        </spine></sequence>
         </project></event></library></fcpxml>''',
         encoding="utf-8",
     )
@@ -132,7 +135,9 @@ def test_candidate_qc_checks_media_resources_not_only_asset_resources(tmp_path):
         <format id="r1" frameDuration="1/30s"/>
         <media id="r2"><media-rep src="{missing.as_uri()}"/></media>
         </resources><library><event name="Event"><project name="Candidate">
-        <sequence format="r1" duration="12s"><spine/></sequence>
+        <sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence>
         </project></event></library></fcpxml>''',
         encoding="utf-8",
     )
@@ -201,6 +206,7 @@ def test_candidate_qc_resolves_nested_media_resources(tmp_path):
         <media id="r3"><sequence format="r1" duration="12s"><spine>
         <asset-clip ref="r2" offset="0s" duration="12s"/>
         </spine></sequence></media>
+        <asset id="r9"><media-rep src="https://example.com/unrelated.mov"/></asset>
         </resources><library><event name="Event"><project name="Candidate">
         <sequence format="r1" duration="12s"><spine>
         <ref-clip ref="r3" offset="0s" duration="12s"/>
@@ -215,6 +221,147 @@ def test_candidate_qc_resolves_nested_media_resources(tmp_path):
 
     assert qc.required["media_online"] is True
     assert qc.media_references == (present,)
+
+
+def test_candidate_qc_allows_clip_container_with_referenced_video(tmp_path):
+    present = tmp_path / "present.mov"
+    present.write_bytes(b"media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <asset id="r2"><media-rep src="{present.as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <clip name="Container" offset="0s" duration="12s">
+        <video ref="r2" offset="0s" duration="12s"/>
+        </clip>
+        </spine></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is True
+    assert qc.media_references == (present,)
+
+
+@pytest.mark.parametrize("ref_attribute", ["", ' ref=""', ' ref="   "'])
+def test_candidate_qc_rejects_media_element_without_nonempty_ref(
+    tmp_path, ref_attribute
+):
+    unrelated = tmp_path / "unrelated.mov"
+    unrelated.write_bytes(b"unrelated media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <asset id="r9"><media-rep src="{unrelated.as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <asset-clip{ref_attribute} offset="0s" duration="12s"/>
+        </spine></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is False
+    assert qc.media_references == ()
+    assert "lacks required ref: asset-clip" in "\n".join(qc.observations)
+
+
+def test_unrelated_valid_asset_cannot_mask_referenced_resource_without_source(
+    tmp_path,
+):
+    unrelated = tmp_path / "unrelated.mov"
+    unrelated.write_bytes(b"unrelated media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <asset id="r2"/>
+        <asset id="r9"><media-rep src="{unrelated.as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <asset-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is False
+    assert qc.media_references == ()
+    assert "has no usable source: r2" in "\n".join(qc.observations)
+
+
+def test_candidate_qc_rejects_reachable_media_resource_cycle(tmp_path):
+    unrelated = tmp_path / "unrelated.mov"
+    unrelated.write_bytes(b"unrelated media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <media id="r2"><sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r3" offset="0s" duration="12s"/>
+        </spine></sequence></media>
+        <media id="r3"><sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence></media>
+        <asset id="r9"><media-rep src="{unrelated.as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is False
+    assert qc.media_references == ()
+    assert "reference cycle" in "\n".join(qc.observations)
+
+
+def test_candidate_qc_rejects_missing_nested_media_resource(tmp_path):
+    unrelated = tmp_path / "unrelated.mov"
+    unrelated.write_bytes(b"unrelated media")
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_text(
+        f'''<fcpxml version="1.11"><resources>
+        <format id="r1" frameDuration="1/30s"/>
+        <media id="r2"><sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r404" offset="0s" duration="12s"/>
+        </spine></sequence></media>
+        <asset id="r9"><media-rep src="{unrelated.as_uri()}"/></asset>
+        </resources><library><event name="Event"><project name="Candidate">
+        <sequence format="r1" duration="12s"><spine>
+        <ref-clip ref="r2" offset="0s" duration="12s"/>
+        </spine></sequence>
+        </project></event></library></fcpxml>''',
+        encoding="utf-8",
+    )
+
+    qc = inspect_candidate_fcpxml(
+        candidate, upstream_validation={"text": "## Health Score: 100%"}
+    )
+
+    assert qc.required["media_online"] is False
+    assert qc.media_references == ()
+    assert "unresolved media resource: r404" in "\n".join(qc.observations)
 
 
 def test_technical_qc_uses_candidate_duration_instead_of_source_duration(tmp_path):

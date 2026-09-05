@@ -18,8 +18,8 @@ from editor_cli.verification.review import ReviewReport
 
 Runner = Callable[[list[str], int], subprocess.CompletedProcess[str]]
 
-_MEDIA_REFERENCE_TAGS = frozenset(
-    {"asset-clip", "audio", "clip", "mc-clip", "ref-clip", "sync-clip", "video"}
+_REQUIRED_MEDIA_REF_TAGS = frozenset(
+    {"asset-clip", "audio", "mc-clip", "ref-clip", "video"}
 )
 
 
@@ -94,14 +94,20 @@ def _resource_sources(element) -> set[str]:
     return sources
 
 
-def _nested_media_refs(element) -> set[str]:
-    return {
-        reference
-        for child in element.iter()
-        if child is not element
-        and _local_name(child.tag) in _MEDIA_REFERENCE_TAGS
-        and (reference := child.get("ref"))
-    }
+def _media_refs(element, observations: set[str]) -> set[str]:
+    references: set[str] = set()
+    for child in element.iter():
+        tag = _local_name(child.tag)
+        if tag not in _REQUIRED_MEDIA_REF_TAGS:
+            continue
+        reference = child.get("ref")
+        if not isinstance(reference, str) or not reference.strip():
+            observations.add(
+                f"Candidate timeline media element lacks required ref: {tag}"
+            )
+            continue
+        references.add(reference.strip())
+    return references
 
 
 def _media_graph(root) -> tuple[set[str], tuple[str, ...]]:
@@ -118,22 +124,25 @@ def _media_graph(root) -> tuple[set[str], tuple[str, ...]]:
         if resources_element is not None
         else {}
     )
-    sources = {
-        source
-        for element in resources.values()
-        for source in _resource_sources(element)
-    }
+    sources: set[str] = set()
     observations: set[str] = set()
     resource_nodes = (
         set(resources_element.iter()) if resources_element is not None else set()
     )
-    timeline_refs = {
-        reference
-        for element in root.iter()
-        if element not in resource_nodes
-        and _local_name(element.tag) in _MEDIA_REFERENCE_TAGS
-        and (reference := element.get("ref"))
-    }
+    timeline_refs: set[str] = set()
+    for element in root.iter():
+        if element in resource_nodes:
+            continue
+        tag = _local_name(element.tag)
+        if tag not in _REQUIRED_MEDIA_REF_TAGS:
+            continue
+        reference = element.get("ref")
+        if not isinstance(reference, str) or not reference.strip():
+            observations.add(
+                f"Candidate timeline media element lacks required ref: {tag}"
+            )
+            continue
+        timeline_refs.add(reference.strip())
     resolved: dict[str, set[str]] = {}
     resolving: set[str] = set()
 
@@ -153,7 +162,7 @@ def _media_graph(root) -> tuple[set[str], tuple[str, ...]]:
             return set()
         resolving.add(reference)
         resource_sources = _resource_sources(resource)
-        for nested_reference in _nested_media_refs(resource):
+        for nested_reference in _media_refs(resource, observations):
             resource_sources.update(resolve(nested_reference))
         resolving.remove(reference)
         if not resource_sources:
@@ -164,7 +173,7 @@ def _media_graph(root) -> tuple[set[str], tuple[str, ...]]:
         return resource_sources
 
     for reference in sorted(timeline_refs):
-        resolve(reference)
+        sources.update(resolve(reference))
     if not sources:
         observations.add("Candidate timeline has no media sources")
     return sources, tuple(sorted(observations))
