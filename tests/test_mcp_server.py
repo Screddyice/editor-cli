@@ -1,13 +1,19 @@
-import plistlib
+import hashlib
+import json
 import subprocess
 import sys
-from types import SimpleNamespace
+from dataclasses import replace
+from pathlib import Path
+from unittest.mock import Mock
 
 import pytest
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from mcp.server.mcpserver.exceptions import ToolError
 
+import editor_cli.mcp_server as mcp_server_module
+from editor_cli.adapters.native_final_cut import BlockingDialog, NativeProbe
+from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import ServiceRegistry, create_mcp, device_report
 
 
@@ -90,59 +96,144 @@ async def test_stdio_server_initializes_and_lists_four_tools():
     }
 
 
-def test_device_report_discovers_creator_studio_final_cut_bundle(tmp_path):
-    app = tmp_path / "Final Cut Pro Creator Studio.app"
-    info = app / "Contents" / "Info.plist"
-    info.parent.mkdir(parents=True)
-    with info.open("wb") as handle:
-        plistlib.dump(
+def native_config(tmp_path: Path) -> tuple[ControllerConfig, str]:
+    helper = tmp_path / "bin" / "editor-fcp-bridge"
+    helper.parent.mkdir()
+    helper.write_bytes(b"installed native helper")
+    digest = hashlib.sha256(helper.read_bytes()).hexdigest()
+    helper.with_suffix(".json").write_text(
+        json.dumps(
             {
-                "CFBundleIdentifier": "com.apple.FinalCutApp",
-                "CFBundleShortVersionString": "12.3",
-                "CFBundleVersion": "450152",
-            },
-            handle,
+                "managed_by": "editor-cli.native-final-cut-helper",
+                "metadata_version": 1,
+                "protocol_version": 1,
+                "sha256": digest,
+                "source_sha256": "b" * 64,
+            }
         )
-
-    report = device_report(applications=tmp_path)
-
-    assert report["final_cut"]["installed"] is True
-    assert report["final_cut"]["version"] == "12.3"
-    assert report["final_cut"]["path"] == str(app)
-
-
-def test_device_report_requires_latenite_license_app_and_loopback_bridge(tmp_path):
-    def write_app(name, bundle, version="1.0", build="1"):
-        app = tmp_path / f"{name}.app"
-        info = app / "Contents" / "Info.plist"
-        info.parent.mkdir(parents=True)
-        with info.open("wb") as handle:
-            plistlib.dump(
-                {
-                    "CFBundleIdentifier": bundle,
-                    "CFBundleShortVersionString": version,
-                    "CFBundleVersion": build,
-                },
-                handle,
-            )
-        return app
-
-    write_app("Final Cut Pro Creator Studio", "com.apple.FinalCutApp", "12.3", "450152")
-    write_app("CommandPost", "org.latenitefilms.CommandPost", "2.1.0")
-    write_app("Fast Collections", "com.latenitefilms.FastCollections", "1.0")
-
-    report = device_report(
-        applications=tmp_path,
-        listener_runner=lambda *_args, **_kwargs: SimpleNamespace(
-            stdout="CommandPo 1 user 1u IPv4 0x0 0t0 TCP 127.0.0.1:27480 (LISTEN)\n"
+        + "\n",
+        encoding="utf-8",
+    )
+    return (
+        ControllerConfig(
+            session_root=tmp_path / "sessions",
+            native_helper=helper,
+            native_protocol_version=1,
         ),
-        skill_paths=(tmp_path / "watch-a.md", tmp_path / "watch-b.md"),
+        digest,
     )
 
-    assert report["commandpost"]["version"] == "2.1.0"
-    assert report["commandpost"]["license_app"] == "Fast Collections"
-    assert report["commandpost"]["bridge"]["loopback_only"] is True
+
+def valid_probe(digest: str) -> NativeProbe:
+    return NativeProbe(
+        protocol_version=1,
+        helper_sha256=digest,
+        final_cut_bundle_id="com.apple.FinalCutApp",
+        final_cut_version="12.3",
+        accessibility=True,
+        automation=True,
+        ready=True,
+        dialogs=(),
+    )
+
+
+def test_device_report_requires_native_helper_and_no_paid_app(tmp_path):
+    config, digest = native_config(tmp_path)
+    probe = Mock(return_value=valid_probe(digest))
+
+    report = device_report(config=config, probe=probe)
+
+    assert report["ready"] is True
+    assert report["native_helper"]["installed"] is True
+    assert report["native_helper"]["metadata_valid"] is True
+    assert report["native_helper"]["sha256"] == digest
+    assert report["final_cut"] == {
+        "bundle_id": "com.apple.FinalCutApp",
+        "version": "12.3",
+        "compatible": True,
+    }
+    assert report["permissions"] == {"accessibility": True, "automation": True}
+    assert report["dialogs"] == []
+    assert "commandpost" not in report
+    assert "license_app" not in json.dumps(report).lower()
+    probe.assert_called_once_with(config.session_root)
+
+
+@pytest.mark.parametrize(
+    ("change", "section"),
+    [
+        ({"protocol_version": 2}, "native_helper"),
+        ({"helper_sha256": "c" * 64}, "native_helper"),
+        ({"final_cut_version": "12.4"}, "final_cut"),
+        ({"final_cut_bundle_id": "example.fake"}, "final_cut"),
+        ({"accessibility": False, "ready": False}, "permissions"),
+        ({"automation": False, "ready": False}, "permissions"),
+        ({"dialogs": (BlockingDialog("AXSheet", "Missing Media"),)}, "dialogs"),
+    ],
+)
+def test_device_report_rejects_incompatible_native_state(tmp_path, change, section):
+    config, digest = native_config(tmp_path)
+    probe = Mock(return_value=replace(valid_probe(digest), **change))
+
+    report = device_report(config=config, probe=probe)
+
     assert report["ready"] is False
+    assert section in report
+
+
+@pytest.mark.parametrize("metadata", [None, "not json", "{}"])
+def test_device_report_rejects_missing_or_invalid_helper_metadata(tmp_path, metadata):
+    config, digest = native_config(tmp_path)
+    metadata_path = config.native_helper.with_suffix(".json")
+    if metadata is None:
+        metadata_path.unlink()
+    else:
+        metadata_path.write_text(metadata, encoding="utf-8")
+    probe = Mock(return_value=valid_probe(digest))
+
+    report = device_report(config=config, probe=probe)
+
+    assert report["ready"] is False
+    assert report["native_helper"]["metadata_valid"] is False
+    probe.assert_not_called()
+
+
+@pytest.mark.anyio
+async def test_default_mcp_constructs_services_lazily_for_doctor(monkeypatch):
+    def fail_build():
+        raise FileNotFoundError("watch.py not found")
+
+    monkeypatch.setattr(mcp_server_module, "build_default_services", fail_build)
+    monkeypatch.setattr(
+        mcp_server_module,
+        "device_report",
+        lambda: {"ready": False, "native_helper": {"installed": False}},
+    )
+    server = create_mcp()
+
+    result = await server.call_tool("editor_session", {"action": "doctor"})
+
+    assert result.structured_content["ready"] is False
+    assert result.structured_content["native_helper"]["installed"] is False
+
+
+@pytest.mark.anyio
+async def test_default_mcp_builds_services_once_on_first_control_call(monkeypatch):
+    services = fake_services()
+    build = Mock(return_value=services)
+    monkeypatch.setattr(mcp_server_module, "build_default_services", build)
+    server = create_mcp()
+
+    first = await server.call_tool(
+        "editor_timeline", {"action": "inspect", "session_id": "session-1"}
+    )
+    second = await server.call_tool(
+        "editor_timeline", {"action": "diff", "session_id": "session-1"}
+    )
+
+    assert first.structured_content == {"ok": True}
+    assert second.structured_content == {"ok": True}
+    build.assert_called_once_with()
 
 
 def test_mcp_module_help_exits_without_starting_stdio():

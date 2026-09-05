@@ -34,12 +34,25 @@ def test_controller_config_needs_no_cloud_keys(tmp_path: Path):
         env={"EDITOR_CLI_SESSION_ROOT": str(tmp_path / "sessions")}
     )
     assert cfg.session_root == (tmp_path / "sessions").resolve()
-    assert cfg.commandpost_url == "ws://127.0.0.1:27480/"
+    assert (
+        cfg.native_helper
+        == Path("~/Library/Application Support/Editor CLI/bin/editor-fcp-bridge")
+        .expanduser()
+        .resolve()
+    )
+    assert cfg.native_protocol_version == 1
+    assert cfg.native_action_timeout_seconds == 120
     assert cfg.max_passes == 3
 
 
-def test_controller_config_rejects_non_loopback_commandpost():
-    with pytest.raises(ConfigError, match="loopback"):
-        load_controller_config(
-            env={"EDITOR_CLI_COMMANDPOST_URL": "ws://192.168.1.50:27480/"}
-        )
+@pytest.mark.parametrize("value", ["0", "-1", "3601", "not-an-integer"])
+def test_controller_config_rejects_invalid_native_action_timeout(value):
+    with pytest.raises(ConfigError, match="NATIVE_ACTION_TIMEOUT"):
+        load_controller_config(env={"EDITOR_CLI_NATIVE_ACTION_TIMEOUT_SECONDS": value})
+
+
+def test_controller_config_resolves_native_helper_override(tmp_path):
+    cfg = load_controller_config(
+        env={"EDITOR_CLI_NATIVE_HELPER": str(tmp_path / "bridge")}
+    )
+    assert cfg.native_helper == (tmp_path / "bridge").resolve()

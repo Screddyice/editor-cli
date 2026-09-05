@@ -102,6 +102,39 @@ final class ProbeTests: XCTestCase {
       UInt(kAENeverInteract)
     )
   }
+
+  func testPermissionRequesterEnablesBothPermissionPrompts() throws {
+    let system = FakeFinalCut(
+      bundleID: "com.apple.FinalCutApp",
+      version: "12.3",
+      axTrusted: false,
+      automation: false
+    )
+    let permissions = RecordingPermissionTransport()
+
+    let result = try FinalCutPermissionRequester(
+      system: system, permissions: permissions
+    ).run()
+
+    XCTAssertFalse(result.accessibilityTrusted)
+    XCTAssertFalse(result.automationAuthorized)
+    XCTAssertEqual(permissions.accessibilityPrompt, true)
+    XCTAssertEqual(permissions.automationPrompt, true)
+    XCTAssertEqual(permissions.processIdentifier, 100)
+  }
+
+  func testPermissionRequesterRequiresExactFinalCutIdentity() throws {
+    let permissions = RecordingPermissionTransport()
+    let system = FakeFinalCut(bundleID: "example.fake", version: "12.3")
+
+    XCTAssertThrowsError(
+      try FinalCutPermissionRequester(system: system, permissions: permissions).run()
+    ) { error in
+      XCTAssertEqual(error as? FinalCutProbeError, .wrongBundleIdentifier)
+    }
+    XCTAssertNil(permissions.accessibilityPrompt)
+    XCTAssertNil(permissions.automationPrompt)
+  }
 }
 
 struct FakeFinalCut: FinalCutSystem {
@@ -164,5 +197,22 @@ final class RecordingAutomationTransport: FinalCutAutomationTransport {
     self.askUserIfNeeded = askUserIfNeeded
     self.sendOptions = sendOptions
     return ["Canary Library"]
+  }
+}
+
+final class RecordingPermissionTransport: FinalCutPermissionTransport {
+  var accessibilityPrompt: Bool?
+  var automationPrompt: Bool?
+  var processIdentifier: pid_t?
+
+  func accessibilityTrusted(prompt: Bool) -> Bool {
+    accessibilityPrompt = prompt
+    return false
+  }
+
+  func automationAuthorized(processIdentifier: pid_t, prompt: Bool) -> Bool {
+    self.processIdentifier = processIdentifier
+    automationPrompt = prompt
+    return false
   }
 }

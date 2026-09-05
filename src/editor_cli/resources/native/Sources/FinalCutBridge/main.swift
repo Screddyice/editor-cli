@@ -47,6 +47,20 @@ private func result(_ fields: [String: Any]) -> [String: Any] {
   return ["ok": true, "result": versioned]
 }
 
+private func requestPermissions() throws -> [String: Any] {
+  let requested = try FinalCutPermissionRequester(
+    system: LiveFinalCutSystem(),
+    permissions: LiveFinalCutPermissionTransport()
+  ).run()
+  return [
+    "ok": true,
+    "result": [
+      "accessibilityTrusted": requested.accessibilityTrusted,
+      "automationAuthorized": requested.automationAuthorized,
+    ],
+  ]
+}
+
 private func dispatch(_ request: Request) throws -> [String: Any] {
   _ = try SessionPath(root: request.sessionRoot)
   let payload = try ActionPayload.decode(request)
@@ -97,13 +111,25 @@ private func dispatch(_ request: Request) throws -> [String: Any] {
   }
 }
 
-do {
-  let request = try StrictProtocol.decodeRequest(readRequest())
-  writeResponse(try dispatch(request))
-} catch {
-  writeResponse([
-    "ok": false,
-    "error": (error as? LocalizedError)?.errorDescription ?? "Protocol error.",
-  ])
-  exit(1)
+if Array(CommandLine.arguments.dropFirst()) == ["--request-permissions"] {
+  do {
+    writeResponse(try requestPermissions())
+  } catch {
+    writeResponse([
+      "ok": false,
+      "error": (error as? LocalizedError)?.errorDescription ?? "Permission request failed.",
+    ])
+    exit(1)
+  }
+} else {
+  do {
+    let request = try StrictProtocol.decodeRequest(readRequest())
+    writeResponse(try dispatch(request))
+  } catch {
+    writeResponse([
+      "ok": false,
+      "error": (error as? LocalizedError)?.errorDescription ?? "Protocol error.",
+    ])
+    exit(1)
+  }
 }

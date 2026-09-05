@@ -66,6 +66,44 @@ protocol TimedFinalCutAutomationTransport: FinalCutAutomationTransport {
   ) throws -> [String]
 }
 
+protocol FinalCutPermissionTransport {
+  func accessibilityTrusted(prompt: Bool) -> Bool
+  func automationAuthorized(processIdentifier: pid_t, prompt: Bool) -> Bool
+}
+
+struct FinalCutPermissionRequestResult: Equatable {
+  let accessibilityTrusted: Bool
+  let automationAuthorized: Bool
+}
+
+struct FinalCutPermissionRequester<
+  System: FinalCutSystem, Permissions: FinalCutPermissionTransport
+> {
+  let system: System
+  let permissions: Permissions
+
+  func run() throws -> FinalCutPermissionRequestResult {
+    let applications = system.runningApplications(
+      bundleIdentifier: FinalCutProbe<System>.bundleIdentifier
+    )
+    guard applications.count == 1, let application = applications.first else {
+      throw FinalCutProbeError.unexpectedProcessCount
+    }
+    guard application.bundleIdentifier == FinalCutProbe<System>.bundleIdentifier else {
+      throw FinalCutProbeError.wrongBundleIdentifier
+    }
+    guard application.version == FinalCutProbe<System>.supportedVersion else {
+      throw FinalCutProbeError.unsupportedVersion
+    }
+    return FinalCutPermissionRequestResult(
+      accessibilityTrusted: permissions.accessibilityTrusted(prompt: true),
+      automationAuthorized: permissions.automationAuthorized(
+        processIdentifier: application.processIdentifier, prompt: true
+      )
+    )
+  }
+}
+
 struct FinalCutAutomationReader<Transport: FinalCutAutomationTransport> {
   let transport: Transport
 
@@ -744,5 +782,26 @@ struct NativeFinalCutAutomationTransport: TimedFinalCutAutomationTransport {
     value.utf8.reduce(0) { result, byte in
       (result << 8) | OSType(byte)
     }
+  }
+}
+
+struct LiveFinalCutPermissionTransport: FinalCutPermissionTransport {
+  func accessibilityTrusted(prompt: Bool) -> Bool {
+    let option = kAXTrustedCheckOptionPrompt.takeUnretainedValue() as String
+    let options = [option: prompt] as CFDictionary
+    return AXIsProcessTrustedWithOptions(options)
+  }
+
+  func automationAuthorized(processIdentifier: pid_t, prompt: Bool) -> Bool {
+    let target = NSAppleEventDescriptor(processIdentifier: processIdentifier)
+    guard let targetDescription = target.aeDesc else {
+      return false
+    }
+    return AEDeterminePermissionToAutomateTarget(
+      targetDescription,
+      AEEventClass(kAECoreSuite),
+      AEEventID(kAEGetData),
+      prompt
+    ) == noErr
   }
 }

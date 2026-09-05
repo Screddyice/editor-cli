@@ -2,14 +2,20 @@
 
 from __future__ import annotations
 
-import plistlib
-import subprocess
+import hashlib
+import json
 import sys
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Literal, Protocol
 
-from editor_cli.adapters.commandpost import CommandPostClient, CommandPostError
+from editor_cli.adapters.native_final_cut import (
+    NativeFinalCutClient,
+    NativeFinalCutError,
+    NativeProbe,
+)
+from editor_cli.config import ControllerConfig, load_controller_config
 
 try:
     from mcp.server.mcpserver import MCPServer
@@ -49,115 +55,144 @@ class UnconfiguredService:
         )
 
 
-LATENITE_APP_IDS = frozenset(
+_NATIVE_METADATA_KEYS = frozenset(
     {
-        "com.latenitefilms.ATEMExporter",
-        "com.latenitefilms.BRAWToolbox",
-        "com.latenitefilms.Capacitor",
-        "com.latenitefilms.FastCollections",
-        "com.latenitefilms.GyroflowToolbox",
-        "com.latenitefilms.LUTRobot",
-        "com.latenitefilms.MarkerToolbox",
-        "com.latenitefilms.Metaburner",
-        "com.latenitefilms.NewsImport",
-        "com.latenitefilms.RecallToolbox",
-        "com.latenitefilms.TransferToolbox",
-        "com.latenitefilms.ScriptStar",
-        "com.latenitefilms.NotionToolbox",
-        "com.latenitefilms.SmartScriptPro",
-        "com.latenitefilms.SyncScriptPro",
-        "com.latenitefilms.TimecodeToolbox",
-        "com.latenitefilms.VFXToolbox",
-        "com.latenitefilms.KeyframeToolbox",
-        "com.latenitefilms.OutputToolbox",
-        "com.latenitefilms.SmartLevels",
+        "managed_by",
+        "metadata_version",
+        "protocol_version",
+        "sha256",
+        "source_sha256",
     }
 )
+_NATIVE_MANAGED_BY = "editor-cli.native-final-cut-helper"
+_FINAL_CUT_BUNDLE_ID = "com.apple.FinalCutApp"
+_FINAL_CUT_VERSION = "12.3"
 
 
-def _find_app(
-    applications: Path, pattern: str, bundle_identifier: str
-) -> tuple[Path | None, dict[str, Any]]:
-    for candidate in sorted(applications.glob(pattern)):
-        info_path = candidate / "Contents/Info.plist"
-        if not info_path.is_file():
-            continue
-        try:
-            with info_path.open("rb") as handle:
-                info = plistlib.load(handle)
-        except (OSError, plistlib.InvalidFileException):
-            continue
-        if info.get("CFBundleIdentifier") == bundle_identifier:
-            return candidate, info
-    return None, {}
+def _is_sha256(value: object) -> bool:
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(character in "0123456789abcdef" for character in value)
+    )
+
+
+def _sha256(path: Path) -> str:
+    digest = hashlib.sha256()
+    with path.open("rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _native_metadata(
+    config: ControllerConfig,
+) -> tuple[dict[str, Any] | None, str | None]:
+    helper = config.native_helper.expanduser().resolve()
+    metadata_path = helper.with_suffix(".json")
+    if (
+        not helper.is_file()
+        or helper.is_symlink()
+        or not metadata_path.is_file()
+        or metadata_path.is_symlink()
+    ):
+        return None, None
+    try:
+        value = json.loads(metadata_path.read_text(encoding="utf-8"))
+        helper_sha256 = _sha256(helper)
+    except (json.JSONDecodeError, OSError, UnicodeError):
+        return None, None
+    if (
+        not isinstance(value, dict)
+        or set(value) != _NATIVE_METADATA_KEYS
+        or value.get("managed_by") != _NATIVE_MANAGED_BY
+        or type(value.get("metadata_version")) is not int
+        or value.get("metadata_version") != 1
+        or type(value.get("protocol_version")) is not int
+        or value.get("protocol_version") != config.native_protocol_version
+        or not _is_sha256(value.get("sha256"))
+        or not _is_sha256(value.get("source_sha256"))
+        or value.get("sha256") != helper_sha256
+    ):
+        return None, helper_sha256
+    return value, helper_sha256
 
 
 def device_report(
-    applications: Path = Path("/Applications"),
+    config: ControllerConfig | None = None,
     *,
-    listener_runner=subprocess.run,
-    skill_paths: tuple[Path, Path] | None = None,
+    probe: Callable[[Path], NativeProbe] | None = None,
 ) -> dict[str, Any]:
-    final_cut, info = _find_app(
-        applications, "*Final Cut*.app", "com.apple.FinalCutApp"
-    )
-    reported_final_cut = final_cut or applications / "Final Cut Pro.app"
-    commandpost, commandpost_info = _find_app(
-        applications, "CommandPost.app", "org.latenitefilms.CommandPost"
-    )
-    license_app = None
-    for candidate in sorted(applications.glob("*.app")):
-        info_path = candidate / "Contents/Info.plist"
-        if not info_path.is_file():
-            continue
-        try:
-            with info_path.open("rb") as handle:
-                candidate_info = plistlib.load(handle)
-        except (OSError, plistlib.InvalidFileException):
-            continue
-        if candidate_info.get("CFBundleIdentifier") in LATENITE_APP_IDS:
-            license_app = candidate.stem
-            break
-
-    bridge: dict[str, Any] = {"available": False, "loopback_only": False}
-    try:
-        bridge = {
-            "available": True,
-            **CommandPostClient("ws://127.0.0.1:27480/").doctor(runner=listener_runner),
-        }
-    except CommandPostError as exc:
-        bridge["error"] = str(exc)
-
-    codex_watch, claude_watch = skill_paths or (
-        Path("~/.codex/skills/watch/SKILL.md").expanduser(),
-        Path("~/.claude/skills/watch/SKILL.md").expanduser(),
-    )
-    report = {
-        "final_cut": {
-            "installed": final_cut is not None,
-            "version": info.get("CFBundleShortVersionString"),
-            "build": info.get("CFBundleVersion"),
-            "path": str(reported_final_cut),
+    config = config or load_controller_config()
+    helper = config.native_helper.expanduser().resolve()
+    metadata, installed_sha256 = _native_metadata(config)
+    report: dict[str, Any] = {
+        "native_helper": {
+            "path": str(helper),
+            "installed": helper.is_file() and not helper.is_symlink(),
+            "metadata_path": str(helper.with_suffix(".json")),
+            "metadata_valid": metadata is not None,
+            "sha256": installed_sha256,
+            "protocol_version": (
+                metadata.get("protocol_version") if metadata is not None else None
+            ),
+            "compatible": False,
         },
-        "commandpost": {
-            "installed": commandpost is not None,
-            "path": str(commandpost or applications / "CommandPost.app"),
-            "version": commandpost_info.get("CFBundleShortVersionString"),
-            "license_app": license_app,
-            "bridge": bridge,
-        },
-        "watch": {
-            "codex": codex_watch.is_file(),
-            "claude_code": claude_watch.is_file(),
-        },
+        "final_cut": {"bundle_id": None, "version": None, "compatible": False},
+        "permissions": {"accessibility": False, "automation": False},
+        "dialogs": [],
+        "ready": False,
     }
+    if metadata is None:
+        report["error"] = "Native Final Cut helper metadata is missing or invalid"
+        return report
+
+    probe_call = (
+        probe
+        or NativeFinalCutClient(
+            helper, action_timeout=config.native_action_timeout_seconds
+        ).probe
+    )
+    try:
+        state = probe_call(config.session_root)
+    except (NativeFinalCutError, OSError, RuntimeError, ValueError) as exc:
+        report["error"] = str(exc)
+        return report
+
+    helper_compatible = bool(
+        state.protocol_version == config.native_protocol_version
+        and state.helper_sha256 == metadata["sha256"]
+        and state.helper_sha256 == installed_sha256
+    )
+    final_cut_compatible = bool(
+        state.final_cut_bundle_id == _FINAL_CUT_BUNDLE_ID
+        and state.final_cut_version == _FINAL_CUT_VERSION
+    )
+    dialogs = [{"role": dialog.role, "title": dialog.title} for dialog in state.dialogs]
+    report["native_helper"].update(
+        {
+            "sha256": state.helper_sha256,
+            "protocol_version": state.protocol_version,
+            "compatible": helper_compatible,
+        }
+    )
+    report["final_cut"] = {
+        "bundle_id": state.final_cut_bundle_id,
+        "version": state.final_cut_version,
+        "compatible": final_cut_compatible,
+    }
+    report["permissions"] = {
+        "accessibility": state.accessibility,
+        "automation": state.automation,
+    }
+    report["dialogs"] = dialogs
     report["ready"] = bool(
-        report["final_cut"]["installed"]
-        and report["commandpost"]["installed"]
-        and report["commandpost"]["license_app"]
-        and report["commandpost"]["bridge"]["loopback_only"]
-        and report["watch"]["codex"]
-        and report["watch"]["claude_code"]
+        helper_compatible
+        and final_cut_compatible
+        and state.accessibility
+        and state.automation
+        and state.ready
+        and not dialogs
     )
     return report
 
@@ -174,7 +209,14 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         # accepts unknown keys, which is unsafe for an application controller.
         ArgModelBase.model_config["extra"] = "forbid"
 
-    registry = services or build_default_services()
+    registry = services
+
+    def service_registry() -> ServiceRegistry:
+        nonlocal registry
+        if registry is None:
+            registry = build_default_services()
+        return registry
+
     server = MCPServer(
         "editor-cli",
         instructions=(
@@ -190,7 +232,9 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         session_id: str | None = None,
     ) -> dict[str, Any]:
         """Inspect device readiness and manage persisted edit sessions."""
-        return await registry.session.dispatch(
+        if action == "doctor" and services is None:
+            return device_report()
+        return await service_registry().session.dispatch(
             action, prompt=prompt, session_id=session_id
         )
 
@@ -201,7 +245,7 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         edit_program: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Inspect or change a session timeline through typed edit operations."""
-        return await registry.timeline.dispatch(
+        return await service_registry().timeline.dispatch(
             action, session_id=session_id, edit_program=edit_program
         )
 
@@ -213,7 +257,7 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         purpose: str | None = None,
     ) -> dict[str, Any]:
         """Acquire public HTTPS media or list session-approved assets."""
-        return await registry.media.dispatch(
+        return await service_registry().media.dispatch(
             action, session_id=session_id, url=url, purpose=purpose
         )
 
@@ -225,7 +269,7 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         report: dict[str, Any] | None = None,
     ) -> dict[str, Any]:
         """Read rendered evidence and record required-edit checks."""
-        return await registry.verify.dispatch(
+        return await service_registry().verify.dispatch(
             action,
             session_id=session_id,
             pass_number=pass_number,

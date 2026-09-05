@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import subprocess
 
 import typer
 
@@ -12,7 +13,9 @@ app = typer.Typer(
     add_completion=False,
 )
 session_app = typer.Typer(help="Inspect or resume a persisted Final Cut edit session.")
+permissions_app = typer.Typer(help="Request native Final Cut controller permissions.")
 app.add_typer(session_app, name="session")
+app.add_typer(permissions_app, name="permissions")
 
 
 @app.callback()
@@ -25,17 +28,12 @@ def setup_controller(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show host changes without applying them."
     ),
-    upgrade_commandpost: bool = typer.Option(
-        False,
-        "--upgrade-commandpost",
-        help="Replace a different CommandPost version with the pinned release.",
-    ),
 ) -> None:
     """Install and configure the local Final Cut controller."""
     from editor_cli.setup import SetupError, run_setup
 
     try:
-        result = run_setup(dry_run=dry_run, upgrade_commandpost=upgrade_commandpost)
+        result = run_setup(dry_run=dry_run)
     except (SetupError, OSError) as exc:
         typer.secho(f"Setup failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
@@ -56,30 +54,58 @@ def doctor() -> None:
     from editor_cli.mcp_server import device_report
 
     report = device_report()
+    helper = report["native_helper"]
+    typer.echo(
+        f"{'✓' if helper.get('compatible') else '✗'} Native helper protocol "
+        f"{helper.get('protocol_version') or 'unknown'}"
+    )
     final_cut = report["final_cut"]
-    if final_cut["installed"]:
+    typer.echo(
+        f"{'✓' if final_cut.get('compatible') else '✗'} Final Cut Pro "
+        f"{final_cut.get('version') or 'not running'}"
+    )
+    permissions = report["permissions"]
+    typer.echo(
+        f"{'✓' if permissions['accessibility'] else '✗'} Accessibility permission"
+    )
+    typer.echo(f"{'✓' if permissions['automation'] else '✗'} Automation permission")
+    dialogs = report["dialogs"]
+    if dialogs:
         typer.echo(
-            f"✓ Final Cut Pro {final_cut['version']} (build {final_cut['build']})"
+            "✗ Blocking dialogs: " + ", ".join(item["title"] for item in dialogs)
         )
     else:
-        typer.echo("✗ Final Cut Pro is not installed")
-    commandpost = report["commandpost"]
-    typer.echo(
-        f"{'✓' if commandpost['installed'] else '✗'} CommandPost "
-        f"{commandpost.get('version') or ('installed' if commandpost['installed'] else 'missing')}"
-    )
-    typer.echo(
-        f"{'✓' if commandpost.get('license_app') else '✗'} LateNite license app"
-        + (f": {commandpost['license_app']}" if commandpost.get("license_app") else "")
-    )
-    bridge = commandpost.get("bridge", {})
-    typer.echo(
-        f"{'✓' if bridge.get('loopback_only') else '✗'} CommandPost loopback bridge"
-    )
-    watch = report["watch"]
-    typer.echo(f"{'✓' if watch['codex'] else '✗'} Codex watch skill")
-    typer.echo(f"{'✓' if watch['claude_code'] else '✗'} Claude Code watch skill")
+        typer.echo("✓ No blocking dialogs")
+    if report.get("error"):
+        typer.echo(f"  {report['error']}")
     if not report["ready"]:
+        raise typer.Exit(1)
+
+
+@permissions_app.command("request")
+def request_permissions() -> None:
+    """Ask macOS for Accessibility and Final Cut Automation permission."""
+    from editor_cli.config import load_controller_config
+
+    config = load_controller_config()
+    try:
+        completed = subprocess.run(
+            [str(config.native_helper), "--request-permissions"],
+            capture_output=True,
+            check=False,
+            text=True,
+            timeout=config.native_action_timeout_seconds,
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        typer.secho(f"Permission request failed: {exc}", fg=typer.colors.RED, err=True)
+        raise typer.Exit(1)
+    if completed.stdout:
+        typer.echo(completed.stdout.rstrip("\n"))
+    if completed.returncode != 0:
+        message = completed.stderr.strip() or "Native helper rejected the request"
+        typer.secho(
+            f"Permission request failed: {message}", fg=typer.colors.RED, err=True
+        )
         raise typer.Exit(1)
 
 

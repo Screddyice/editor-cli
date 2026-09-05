@@ -2,6 +2,16 @@ import XCTest
 @testable import FinalCutBridge
 
 final class ProtocolTests: XCTestCase {
+    func testJSONProtocolKeepsExactlySevenActions() {
+        XCTAssertEqual(
+            Set(Action.allCases.map(\.rawValue)),
+            Set([
+                "probe", "duplicate_project", "export_xml", "import_xml",
+                "open_project", "share_preview", "inspect_dialogs",
+            ])
+        )
+    }
+
     func testAllowedActionDecodes() throws {
         let data = #"{"protocolVersion":1,"action":"probe","sessionRoot":"/tmp/session","payload":{}}"#.data(using: .utf8)!
         let request = try StrictProtocol.decodeRequest(data)
