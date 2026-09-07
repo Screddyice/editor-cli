@@ -2,6 +2,7 @@ import Foundation
 
 enum Action: String, Codable, CaseIterable {
     case probe
+    case inspectActiveProject = "inspect_active_project"
     case duplicateProject = "duplicate_project"
     case exportXML = "export_xml"
     case importXML = "import_xml"

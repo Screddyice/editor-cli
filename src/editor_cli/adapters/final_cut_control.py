@@ -54,8 +54,10 @@ class FinalCutControl:
         self.session_root = root
 
     async def active_projects(self) -> tuple[ProjectIdentity, ...]:
-        probe = await self._call_native(self.native.probe, self.session_root)
-        return (probe.active_project,) if probe.active_project is not None else ()
+        active = await self._call_native(
+            self.native.inspect_active_project, self.session_root
+        )
+        return (active,) if active is not None else ()
 
     async def export_xml(self, identity: ProjectIdentity, destination: Path) -> None:
         output = destination.expanduser().resolve()

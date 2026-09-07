@@ -219,7 +219,7 @@ build, and MCP entry-point check on macOS. A separate Python 3.10 job checks
 the minimum supported version. Offline tests include generated-media
 renders and simulated crash recovery. They do not prove live Final Cut control.
 
-Local verification on 2026-09-07: 532 Python tests, 67 Swift tests, and 22
+Local verification on 2026-09-07: 546 Python tests, 105 Swift tests, and 22
 Python 3.10 setup/locking tests passed. Ruff lint/format, wheel/sdist builds,
 and MCP startup checks passed. Code review covered interruption recovery,
 media provenance and probing, and the optional-transcription voice-over path.
@@ -231,12 +231,27 @@ Event `all` selector as an absolute ordinal in host byte order; malformed
 inspection replies no longer masquerade as permission denial. The MCP adapter
 supports both v1 wire-alias fields and v2 snake-case result fields.
 
-The disposable canary imports its generated project, but native navigation does
-not yet open or recognize that timeline in Creator Studio's current accessibility
-tree. Opening the test project through computer use confirmed the import, not
-native-controller acceptance. No native edit/Share/recovery pass or Codex/Claude
-preview-hash comparison has completed. Keep PR #18 draft. No real user footage
-has been edited.
+Creator Studio renamed and moved the mutation menus. A live read of the running
+app's accessibility menu bar on 2026-09-07 gives the three exact titles the
+bridge presses: `Edit > Duplicate Project As…` (Final Cut 11 kept it under
+File), `File > Export XML…`, and `File > Share > Export File (default)…`.
+All three carry the U+2026 ellipsis, not three periods, so the old ASCII
+constants matched nothing and every mutation timed out. `FinalCutMenu` now holds
+the live strings, and menu traversal walks direct children at each hop instead of
+searching the whole subtree.
+
+Browser navigation follows the same tree. The controller discloses the library
+row, selects the event row, then presses the project tile that appears in the
+browser. `inspect_active_project` reads the open timeline from the toolbar's
+`projectNamePopUpButton`, reveals that project in the browser, and returns the
+library, event, and project it lands on.
+
+Rebuilding the helper resets its Automation grant, because macOS keys Apple Event
+consent to the exact binary. Approve `editor-cli permissions request` once after
+each helper install, then `editor-cli doctor` shows five checks passing. The
+disposable canary still needs that approval before it can run an end-to-end
+edit/Share/recovery pass, so PR #18 stays draft. No real user footage has been
+edited.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)

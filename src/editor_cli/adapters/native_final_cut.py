@@ -127,6 +127,17 @@ class NativeFinalCutClient:
             active_project=active,
         )
 
+    def inspect_active_project(self, session_root: Path) -> ProjectIdentity | None:
+        """Identify the open timeline, revealing its project in the browser."""
+        result = self._invoke(
+            "inspect_active_project",
+            {"timeout": self._action_timeout},
+            session_root,
+        )
+        _require_keys(result, {"protocolVersion", "project"}, "active project result")
+        project = result["project"]
+        return None if project is None else _decode_identity(project)
+
     def duplicate_project(
         self, identity: ProjectIdentity, name: str, session_root: Path
     ) -> ProjectIdentity:

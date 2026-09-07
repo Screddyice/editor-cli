@@ -280,6 +280,16 @@ def test_rendered_watch_checks_reject_missing_frames_stale_and_unreadable_previe
     )
 
 
+@pytest.mark.anyio
+async def test_canary_opens_imported_project_before_waiting_for_active_timeline(
+    tmp_path,
+):
+    library = tmp_path / "Canary.fcpbundle"
+    control = _FakeFinalCut(library)
+    await fcp_live_canary._wait_for_project(control, library, timeout_seconds=1)
+    assert control.opened_project == "Editor CLI Canary Source"
+
+
 class _FakeFinalCut:
     def __init__(self, library: Path):
         self.identity = ProjectIdentity(

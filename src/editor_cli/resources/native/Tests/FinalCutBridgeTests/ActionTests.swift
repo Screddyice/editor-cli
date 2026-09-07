@@ -5,6 +5,21 @@ import XCTest
 @testable import FinalCutBridge
 
 final class ActionTests: XCTestCase {
+  func testExplicitProjectInspectionPayloadDecodesWithoutExpectedIdentity() throws {
+    let request = try StrictProtocol.decodeRequest(Data(
+      #"{"protocolVersion":1,"action":"inspect_active_project","sessionRoot":"/tmp/session","payload":{"timeout":2}}"#.utf8
+    ))
+    XCTAssertNoThrow(try ActionPayload.decode(request))
+  }
+
+  func testReadyProbeNeverReadsOrRevealsTheActiveProject() throws {
+    let system = FakeActionSystem(active: .canaryCandidate)
+    let result = try FinalCutProbe(system: system).run()
+    XCTAssertTrue(result.ready)
+    XCTAssertNil(result.activeProject)
+    XCTAssertEqual(system.activeProjectReads, 0)
+    XCTAssertTrue(system.menuPaths.isEmpty)
+  }
   func testActionPayloadRejectsUnknownKeys() throws {
     let data =
       #"{"protocolVersion":1,"action":"open_project","sessionRoot":"/tmp/session","payload":{"expected":{"library":"Canary","event":"Event","project":"Pass 1","duration_seconds":8},"timeout":2,"script":"id"}}"#
@@ -462,6 +477,57 @@ final class ActionTests: XCTestCase {
     XCTAssertTrue(status.matches(duration: 5 * 1_001 / 24_000))
   }
 
+  func testCreatorStudioTimelineUsesProjectToolbarAndMatchingViewer() throws {
+    let root = creatorStudioTimeline(duration: "08:00")
+    let status = try XCTUnwrap(LiveFinalCutAX(root: root).activeTimelineStatus(timeout: 2))
+    XCTAssertEqual(status.project, "Canary Unique")
+    XCTAssertEqual(status.duration, 8)
+  }
+
+  func testCreatorStudioTimelineRejectsViewerShowingAnotherClip() throws {
+    let root = creatorStudioTimeline(duration: "08:00", viewerTitle: "Source Clip")
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).activeTimelineStatus(timeout: 2))
+  }
+
+  func testCreatorStudioTimelineRejectsSelectionSummaryAsDuration() throws {
+    let root = creatorStudioTimeline(duration: "02:00 / 08:00")
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).activeTimelineStatus(timeout: 2))
+  }
+
+  func testCreatorStudioTimelineParsesTrimmedMinuteTimecode() throws {
+    let root = creatorStudioTimeline(duration: "01:02:15")
+    let status = try XCTUnwrap(LiveFinalCutAX(root: root).activeTimelineStatus(timeout: 2))
+    XCTAssertEqual(status.duration, 62.5)
+  }
+
+  private func creatorStudioTimeline(
+    duration: String, viewerTitle: String = "Canary Unique"
+  ) -> FakeFinalCutAXElement {
+    let title = FakeFinalCutAXElement(
+      role: "AXMenuButton", title: "Canary Unique",
+      identifier: "editor/timelineContainer/toolbar/projectNamePopUpButton"
+    )
+    let info = FakeFinalCutAXElement(
+      role: "AXStaticText", identifier: "editor/timelineContainer/toolbar/projectInfo",
+      description: "ProjectInfo"
+    )
+    _ = info.accessibilitySetString(duration, for: "AXValue")
+    let timeline = FakeFinalCutAXElement.group(children: [
+      .init(role: "AXLayoutArea", description: "Project Timeline"), title, info,
+    ])
+    let viewer = FakeFinalCutAXElement.group(children: [
+      .init(role: "AXStaticText", title: "1080p HD 30p, Stereo"),
+      .init(role: "AXImage", description: "F Viewer PlayerLabels Projects"),
+      .init(role: "AXStaticText", title: viewerTitle),
+    ])
+    let inspectorDecoy = FakeFinalCutAXElement.group(children: [
+      .init(role: "AXStaticText", title: "4K 60p, Stereo")
+    ])
+    return .application(children: [
+      .window(title: "Final Cut Pro", children: [timeline, viewer, inspectorDecoy])
+    ])
+  }
+
   func testActiveTimelineStatusRejectsProjectFormatDecoyOutsideProjectAncestry() throws {
     let projectTitle = FakeFinalCutAXElement(
       role: kAXStaticTextRole as String,
@@ -618,19 +684,155 @@ final class ActionTests: XCTestCase {
     }
   }
 
-  func testProjectRowSelectionStaysInsideLibraryAndEventAncestry() throws {
-    let target = FakeFinalCutAXElement.row("Pass 1")
-    let decoy = FakeFinalCutAXElement.row("Pass 1")
-    let root = FakeFinalCutAXElement.application(children: [
-      .row("Canary", children: [.row("Event", children: [target])]),
-      .row("Other", children: [.row("Event", children: [decoy])]),
+  func testProjectSelectionScopesFlatEventRowsToTheirLibrary() throws {
+    let (root, target, decoy, tile, open) = flatBrowser()
+    try LiveFinalCutAX(root: root).pressProjectRow(.canaryCandidate, timeout: 0.1)
+    XCTAssertEqual(target.accessibilityValue(for: "AXSelected") as? Bool, true)
+    XCTAssertNil(decoy.accessibilityValue(for: "AXSelected"))
+    XCTAssertTrue(tile.pressed)
+    XCTAssertFalse(open.pressed)
+  }
+
+  func testProjectSelectionRejectsMissingLibraryWithoutSelectingAnotherEvent() throws {
+    let (root, target, decoy, tile, open) = flatBrowser()
+    let missing = ProjectIdentity(library: "Missing", event: "Event", project: "Pass 1", duration: 8)
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).pressProjectRow(missing, timeout: 0.1))
+    XCTAssertNil(target.accessibilityValue(for: "AXSelected"))
+    XCTAssertNil(decoy.accessibilityValue(for: "AXSelected"))
+    XCTAssertFalse(tile.pressed)
+    XCTAssertFalse(open.pressed)
+  }
+
+  func testProjectSelectionDoesNotPressStaleSameNameTileAfterEventChange() throws {
+    let (root, _, _, tile, _) = flatBrowser(staleNavigation: true)
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).pressProjectRow(.canaryCandidate, timeout: 0.1))
+    XCTAssertFalse(tile.pressed)
+  }
+
+  func testActiveProjectRevealBindsTimelineToSelectedBrowserScope() throws {
+    let (root, _, decoy, _, _) = flatBrowser()
+    decoy.setTestAttribute("AXSelected", true)
+    let location = try XCTUnwrap(LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 1))
+    XCTAssertEqual(location, FinalCutProjectLocation(library: "Canary", event: "Event", project: "Pass 1"))
+  }
+
+  func testActiveProjectRevealRejectsSelectedTileWithDifferentName() throws {
+    let (root, _, _, tile, _) = flatBrowser()
+    tile.setTestAttribute("AXDescription", "Other Project")
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 0.1))
+  }
+
+  func testActiveProjectRevealRejectsTimelineSwitchDuringReveal() throws {
+    let (root, _, _, _, _) = flatBrowser(changeTimeline: true)
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 0.1))
+  }
+
+  func testActiveProjectRevealRejectsPreselectedSameNameWhenRevealDoesNothing() throws {
+    let (root, _, _, _, _) = flatBrowser(noOpReveal: true)
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 0.1))
+  }
+
+  func testMenuTraversalUsesDirectMenuInsteadOfNestedSubmenus() throws {
+    let reveal = FakeFinalCutAXElement.menuItem("Reveal Project in Browser")
+    let unrelated = FakeFinalCutAXElement.menuItem("New", children: [.menu(children: [.menuItem("Project…")])])
+    let root = FakeFinalCutAXElement.application(children: [.menuBar(children: [
+      .menuBarItem("File", children: [.menu(children: [unrelated, reveal])])
+    ])])
+    try LiveFinalCutAX(root: root).pressMenu(path: ["File", "Reveal Project in Browser"], timeout: 0.1)
+    XCTAssertTrue(reveal.pressed)
+    XCTAssertFalse(unrelated.pressed)
+  }
+
+  func testMutationMenusReachCreatorStudioCommands() throws {
+    let duplicate = FakeFinalCutAXElement.menuItem("Duplicate Project As…")
+    let export = FakeFinalCutAXElement.menuItem("Export XML…")
+    let share = FakeFinalCutAXElement.menuItem("Export File (default)…")
+    let root = FakeFinalCutAXElement.application(children: [.menuBar(children: [
+      .menuBarItem("Edit", children: [.menu(children: [duplicate])]),
+      .menuBarItem("File", children: [.menu(children: [export,
+        .menuItem("Share", children: [.menu(children: [share])])])])
+    ])])
+    let ax = LiveFinalCutAX(root: root)
+    try ax.pressMenu(path: FinalCutMenu.duplicate, timeout: 0.1)
+    try ax.pressMenu(path: FinalCutMenu.exportXML, timeout: 0.1)
+    try ax.pressMenu(path: FinalCutMenu.share, timeout: 0.1)
+    XCTAssertTrue(duplicate.pressed)
+    XCTAssertTrue(export.pressed)
+    XCTAssertTrue(share.pressed)
+  }
+
+  func testActiveProjectRevealRejectsHiddenSelectedEvent() throws {
+    let (root, target, _, _, _) = flatBrowser()
+    target.setTestAttribute("AXHidden", true)
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 0.1))
+  }
+
+  func testRevealRequiresVerifiedDeselectBeforeRevealing() throws {
+    let (root, _, _, _, _) = flatBrowser(noOpDeselect: true)
+    XCTAssertThrowsError(try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 0.1))
+  }
+
+  private func flatBrowser(changeTimeline: Bool = false, noOpReveal: Bool = false,
+    staleNavigation: Bool = false, noOpDeselect: Bool = false) -> (
+    FakeFinalCutAXElement, FakeFinalCutAXElement, FakeFinalCutAXElement,
+    FakeFinalCutAXElement, FakeFinalCutAXElement
+  ) {
+    func row(_ name: String, level: Double) -> FakeFinalCutAXElement {
+      let field = FakeFinalCutAXElement(role: "AXTextField", title: name)
+      let row = FakeFinalCutAXElement(
+        role: "AXRow", children: [.init(role: "AXCell", children: [.init(role: "AXCell", children: [field])])]
+      )
+      row.setTestAttribute("AXDisclosureLevel", level)
+      row.setTestAttribute("AXDisclosing", true)
+      return row
+    }
+    let target = row("Event", level: 1)
+    let decoy = row("Event", level: 1)
+    let outline = FakeFinalCutAXElement(role: "AXOutline", description: "Event media sidebar", children: [
+      row("Other", level: 0), decoy, row("Canary", level: 0), target,
     ])
-    let controller = LiveFinalCutAX(root: root)
-
-    try controller.pressProjectRow(.canaryCandidate, timeout: 2)
-
-    XCTAssertTrue(target.pressed)
-    XCTAssertFalse(decoy.pressed)
+    let tile = FakeFinalCutAXElement(role: "AXGroup", description: "Pass 1", children: [
+      .init(role: "AXTextField", title: "Pass 1", description: "display name")
+    ])
+    let oldTile = staleNavigation ? tile : FakeFinalCutAXElement(role: "AXGroup", description: "Pass 1",
+      children: [.init(role: "AXTextField", title: "Pass 1", description: "display name")])
+    let events = FakeFinalCutAXElement(role: "AXGroup", title: "events", children: [oldTile])
+    target.onSetBool = { value, attribute in
+      if value && attribute == "AXSelected" && !staleNavigation { events.children = [tile] }
+    }
+    let browser = FakeFinalCutAXElement(role: "AXScrollArea", description: "organizer", children: [
+      events
+    ])
+    browser.setTestAttribute("AXEnabled", NSNull())
+    let open = FakeFinalCutAXElement.menuItem("Open Clip")
+    let reveal = FakeFinalCutAXElement.menuItem("Reveal Project in Browser")
+    let deselect = FakeFinalCutAXElement.menuItem("Deselect All")
+    deselect.onPress = {
+      if !noOpDeselect { events.setTestElements("AXSelectedChildren", []) }
+    }
+    let projectTitle = FakeFinalCutAXElement(role: "AXMenuButton", title: "Pass 1",
+      identifier: "editor/timelineContainer/toolbar/projectNamePopUpButton")
+    let root = FakeFinalCutAXElement.application(children: [
+      .window(title: "Final Cut Pro", children: [outline, browser, projectTitle]),
+      .menuBar(children: [
+        .menuBarItem("Clip", children: [.menu(children: [open])]),
+        .menuBarItem("File", children: [.menu(children: [reveal])]),
+        .menuBarItem("Edit", children: [.menu(children: [deselect])]),
+      ]),
+    ])
+    events.setTestElements("AXSelectedChildren", [oldTile])
+    root.setTestElement("AXFocusedUIElement", events)
+    if noOpReveal { decoy.setTestAttribute("AXSelected", true) }
+    reveal.onPress = {
+      if noOpReveal { return }
+      events.children = [tile]
+      target.setTestAttribute("AXSelected", true)
+      decoy.setTestAttribute("AXSelected", false)
+      events.setTestElements("AXSelectedChildren", [tile])
+      root.setTestElement("AXFocusedUIElement", events)
+      if changeTimeline { projectTitle.setTestAttribute("AXTitle", "Different Timeline") }
+    }
+    return (root, target, decoy, tile, open)
   }
 
   func testExportSheetRequiresExactSheetUnderMainWindow() throws {
@@ -715,7 +917,7 @@ final class ActionTests: XCTestCase {
   }
 
   func testMenuTraversalRejectsWrongRoleAtIntermediateHop() {
-    let export = FakeFinalCutAXElement.menuItem("Export File (Default)...")
+    let export = FakeFinalCutAXElement.menuItem("Export File (default)…")
     let wrongShare = FakeFinalCutAXElement(
       role: kAXButtonRole as String, title: "Share", children: [export]
     )
@@ -871,9 +1073,24 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
 private final class FakeFinalCutAXElement: FinalCutAXElement {
   private var attributes: [String: Any]
   private var elementAttributes: [String: FakeFinalCutAXElement] = [:]
-  let children: [FakeFinalCutAXElement]
+  private var arrayAttributes: [String: [FakeFinalCutAXElement]] = [:]
+  var children: [FakeFinalCutAXElement]
   var pressed = false
   var writtenValue: String?
+  var onPress: (() -> Void)?
+  var onSetBool: ((Bool, String) -> Void)?
+
+  func setTestAttribute(_ name: String, _ value: Any) { attributes[name] = value }
+  func setTestElement(_ name: String, _ value: FakeFinalCutAXElement) { elementAttributes[name] = value }
+  func setTestElements(_ name: String, _ value: [FakeFinalCutAXElement]) { arrayAttributes[name] = value }
+  func accessibilityElements(for attribute: String) -> [any FinalCutAXElement] { arrayAttributes[attribute] ?? [] }
+
+  func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool {
+    attributes[attribute] = value
+    onSetBool?(value, attribute)
+    return true
+  }
+
 
   init(
     role: String,
@@ -1013,6 +1230,7 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
 
   func accessibilityPress() -> Bool {
     pressed = true
+    onPress?()
     return true
   }
 
@@ -1023,7 +1241,7 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
   }
 
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool {
-    attribute == kAXValueAttribute as String
+    ["AXValue", "AXSelected", "AXDisclosing", "AXSelectedChildren"].contains(attribute)
   }
 
   func isSameElement(as other: any FinalCutAXElement) -> Bool {

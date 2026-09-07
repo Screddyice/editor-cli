@@ -40,7 +40,8 @@ enum FinalCutProbeError: Error, Equatable, LocalizedError {
   var errorDescription: String? {
     switch self {
     case .unexpectedProcessCount: "Open Final Cut Pro 12.3 with one running application instance."
-    case .wrongBundleIdentifier: "Final Cut application bundle identity does not match com.apple.FinalCutApp."
+    case .wrongBundleIdentifier:
+      "Final Cut application bundle identity does not match com.apple.FinalCutApp."
     case .unsupportedVersion: "Final Cut Pro 12.3 is required for native control."
     }
   }
@@ -54,7 +55,8 @@ enum FinalCutAutomationError: Error, Equatable, LocalizedError {
 
   var errorDescription: String? {
     switch self {
-    case .notAuthorized: "Automation permission for Final Cut is missing; run editor-cli permissions request."
+    case .notAuthorized:
+      "Automation permission for Final Cut is missing; run editor-cli permissions request."
     case .invalidTarget: "Final Cut Automation target is invalid."
     case .eventFailed: "Final Cut library inspection failed or timed out."
     case .invalidReply: "Final Cut returned an invalid library inspection response."
@@ -188,12 +190,8 @@ struct FinalCutProbe<System: FinalCutSystem> {
       automationAuthorized = false
     }
 
-    var activeProject: ProjectIdentity?
     var blockingDialogs: [BlockingDialog] = []
     if let actionSystem = system as? any FinalCutActionSystem {
-      if accessibilityTrusted && automationAuthorized {
-        activeProject = try? actionSystem.activeProject(timeout: 5)
-      }
       if accessibilityTrusted {
         blockingDialogs =
           (try? actionSystem.blockingDialogs(timeout: 5).map(sanitizedDialog)) ?? []
@@ -207,7 +205,7 @@ struct FinalCutProbe<System: FinalCutSystem> {
       accessibilityTrusted: accessibilityTrusted,
       automationAuthorized: automationAuthorized,
       libraryNames: libraryNames,
-      activeProject: activeProject,
+      activeProject: nil,
       blockingDialogs: blockingDialogs
     )
   }
@@ -249,22 +247,24 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
   }
 
   func activeProject(timeout: TimeInterval) throws -> ProjectIdentity? {
-    let deadline = try actionDeadline(timeout)
-    let processIdentifier = try verifiedActionProcessIdentifier(
-      timeout: remaining(before: deadline)
-    )
-    let status = try LiveFinalCutAX(processIdentifier: processIdentifier).activeTimelineStatus(
-      timeout: remaining(before: deadline)
-    )
-    guard let status else {
-      return nil
-    }
-    let locations = try NativeFinalCutProjectReader().locations(
-      processIdentifier: processIdentifier, timeout: remaining(before: deadline)
-    )
-    let identity = try ActiveProjectResolver.resolve(status: status, locations: locations)
-    _ = try remaining(before: deadline)
-    return identity
+    try FinalCutInspectionCoordinator(
+      verify: { try self.verifiedActionProcessIdentifier(timeout: $0) },
+      reveal: { processIdentifier, remaining in
+        try LiveFinalCutAX(processIdentifier: processIdentifier)
+          .revealActiveProjectLocation(timeout: remaining)
+      },
+      readRecords: { processIdentifier, location, remaining in
+        try TargetedFinalCutProjectReader().records(
+          processIdentifier: processIdentifier, library: location.library, event: location.event,
+          timeout: remaining
+        )
+      },
+      readStatus: { processIdentifier, remaining in
+        try LiveFinalCutAX(processIdentifier: processIdentifier).activeTimelineStatus(
+          timeout: remaining)
+      },
+      clock: { self.monotonicTime() }
+    ).inspect(timeout: timeout)
   }
 
   func projectMatchCount(
@@ -274,8 +274,9 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     let processIdentifier = try verifiedActionProcessIdentifier(
       timeout: remaining(before: deadline)
     )
-    let count = try NativeFinalCutProjectReader().locations(
-      processIdentifier: processIdentifier, timeout: remaining(before: deadline)
+    let count = try TargetedFinalCutProjectReader().records(
+      processIdentifier: processIdentifier, library: identity.library, event: identity.event,
+      timeout: remaining(before: deadline)
     )
     .filter {
       $0.library == identity.library && $0.event == identity.event
@@ -289,25 +290,9 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
   func activeProjectMatches(
     _ expected: ProjectIdentity, timeout: TimeInterval
   ) throws -> Bool {
-    let deadline = try actionDeadline(timeout)
-    let processIdentifier = try verifiedActionProcessIdentifier(
-      timeout: remaining(before: deadline)
-    )
-    guard
-      let status = try LiveFinalCutAX(processIdentifier: processIdentifier).activeTimelineStatus(
-        timeout: remaining(before: deadline)
-      )
-    else {
-      return false
-    }
-    let locations = try NativeFinalCutProjectReader().locations(
-      processIdentifier: processIdentifier, timeout: remaining(before: deadline)
-    )
-    let matches = try ActiveProjectResolver.matches(
-      status: status, locations: locations, expected: expected
-    )
-    _ = try remaining(before: deadline)
-    return matches
+    guard let active = try activeProject(timeout: timeout) else { return false }
+    return active.library == expected.library && active.event == expected.event
+      && active.project == expected.project && abs(active.duration - expected.duration) < 0.000_001
   }
 
   func pressMenu(path: [String], timeout: TimeInterval) throws {
@@ -534,6 +519,69 @@ struct FinalCutProjectLocation: Equatable {
   let project: String
 }
 
+struct FinalCutInspectionError: LocalizedError {
+  let stage: String
+  let underlying: Error
+  var errorDescription: String? {
+    "Final Cut \(stage): \((underlying as? LocalizedError)?.errorDescription ?? String(describing: underlying))"
+  }
+}
+
+struct FinalCutInspectionCoordinator {
+  let verify: (TimeInterval) throws -> pid_t
+  let reveal: (pid_t, TimeInterval) throws -> FinalCutProjectLocation?
+  let readRecords: (pid_t, FinalCutProjectLocation, TimeInterval) throws -> [NativeProjectRecord]
+  let readStatus: (pid_t, TimeInterval) throws -> LiveTimelineStatus?
+  let clock: () -> TimeInterval
+
+  func inspect(timeout: TimeInterval) throws -> ProjectIdentity? {
+    var stage = "initial verification"
+    do {
+      let started = clock()
+      let deadline = started + timeout
+      guard timeout.isFinite, timeout > 0, timeout <= 3600,
+        started.isFinite, deadline.isFinite, deadline > started
+      else { throw FinalCutActionError.invalidTimeout }
+      func remaining() throws -> TimeInterval {
+        let value = deadline - clock()
+        guard value.isFinite, value > 0 else { throw FinalCutActionError.timedOut }
+        return value
+      }
+      func timed<Value>(_ operation: (TimeInterval) throws -> Value) throws -> Value {
+        let value = try operation(remaining())
+        _ = try remaining()
+        return value
+      }
+      let processIdentifier = try timed(verify)
+      stage = "active-project reveal"
+      guard let location = try timed({ try reveal(processIdentifier, $0) }) else { return nil }
+      stage = "scoped project metadata"
+      let records = try timed({ try readRecords(processIdentifier, location, $0) })
+        .filter { $0.project == location.project }
+      guard records.count == 1, let record = records.first else {
+        throw FinalCutActionError.ambiguousProject
+      }
+      guard record.library == location.library, record.event == location.event else {
+        throw FinalCutActionError.identityMismatch
+      }
+      stage = "active-project scope revalidation"
+      guard try timed({ try reveal(processIdentifier, $0) }) == location else {
+        throw FinalCutActionError.identityMismatch
+      }
+      stage = "timeline metadata comparison"
+      guard let status = try timed({ try readStatus(processIdentifier, $0) }),
+        status.project == record.project, status.matches(duration: record.duration),
+        abs(status.timebase.frameDuration - record.frameDuration) < 0.000_001
+      else { throw FinalCutActionError.identityMismatch }
+      let identity = try ActiveProjectResolver.resolve(status: status, locations: [location])
+      _ = try remaining()
+      return identity
+    } catch {
+      throw FinalCutInspectionError(stage: stage, underlying: error)
+    }
+  }
+}
+
 enum ActiveProjectResolver {
   static func resolve(
     status: LiveTimelineStatus, locations: [FinalCutProjectLocation]
@@ -582,91 +630,6 @@ enum ActiveProjectResolver {
       throw FinalCutActionError.ambiguousProject
     }
     return namedLocations.first
-  }
-}
-
-private struct NativeFinalCutProjectReader {
-  func locations(
-    processIdentifier: pid_t, timeout: TimeInterval
-  ) throws -> [FinalCutProjectLocation] {
-    guard
-      NSRunningApplication(processIdentifier: processIdentifier)?.bundleIdentifier
-        == FinalCutProbe<LiveFinalCutSystem>.bundleIdentifier
-    else {
-      throw FinalCutProbeError.wrongBundleIdentifier
-    }
-
-    let script = """
-      set fieldSep to (ASCII character 31)
-      set recordSep to (ASCII character 30)
-      set output to ""
-      tell application id "com.apple.FinalCutApp"
-        repeat with libraryItem in libraries
-          set libraryName to name of libraryItem
-          repeat with eventItem in (events of libraryItem)
-            set eventName to name of eventItem
-            repeat with projectItem in (projects of eventItem)
-              set output to output & libraryName & fieldSep & eventName & fieldSep & (name of projectItem) & recordSep
-            end repeat
-          end repeat
-        end repeat
-      end tell
-      return output
-      """
-    let completion = DispatchSemaphore(value: 0)
-    let result = FinalCutProjectReadResult()
-    DispatchQueue.global(qos: .userInitiated).async {
-      guard let appleScript = NSAppleScript(source: script) else {
-        result.store(.failure(.invalidReply))
-        completion.signal()
-        return
-      }
-      var error: NSDictionary?
-      let reply = appleScript.executeAndReturnError(&error)
-      guard error == nil, let output = reply.stringValue else {
-        result.store(.failure(.eventFailed))
-        completion.signal()
-        return
-      }
-      result.store(.success(output))
-      completion.signal()
-    }
-    guard timeout.isFinite, timeout > 0,
-      completion.wait(timeout: .now() + min(5, timeout)) == .success
-    else {
-      throw FinalCutAutomationError.eventFailed
-    }
-    let output = try result.load().get()
-    return output.split(separator: Character("\u{001e}"), omittingEmptySubsequences: true)
-      .map { record in
-        record.split(separator: Character("\u{001f}"), omittingEmptySubsequences: false)
-      }
-      .compactMap { fields in
-        guard fields.count == 3 else { return nil }
-        return FinalCutProjectLocation(
-          library: String(fields[0]), event: String(fields[1]), project: String(fields[2])
-        )
-      }
-  }
-}
-
-private final class FinalCutProjectReadResult: @unchecked Sendable {
-  private let lock = NSLock()
-  private var result: Result<String, FinalCutAutomationError>?
-
-  func store(_ value: Result<String, FinalCutAutomationError>) {
-    lock.lock()
-    result = value
-    lock.unlock()
-  }
-
-  func load() throws -> Result<String, FinalCutAutomationError> {
-    lock.lock()
-    defer { lock.unlock() }
-    guard let result else {
-      throw FinalCutAutomationError.invalidReply
-    }
-    return result
   }
 }
 
@@ -745,10 +708,12 @@ struct NativeFinalCutAutomationTransport: TimedFinalCutAutomationTransport {
     // An absolute-position object selector requires typeAbsoluteOrdinal, not
     // typeEnumerated. Apple Events consume the OSType in host byte order.
     var all = OSType(kAEAll)
-    guard let ordinal = NSAppleEventDescriptor(
-      descriptorType: DescType(typeAbsoluteOrdinal), bytes: &all,
-      length: MemoryLayout<OSType>.size
-    ) else { throw FinalCutAutomationError.invalidTarget }
+    guard
+      let ordinal = NSAppleEventDescriptor(
+        descriptorType: DescType(typeAbsoluteOrdinal), bytes: &all,
+        length: MemoryLayout<OSType>.size
+      )
+    else { throw FinalCutAutomationError.invalidTarget }
     let allLibraries = objectSpecifier(
       desiredClass: fourCharacterCode("fxlb"),
       keyForm: OSType(formAbsolutePosition),

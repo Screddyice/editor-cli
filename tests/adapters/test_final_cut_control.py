@@ -29,6 +29,13 @@ class FakeNative:
         self.calls: list[tuple] = []
         self.active: ProjectIdentity | None = project()
         self.share_error: Exception | None = None
+        self.inspection_error: Exception | None = None
+
+    def inspect_active_project(self, session_root: Path) -> ProjectIdentity | None:
+        self.calls.append(("inspect_active_project", session_root))
+        if self.inspection_error is not None:
+            raise self.inspection_error
+        return self.active
 
     def probe(self, session_root: Path) -> NativeProbe:
         self.calls.append(("probe", session_root))
@@ -115,13 +122,15 @@ def test_final_cut_control_rejects_filesystem_root_session():
 
 
 @pytest.mark.anyio
-async def test_final_cut_control_reads_exact_active_project_from_native_probe(tmp_path):
+async def test_final_cut_control_reads_exact_active_project_from_explicit_inspection(
+    tmp_path,
+):
     adapter, native, _fcpxml = control(tmp_path)
 
     projects = await adapter.active_projects()
 
     assert projects == (project(),)
-    assert native.calls == [("probe", tmp_path.resolve())]
+    assert native.calls == [("inspect_active_project", tmp_path.resolve())]
 
 
 @pytest.mark.anyio
@@ -131,6 +140,21 @@ async def test_final_cut_control_reports_no_active_project_without_guessing(tmp_
     adapter, _native, _fcpxml = control(tmp_path, native)
 
     assert await adapter.active_projects() == ()
+    assert native.calls == [("inspect_active_project", tmp_path.resolve())]
+
+
+@pytest.mark.anyio
+async def test_final_cut_control_does_not_fallback_to_probe_after_inspection_error(
+    tmp_path,
+):
+    native = FakeNative()
+    native.inspection_error = NativeFinalCutError("Unsupported action.")
+    adapter, _native, _fcpxml = control(tmp_path, native)
+
+    with pytest.raises(FinalCutControlError, match="Unsupported action"):
+        await adapter.active_projects()
+
+    assert native.calls == [("inspect_active_project", tmp_path.resolve())]
 
 
 @pytest.mark.anyio

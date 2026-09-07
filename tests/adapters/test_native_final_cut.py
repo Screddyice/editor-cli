@@ -134,6 +134,62 @@ def test_native_client_rejects_symlinked_helper_before_execution(tmp_path):
     assert runner.calls == []
 
 
+@pytest.mark.parametrize("active", [identity_json(), None])
+def test_native_client_inspects_active_project_with_explicit_action(tmp_path, active):
+    runner = FakeRunner(response({"project": active}))
+    native = client(tmp_path, runner)
+
+    result = native.inspect_active_project(tmp_path / "session")
+
+    assert result == (identity() if active is not None else None)
+    assert len(runner.calls) == 1
+    assert json.loads(runner.input) == {
+        "protocolVersion": 1,
+        "action": "inspect_active_project",
+        "sessionRoot": str((tmp_path / "session").resolve()),
+        "payload": {"timeout": 7},
+    }
+
+
+@pytest.mark.parametrize(
+    "result",
+    [
+        {},
+        {"project": None, "activeProject": identity_json()},
+        {"project": "Demo"},
+        {"project": {}},
+        {"project": {**identity_json(), "duration_seconds": True}},
+        {"project": {**identity_json(), "library": ""}},
+        {"project": {**identity_json(), "unexpected": "field"}},
+        {"project": identity_json(), "protocolVersion": 2},
+    ],
+)
+def test_native_client_rejects_malformed_active_project_results(tmp_path, result):
+    runner = FakeRunner(response(result))
+    native = client(tmp_path, runner)
+
+    with pytest.raises(NativeFinalCutError):
+        native.inspect_active_project(tmp_path / "session")
+
+    assert len(runner.calls) == 1
+
+
+def test_native_client_does_not_fallback_when_active_inspection_is_unsupported(
+    tmp_path,
+):
+    runner = FakeRunner(
+        json.dumps({"ok": False, "error": "Unsupported action."}) + "\n",
+        returncode=1,
+    )
+    native = client(tmp_path, runner)
+
+    with pytest.raises(NativeFinalCutError, match="Unsupported action"):
+        native.inspect_active_project(tmp_path / "session")
+
+    assert len(runner.calls) == 1
+    assert json.loads(runner.input)["action"] == "inspect_active_project"
+
+
 def test_native_client_removes_snapshot_after_runner_failure(tmp_path):
     helper = tmp_path / "bridge"
     helper.write_bytes(b"native helper")
@@ -235,6 +291,11 @@ def test_native_probe_hash_is_bound_to_executed_descriptor_during_path_race(tmp_
             },
         ),
         (
+            lambda native, root: native.inspect_active_project(root),
+            "inspect_active_project",
+            {"timeout": 7},
+        ),
+        (
             lambda native, root: native.inspect_dialogs(root),
             "inspect_dialogs",
             {},
@@ -265,6 +326,7 @@ def test_native_client_allowlists_typed_actions(tmp_path, invoke, action, payloa
             "output": str(path),
         },
         "inspect_dialogs": {"dialogs": []},
+        "inspect_active_project": {"project": identity_json()},
     }
     runner = FakeRunner(response(result_by_action[action]))
     native = client(tmp_path, runner)

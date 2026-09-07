@@ -2,12 +2,12 @@ import XCTest
 @testable import FinalCutBridge
 
 final class ProtocolTests: XCTestCase {
-    func testJSONProtocolKeepsExactlySevenActions() {
+    func testJSONProtocolRestrictsActionsToTheTypedControllerSurface() {
         XCTAssertEqual(
             Set(Action.allCases.map(\.rawValue)),
             Set([
                 "probe", "duplicate_project", "export_xml", "import_xml",
-                "open_project", "share_preview", "inspect_dialogs",
+                "open_project", "share_preview", "inspect_dialogs", "inspect_active_project",
             ])
         )
     }

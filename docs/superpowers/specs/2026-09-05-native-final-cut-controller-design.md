@@ -58,7 +58,10 @@ request schema uses `additionalProperties: false`. Supported actions are:
 - `probe`: report helper version, Final Cut bundle identity and version,
   Accessibility trust, Automation capability, blocking dialogs, and active
   project identity;
-- `duplicate_project`: invoke `Duplicate Project As...`, set the exact generated
+- `inspect_active_project`: read the open timeline's name from the toolbar,
+  reveal that project in the browser, and return its library, event, and
+  project identity;
+- `duplicate_project`: invoke `Edit > Duplicate Project As…`, set the exact generated
   name, confirm the dialog, and poll for that project in the same library and
   event;
 - `export_xml`: invoke Final Cut's XML export, constrain the save location to

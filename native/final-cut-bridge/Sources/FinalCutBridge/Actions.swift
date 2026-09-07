@@ -58,9 +58,11 @@ struct ShareReceipt: Codable, Equatable {
 }
 
 enum FinalCutMenu {
-  static let duplicate = ["File", "Duplicate Project As..."]
-  static let exportXML = ["File", "Export XML..."]
-  static let share = ["File", "Share", "Export File (Default)..."]
+  // Titles are the live Final Cut Pro Creator Studio menu strings, ellipsis
+  // character included. Duplicate moved from File to Edit in Creator Studio.
+  static let duplicate = ["Edit", "Duplicate Project As\u{2026}"]
+  static let exportXML = ["File", "Export XML\u{2026}"]
+  static let share = ["File", "Share", "Export File (default)\u{2026}"]
 }
 
 enum FinalCutConfirmation: Equatable {
@@ -102,6 +104,7 @@ enum FinalCutActionError: Error, Equatable, LocalizedError {
 
 enum ActionPayload {
   case probe
+  case inspectActiveProject(TimeInterval)
   case duplicateProject(ProjectIdentity, String, TimeInterval)
   case exportXML(ProjectIdentity, String, TimeInterval)
   case importXML(ProjectIdentity, String, TimeInterval)
@@ -114,6 +117,9 @@ enum ActionPayload {
     case .probe:
       try requireKeys(request.payload, expected: [])
       return .probe
+    case .inspectActiveProject:
+      try requireKeys(request.payload, expected: ["timeout"])
+      return .inspectActiveProject(try timeout(request.payload["timeout"]))
     case .duplicateProject:
       try requireKeys(request.payload, expected: ["expected", "name", "timeout"])
       guard let name = request.payload["name"] as? String else {
@@ -280,6 +286,12 @@ struct Actions<System: FinalCutActionSystem> {
 
   init(system: System) {
     self.system = system
+  }
+
+  func inspectActiveProject(timeout: TimeInterval) throws -> ProjectIdentity? {
+    let deadline = try makeDeadline(timeout)
+    try rejectBlockingDialogs(deadline: deadline)
+    return try perform(deadline: deadline) { try system.activeProject(timeout: $0) }
   }
 
   func duplicateProject(
@@ -630,7 +642,7 @@ struct FinalCutTimebase: Equatable, Hashable {
   let dropFramesPerMinute: Int?
 
   init?(formatDescription: String) {
-    let pattern = #"(?:^|\s)(23\.98|24|25|29\.97|30|50|59\.94|60)[pi](?:\s|$)"#
+    let pattern = #"(?:^|\s)(23\.98|24|25|29\.97|30|50|59\.94|60)[pi](?:[\s,]|$)"#
     guard let expression = try? NSRegularExpression(pattern: pattern),
       let match = expression.firstMatch(
         in: formatDescription,
@@ -776,9 +788,11 @@ enum FinalCutSheetStage {
 protocol FinalCutAXElement: AnyObject {
   func accessibilityValue(for attribute: String) -> Any?
   func accessibilityElement(for attribute: String) -> (any FinalCutAXElement)?
+  func accessibilityElements(for attribute: String) -> [any FinalCutAXElement]
   func accessibilityChildren() throws -> [any FinalCutAXElement]
   func accessibilityPress() -> Bool
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool
+  func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool
   func isSameElement(as other: any FinalCutAXElement) -> Bool
 }
@@ -831,6 +845,10 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
     return children.map(NativeFinalCutAXElement.init)
   }
 
+  func accessibilityElements(for attribute: String) -> [any FinalCutAXElement] {
+    (accessibilityValue(for: attribute) as? [AXUIElement] ?? []).map(NativeFinalCutAXElement.init)
+  }
+
   func accessibilityPress() -> Bool {
     AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
   }
@@ -838,6 +856,11 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool {
     AXUIElementSetAttributeValue(element, attribute as CFString, value as CFString) == .success
   }
+
+  func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool {
+    AXUIElementSetAttributeValue(element, attribute as CFString, value as CFBoolean) == .success
+  }
+
 
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool {
     var settable = DarwinBoolean(false)
@@ -853,7 +876,9 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
 
 final class LiveFinalCutAX {
   private let root: any FinalCutAXElement
-  private let limits = AccessibilityTraversalLimits.default
+  private let limits = AccessibilityTraversalLimits(
+    maxDepth: 20, maxVisitedNodes: 2_048, maxChildrenPerNode: 256
+  )
   private let allowedRoles: Set<String> = [
     kAXApplicationRole as String,
     kAXMenuBarRole as String,
@@ -863,6 +888,8 @@ final class LiveFinalCutAX {
     kAXWindowRole as String,
     kAXSheetRole as String,
     kAXButtonRole as String,
+    "AXMenuButton",
+    "AXImage",
     kAXTextFieldRole as String,
     kAXStaticTextRole as String,
     kAXProgressIndicatorRole as String,
@@ -903,13 +930,13 @@ final class LiveFinalCutAX {
     for (index, title) in path.enumerated() {
       let expectedRole = index == 0 ? kAXMenuBarItemRole as String : kAXMenuItemRole as String
       let item = try pollUntil(deadline: deadline) {
-        try uniqueElement(titled: title, role: expectedRole, beneath: container)
+        try uniqueDirectElement(titled: title, role: expectedRole, beneath: container)
       }
       try press(item)
       try requireTime(before: deadline)
       guard index < path.count - 1 else { continue }
       container = try pollUntil(deadline: deadline) {
-        try uniqueElement(titled: nil, role: kAXMenuRole as String, beneath: item)
+        try uniqueDirectElement(titled: nil, role: kAXMenuRole as String, beneath: item)
       }
     }
   }
@@ -951,15 +978,187 @@ final class LiveFinalCutAX {
 
   func pressProjectRow(_ identity: ProjectIdentity, timeout: TimeInterval) throws {
     let deadline = try deadline(after: timeout)
-    var parent = root
-    for title in [identity.library, identity.event, identity.project] {
-      let row = try pollUntil(deadline: deadline) {
-        try uniqueElement(titled: title, role: kAXRowRole as String, beneath: parent)
-      }
-      try press(row)
-      try requireTime(before: deadline)
-      parent = row
+    let window = try focusedMainWindow()
+    let sidebar = try uniqueElement(
+      titled: "Event media sidebar", role: kAXOutlineRole as String, beneath: window
+    )
+    func rows() throws -> [any FinalCutAXElement] {
+      try directChildren(of: sidebar).filter { try role(of: $0) == kAXRowRole as String }
     }
+    func label(_ row: any FinalCutAXElement) throws -> String? {
+      let fields = try allElements(beneath: row).filter {
+        try role(of: $0) == kAXTextFieldRole as String && isVisible($0)
+      }
+      guard fields.count == 1, let field = fields.first else { return nil }
+      return title(of: field)
+    }
+    let libraries = try rows().filter {
+      try numberAttribute("AXDisclosureLevel", of: $0) == 0 && label($0) == identity.library && isVisible($0)
+    }
+    guard let library = try exactlyOne(libraries) else { throw AccessibilityDiscoveryError.noMatch }
+    if boolAttribute("AXDisclosing", of: library) != true {
+      try requireTime(before: deadline)
+      try setBool(true, attribute: "AXDisclosing", on: library)
+    }
+    let event = try pollUntil(deadline: deadline) {
+      let current = try rows()
+      guard let index = current.firstIndex(where: { $0.isSameElement(as: library) }) else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      let scoped = current.dropFirst(index + 1).prefix {
+        (numberAttribute("AXDisclosureLevel", of: $0) ?? 0) > 0
+      }
+      let matches = try scoped.filter {
+        try numberAttribute("AXDisclosureLevel", of: $0) == 1 && label($0) == identity.event && isVisible($0)
+      }
+      guard let match = try exactlyOne(matches) else { throw AccessibilityDiscoveryError.noMatch }
+      return match
+    }
+    let changingEvent = boolAttribute(kAXSelectedAttribute as String, of: event) != true
+    let oldEvents = try browserEvents(in: window)
+    let oldTiles = try directChildren(of: oldEvents)
+    try clearBrowserSelection(oldEvents, deadline: deadline)
+    try requireTime(before: deadline)
+    try setBool(true, attribute: kAXSelectedAttribute as String, on: event)
+    let tile = try pollUntil(deadline: deadline) {
+      guard boolAttribute(kAXSelectedAttribute as String, of: event) == true else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      let events = try browserEvents(in: window)
+      let matches = try directChildren(of: events).filter { element in
+        if changingEvent && oldTiles.contains(where: { $0.isSameElement(as: element) }) { return false }
+        guard try role(of: element) == kAXGroupRole as String,
+          stringAttribute(kAXDescriptionAttribute as String, of: element) == identity.project,
+          isVisible(element), isEnabled(element)
+        else { return false }
+        return try directChildren(of: element).contains {
+          try role(of: $0) == kAXTextFieldRole as String
+            && stringAttribute(kAXDescriptionAttribute as String, of: $0) == "display name"
+            && title(of: $0) == identity.project
+            && isVisible($0)
+        }
+      }
+      guard let match = try exactlyOne(matches) else { throw AccessibilityDiscoveryError.noMatch }
+      return match
+    }
+    try press(tile)
+    try requireTime(before: deadline)
+  }
+
+  private func setBool(_ value: Bool, attribute: String, on element: any FinalCutAXElement) throws {
+    guard isVisible(element), element.accessibilityAttributeIsSettable(attribute),
+      element.accessibilitySetBool(value, for: attribute)
+    else { throw AccessibilityDiscoveryError.attributeUnavailable }
+  }
+
+  func activeTimelineName(timeout: TimeInterval) throws -> String? {
+    let deadline = try deadline(after: timeout)
+    let window = try focusedMainWindow()
+    let candidates = try allElements(beneath: window).filter {
+      stringAttribute(kAXIdentifierAttribute as String, of: $0)
+        == "editor/timelineContainer/toolbar/projectNamePopUpButton"
+        && (try? role(of: $0)) == "AXMenuButton" && isVisible($0)
+    }
+    try requireTime(before: deadline)
+    guard let element = try exactlyOne(candidates) else { return nil }
+    guard isEnabled(element), let name = stringAttribute(kAXTitleAttribute as String, of: element),
+      !name.isEmpty else { return nil }
+    return name
+  }
+
+  func revealActiveProjectLocation(timeout: TimeInterval) throws -> FinalCutProjectLocation? {
+    let deadline = try deadline(after: timeout)
+    guard let name = try activeTimelineName(timeout: timeout) else { return nil }
+    let browser = try browserEvents(in: focusedMainWindow())
+    try clearBrowserSelection(browser, deadline: deadline)
+    try pressMenu(path: ["File", "Reveal Project in Browser"],
+      timeout: deadline - ProcessInfo.processInfo.systemUptime)
+    return try pollUntil(deadline: deadline) {
+      guard try activeTimelineName(timeout: deadline - ProcessInfo.processInfo.systemUptime) == name else {
+        throw FinalCutActionError.identityMismatch
+      }
+      let window = try focusedMainWindow()
+      let events = try browserEvents(in: window)
+      guard let focused = root.accessibilityElement(for: kAXFocusedUIElementAttribute as String),
+        events.isSameElement(as: focused)
+      else { throw AccessibilityDiscoveryError.noMatch }
+      let selected = focused.accessibilityElements(for: kAXSelectedChildrenAttribute as String)
+      guard selected.count == 1, let tile = selected.first,
+        try role(of: tile) == kAXGroupRole as String,
+        stringAttribute(kAXDescriptionAttribute as String, of: tile) == name,
+        try directChildren(of: events).contains(where: { $0.isSameElement(as: tile) }),
+        isVisible(tile), isEnabled(tile)
+      else { throw AccessibilityDiscoveryError.noMatch }
+      let sidebar = try uniqueElement(titled: "Event media sidebar", role: "AXOutline", beneath: window)
+      let rows = try directChildren(of: sidebar).filter { try role(of: $0) == "AXRow" }
+      let selections = rows.indices.filter { boolAttribute("AXSelected", of: rows[$0]) == true }
+      guard selections.count == 1, let eventIndex = selections.first,
+        isVisible(rows[eventIndex]),
+        numberAttribute("AXDisclosureLevel", of: rows[eventIndex]) == 1,
+        let libraryIndex = rows.indices.prefix(eventIndex).last(where: {
+          numberAttribute("AXDisclosureLevel", of: rows[$0]) == 0
+        }), isVisible(rows[libraryIndex])
+      else { throw AccessibilityDiscoveryError.noMatch }
+      func label(_ row: any FinalCutAXElement) throws -> String {
+        let fields = try allElementsWithAncestry(beneath: row).filter {
+          try role(of: $0.element) == "AXTextField" && $0.lineage.allSatisfy(isVisible)
+        }.map(\.element)
+        guard fields.count == 1, let field = fields.first, let value = title(of: field), !value.isEmpty else {
+          throw AccessibilityDiscoveryError.ambiguousMatch
+        }
+        return value
+      }
+      return try FinalCutProjectLocation(library: label(rows[libraryIndex]),
+        event: label(rows[eventIndex]), project: name)
+    }
+  }
+
+  private func browserEvents(in window: any FinalCutAXElement) throws -> any FinalCutAXElement {
+    let organizers = try allElementsWithAncestry(beneath: window).filter {
+      try role(of: $0.element) == "AXScrollArea"
+        && stringAttribute(kAXDescriptionAttribute as String, of: $0.element) == "organizer"
+        && $0.lineage.allSatisfy(isVisible)
+    }
+    guard organizers.count == 1, let organizer = organizers.first else {
+      throw AccessibilityDiscoveryError.ambiguousMatch
+    }
+    return try uniqueDirectElement(titled: "events", role: "AXGroup", beneath: organizer.element,
+      requiresEnabled: false)
+  }
+
+  private func clearBrowserSelection(_ browser: any FinalCutAXElement, deadline: TimeInterval) throws {
+    if !browser.accessibilityElements(for: kAXSelectedChildrenAttribute as String).isEmpty {
+      try requireTime(before: deadline)
+      if root.accessibilityElement(for: kAXFocusedUIElementAttribute as String)?.isSameElement(as: browser) != true {
+        try setBool(true, attribute: kAXFocusedAttribute as String, on: browser)
+      }
+      guard root.accessibilityElement(for: kAXFocusedUIElementAttribute as String)?.isSameElement(as: browser) == true else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      try pressMenu(path: ["Edit", "Deselect All"], timeout: deadline - ProcessInfo.processInfo.systemUptime)
+    }
+    _ = try pollUntil(deadline: deadline) {
+      guard browser.accessibilityElements(for: kAXSelectedChildrenAttribute as String).isEmpty else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      return true
+    }
+  }
+
+  private func uniqueDirectElement(
+    titled title: String?, role expectedRole: String, beneath parent: any FinalCutAXElement,
+    requiresEnabled: Bool = true
+  ) throws -> any FinalCutAXElement {
+    let titled = try directChildren(of: parent).filter { title == nil || self.title(of: $0) == title }
+    let matches = try titled.filter {
+      try role(of: $0) == expectedRole
+        && isVisible($0) && (!requiresEnabled || isEnabled($0))
+    }
+    if matches.isEmpty, title != nil, !titled.isEmpty {
+      throw AccessibilityDiscoveryError.unexpectedFinalRole
+    }
+    guard let match = try exactlyOne(matches) else { throw AccessibilityDiscoveryError.noMatch }
+    return match
   }
 
   func activeTimelineStatus(timeout: TimeInterval) throws -> LiveTimelineStatus? {
@@ -967,6 +1166,12 @@ final class LiveFinalCutAX {
     let focusedWindow = try focusedMainWindow()
     let elements = try allElementsWithAncestry(beneath: focusedWindow)
     try requireTime(before: deadline)
+    if elements.contains(where: {
+      stringAttribute(kAXIdentifierAttribute as String, of: $0.element)
+        == "editor/timelineContainer/toolbar/projectNamePopUpButton"
+    }) {
+      return try creatorStudioTimelineStatus(elements)
+    }
     let titleCandidates = elements.compactMap { candidate -> (AccessibilityPathElement, String)? in
       let element = candidate.element
       guard
@@ -1043,6 +1248,56 @@ final class LiveFinalCutAX {
       timebase: timebase,
       dropFrame: timecode.dropFrame
     )
+  }
+
+  private func creatorStudioTimelineStatus(
+    _ elements: [AccessibilityPathElement]
+  ) throws -> LiveTimelineStatus {
+    let titles = elements.filter {
+      stringAttribute(kAXIdentifierAttribute as String, of: $0.element)
+        == "editor/timelineContainer/toolbar/projectNamePopUpButton"
+        && (try? role(of: $0.element)) == "AXMenuButton" && isVisible($0.element)
+    }
+    guard titles.count == 1, let titleNode = titles.first,
+      let project = stringAttribute(kAXTitleAttribute as String, of: titleNode.element),
+      !project.isEmpty, let toolbar = titleNode.lineage.dropLast().last
+    else { throw AccessibilityDiscoveryError.ambiguousMatch }
+    let info = try directChildren(of: toolbar).filter {
+      stringAttribute(kAXIdentifierAttribute as String, of: $0)
+        == "editor/timelineContainer/toolbar/projectInfo" && isVisible($0)
+    }
+    guard info.count == 1, let infoNode = info.first,
+      let raw = stringAttribute(kAXValueAttribute as String, of: infoNode),
+      raw.range(of: #"^\d+(?::\d+){0,2}[:;]\d+$"#, options: .regularExpression) != nil
+    else { throw AccessibilityDiscoveryError.ambiguousMatch }
+    let components = raw.replacingOccurrences(of: ";", with: ":").split(separator: ":")
+    guard (2...4).contains(components.count),
+      let timecode = parseTimecode(String(repeating: "00:", count: 4 - components.count) + raw)
+    else { throw AccessibilityDiscoveryError.ambiguousMatch }
+    // The viewer format has no stable ID. Bind it to the Projects glyph and
+    // the exact active timeline name in the same viewer, never inspector text.
+    let viewers = elements.filter {
+      (try? role(of: $0.element)) == "AXImage"
+        && stringAttribute(kAXDescriptionAttribute as String, of: $0.element)
+          == "F Viewer PlayerLabels Projects" && isVisible($0.element)
+    }
+    guard viewers.count == 1, let viewer = viewers.first?.lineage.dropLast().last else {
+      throw AccessibilityDiscoveryError.ambiguousMatch
+    }
+    let texts = try directChildren(of: viewer).filter {
+      (try? role(of: $0)) == kAXStaticTextRole as String && isVisible($0)
+    }.compactMap { title(of: $0) }
+    let formats = texts.compactMap(FinalCutTimebase.init(formatDescription:))
+    guard texts.filter({ $0 == project }).count == 1, formats.count == 1,
+      let timebase = formats.first
+    else { throw AccessibilityDiscoveryError.ambiguousMatch }
+    let status = LiveTimelineStatus(
+      project: project, hours: timecode.hours, minutes: timecode.minutes,
+      seconds: timecode.seconds, frames: timecode.frames, timebase: timebase,
+      dropFrame: timecode.dropFrame
+    )
+    guard status.duration != nil else { throw AccessibilityDiscoveryError.ambiguousMatch }
+    return status
   }
 
   func backgroundTasksComplete(timeout: TimeInterval) throws -> Bool {
@@ -1162,13 +1417,14 @@ final class LiveFinalCutAX {
   }
 
   private func uniqueElement(
-    titled title: String?, role expectedRole: String, beneath parent: any FinalCutAXElement
+    titled title: String?, role expectedRole: String, beneath parent: any FinalCutAXElement,
+    requiresEnabled: Bool = true
   ) throws -> any FinalCutAXElement {
     let titled = try allElements(beneath: parent).filter {
       title == nil || self.title(of: $0) == title
     }
     let matches = try titled.filter {
-      try role(of: $0) == expectedRole && isVisible($0) && isEnabled($0)
+      try role(of: $0) == expectedRole && isVisible($0) && (!requiresEnabled || isEnabled($0))
     }
     if matches.isEmpty, title != nil, !titled.isEmpty {
       throw AccessibilityDiscoveryError.unexpectedFinalRole

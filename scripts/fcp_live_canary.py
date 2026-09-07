@@ -489,6 +489,11 @@ async def _wait_for_project(control, library: Path, timeout_seconds: int = 60) -
     deadline = asyncio.get_running_loop().time() + timeout_seconds
     error: Exception | None = None
     expected_library = library.resolve()
+    await control.open_project(
+        ProjectIdentity(
+            expected_library.stem, "Canary Event", "Editor CLI Canary Source", 8.0
+        )
+    )
     while asyncio.get_running_loop().time() < deadline:
         try:
             projects = await control.active_projects()

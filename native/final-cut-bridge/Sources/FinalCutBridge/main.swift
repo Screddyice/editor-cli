@@ -68,6 +68,9 @@ private func dispatch(_ request: Request) throws -> [String: Any] {
   let actions = Actions(system: system)
 
   switch payload {
+  case .inspectActiveProject(let timeout):
+    let project = try actions.inspectActiveProject(timeout: timeout)
+    return result(["project": try project.map(encodedObject) ?? NSNull()])
   case .probe:
     let probe = try FinalCutProbe(system: system).run()
     return result([

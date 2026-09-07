@@ -24,13 +24,24 @@ struct AccessibilityTraversalLimits {
   )
 }
 
-enum AccessibilityDiscoveryError: Error, Equatable {
+enum AccessibilityDiscoveryError: Error, Equatable, LocalizedError {
   case invalidPath
   case noMatch
   case ambiguousMatch
   case unexpectedFinalRole
   case traversalLimitExceeded
   case attributeUnavailable
+
+  var errorDescription: String? {
+    switch self {
+    case .invalidPath: "Invalid Final Cut accessibility path."
+    case .noMatch: "The expected Final Cut accessibility control was not found."
+    case .ambiguousMatch: "Final Cut accessibility controls do not identify one exact target."
+    case .unexpectedFinalRole: "The Final Cut control has an unexpected role or enabled state."
+    case .traversalLimitExceeded: "Final Cut accessibility inspection exceeded its bounded limits."
+    case .attributeUnavailable: "Final Cut did not expose or accept the required accessibility action."
+    }
+  }
 }
 
 struct BoundedAX {
