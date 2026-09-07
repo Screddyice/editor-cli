@@ -30,6 +30,9 @@ def _required_development_resources() -> dict[str, bytes]:
     required["skills/final-cut-editor/SKILL.md"] = (
         REPO_ROOT / "skills/final-cut-editor/SKILL.md"
     ).read_bytes()
+    required["skills/direct-video-editor/SKILL.md"] = (
+        REPO_ROOT / "skills/direct-video-editor/SKILL.md"
+    ).read_bytes()
     required["canary/fcp_live_canary.py"] = (
         REPO_ROOT / "scripts/fcp_live_canary.py"
     ).read_bytes()
