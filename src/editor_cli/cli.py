@@ -7,9 +7,10 @@ import subprocess
 from typing import Annotated, Any
 
 import typer
+from editor_cli.direct.cli import app as direct_app
 
 app = typer.Typer(
-    help="Editor CLI — AI video editing (Final Cut Pro + Gemini).",
+    help="Agent-driven video editing from selected files, with optional Final Cut control.",
     no_args_is_help=True,
     add_completion=False,
 )
@@ -17,11 +18,12 @@ session_app = typer.Typer(help="Inspect or resume a persisted Final Cut edit ses
 permissions_app = typer.Typer(help="Request native Final Cut controller permissions.")
 app.add_typer(session_app, name="session")
 app.add_typer(permissions_app, name="permissions")
+app.add_typer(direct_app, name="direct")
 
 
 @app.callback()
 def _main() -> None:
-    """Editor CLI — AI video editing (Final Cut Pro + Gemini)."""
+    """Edit selected footage with an agent or control a Final Cut project."""
 
 
 @app.command("setup")

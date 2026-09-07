@@ -1,13 +1,23 @@
 # CLAUDE.md — editor-cli
 
-AI-assisted video editing. Two engines live here:
+AI-assisted video editing. Use the first-class direct workflow for selected files:
+
+- **Direct sessions** (`src/editor_cli/direct/`) use Codex or Claude as the
+  creative editor and FFmpeg to render final MP4. Invoke
+  `src/editor_cli/resources/skills/direct-video-editor/SKILL.md` for selected-file
+  edits. Use `editor_direct` or `editor-cli direct`; no Final Cut or Gemini
+  dependency. Never substitute directory-scanning legacy helpers. All outputs
+  belong in the returned `edit/<session-id>/`. One strategy approval permits
+  preview correction and final export; review the final video before finishing.
+
+The older engines remain available:
 
 - **editor-cli** (this project's `src/`) — Final Cut Pro is the editing engine, Gemini is the visual brain, deliverable is FCPXML → `.mp4`.
 - **video-use** (`vendor/video-use/`) — a conversation-driven, agent-native editor: transcribe → cut → grade → subtitle → overlay → render `.mp4` entirely from the command line (no FCP round-trip).
 
 ## video-use skill — auto-invoke for editing requests
 
-A registered skill lives at **`.claude/skills/video-use/`** (a symlink to `vendor/video-use/`, so `SKILL.md` and `helpers/` stay siblings). **Invoke it automatically — without being asked — whenever the user wants to edit video in this project**, e.g.:
+A reference skill lives at **`.claude/skills/video-use/`** (a symlink to `vendor/video-use/`, so `SKILL.md` and `helpers/` stay siblings). Use its cut and composition guidance; route selected-file requests through the direct-session skill above. Examples:
 
 - "edit these takes into a launch video", "cut this down", "make a reel from this footage"
 - remove filler words / dead space, color grade, burn subtitles, add an overlay animation
@@ -38,11 +48,9 @@ leaves the selected working project open. Do not substitute raw CommandPost
 commands, AppleScript, or keystrokes.
 
 Start with `editor_session` using `action: doctor`. Stop when the report is not
-ready. The current measured host report has Final Cut Pro 12.3 (build 450152),
-CommandPost 2.1.0, and `watch` 0.2.0 on both hosts, but it remains blocked by
-the missing eligible LateNite license app and CommandPost loopback listener.
-Do not claim a live canary result, preview hash, or dual-host comparison until
-those prerequisites are present and the disposable canary completes.
+ready. The current native controller uses the project-owned signed Swift helper
+and does not require a paid LateNite app or CommandPost. Do not claim a live
+canary result or dual-host comparison until the disposable canary completes.
 
 Treat branch delivery and CI as separate evidence. Do not call PR #18 delivered
 or its checks green until the branch is pushed and GitHub reports a completed
@@ -55,7 +63,7 @@ final export in Final Cut Pro.
 
 ### Environment (already wired)
 
-- **Keys:** `ELEVENLABS_API_KEY` (Scribe transcription) and `GEMINI_API_KEY` are in `editor-cli/.env`. `vendor/video-use/.env` is a symlink to it, so the helpers' key lookup resolves with no duplication. Never echo or commit keys.
+- **Keys:** direct editing uses `ELEVENLABS_API_KEY` for Scribe speech transcription; check `direct doctor`, do not assume a key exists. `EDITOR_CLI_ENV_FILE` selects an exact credential file. Legacy Gemini workflows also need `GEMINI_API_KEY`. Never echo or commit keys.
 - **ffmpeg / ffprobe:** required, present on this machine.
 - **yt-dlp:** optional, only for pulling sources from URLs (in editor-cli's deps).
 - **Animation engines** (HyperFrames / Remotion / Manim): installed lazily per animation slot — don't install globally. `manim` is an optional extra of video-use; the `manim-video` sub-skill is at `vendor/video-use/skills/manim-video/`.

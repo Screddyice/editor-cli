@@ -59,6 +59,7 @@ async def test_mcp_exposes_only_grouped_tools():
         "editor_timeline",
         "editor_media",
         "editor_verify",
+        "editor_direct",
     }
     assert all(
         tool.input_schema.get("additionalProperties") is False
@@ -165,7 +166,7 @@ async def test_grouped_tools_reject_unknown_keys():
 
 
 @pytest.mark.anyio
-async def test_stdio_server_initializes_and_lists_four_tools():
+async def test_stdio_server_initializes_and_lists_grouped_tools():
     params = StdioServerParameters(
         command=sys.executable,
         args=["-m", "editor_cli.mcp_server"],
@@ -177,6 +178,7 @@ async def test_stdio_server_initializes_and_lists_four_tools():
         await session.initialize()
         names = {tool.name for tool in (await session.list_tools()).tools}
     assert names == {
+        "editor_direct",
         "editor_session",
         "editor_timeline",
         "editor_media",

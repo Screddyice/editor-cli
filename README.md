@@ -1,10 +1,73 @@
 # Editor CLI
 
-AI-assisted video editing where **Final Cut Pro is the editing engine** and the
-intelligence comes from an LLM orchestrator plus **Gemini's native video
-understanding**.
+Edit selected footage with Codex or Claude Code and receive a finished MP4.
+The direct workflow handles transcription, cut decisions, rendering, and review
+without Final Cut. A separate controller supports projects in Final Cut Pro.
 
-## Goal
+## Direct editing with Codex
+
+Select the exact clips and optional context documents in your conversation, then
+ask for an edit: “Make a five-minute vlog. Keep the beach sequence, remove dead
+air, and add captions.” Codex inventories those files, reads word transcripts
+and footage samples, and asks you to approve one editing strategy. It then
+renders, inspects the result, makes corrections within three preview passes,
+and exports the finished MP4. It also inspects the final render before delivery.
+
+```bash
+uv run editor-cli direct setup
+uv run editor-cli direct doctor
+uv run editor-cli direct start --file /path/to/clip1.mov --file /path/to/clip2.mp4 \
+  --file /path/to/brief.md --prompt 'Make a travel vlog with captions'
+```
+
+`direct setup` installs the `direct-video-editor` skill for Codex and Claude
+Code. Existing Editor CLI MCP registrations expose the new `editor_direct` tool
+after an agent restart. The skill also includes the installed Python command,
+so the workflow works through the CLI before tools refresh. New MCP clients can
+register `editor-cli-mcp` as a stdio server; direct editing needs no native helper.
+
+Inputs are exact selected files, not a directory scan. The first selected file's
+parent receives `edit/<session-id>/`, containing snapshots, cached transcripts,
+edit decisions, rendered previews, review images/audio, notes, and `final.mp4`.
+All decisions use returned asset IDs. Source files remain untouched. The
+controller checks source and render hashes on resume and rejects stale reviews.
+
+Available edits include ordered cuts, still inserts, speed changes, simple
+grades, titles, full-frame or picture-in-picture overlays, timed word captions,
+and looping music with ducking. Output dimensions and frame rate are explicit;
+mixed aspect ratios receive letterboxing. Overlay audio is muted; use a timeline
+cut for an audible meme. Captions appear above inserts. Direct internet imports
+accept public HTTPS media URLs (500 MB maximum), validate and pin public IPs on
+each redirect, and record provenance. Website extraction and browser cookies
+are outside this workflow.
+
+FFmpeg and ffprobe provide local rendering. Verbatim word transcription uses
+ElevenLabs Scribe: set `ELEVENLABS_API_KEY` in the process or point
+`EDITOR_CLI_ENV_FILE` at your credential file. The source checkout also checks
+its own `.env` and the machine's `~/projects/.env` for that one key. No Gemini
+key is required for direct editing. `direct doctor` reports rendering and
+transcription readiness separately. No-audio clips can be edited without a key.
+
+The agent inspects returned filmstrips, waveforms, decoded audio measurements,
+and transcript timing. It can also listen with the host's audio/video tools.
+Review entries are the agent's observations, not an
+automatic claim of visual or audio quality. If the host cannot inspect audio,
+the agent identifies its use of signal/transcript checks and leaves any unresolved
+perceptual judgment pending. HDR tone mapping
+and automatic loudness normalization are not included in the first renderer.
+
+The shared CLI/MCP sequence is `start → inspect/transcribe → approve → render →
+review → export → review → finish`. Resume with `editor-cli direct run resume
+/absolute/edit/session-id`. For large arguments, use `direct run ACTION SESSION
+--data-file /absolute/session/arguments.json`. See the packaged
+[agent workflow](src/editor_cli/resources/skills/direct-video-editor/SKILL.md)
+for edit and review schemas.
+
+Run `uv run pytest tests/direct tests/test_mcp_server.py` for file isolation,
+review/recovery contracts, and offline FFmpeg tests using generated media. These
+checks verify the software; a creative acceptance edit still needs user footage.
+
+## Original Final Cut workflow
 
 Given raw footage (imported into Final Cut Pro), an editing **prompt**, and
 optional **video style references**:
@@ -19,8 +82,8 @@ optional **video style references**:
 5. Gemini evaluates the export against the prompt + style and suggests
    iterations; regenerate and repeat.
 
-The deliverable is always an `.mp4`. Final Cut Pro stays the editor, so every
-decision remains hand-tweakable — not locked inside a flattened render.
+This workflow retains an editable Final Cut timeline. The user makes the final
+delivery export in Final Cut; the direct workflow above exports its own MP4.
 
 ## Status
 
@@ -76,25 +139,12 @@ uv run editor-cli setup
 uv run editor-cli doctor
 ```
 
-When macOS prompts, approve CommandPost's Automation access to Final Cut Pro
-and its Accessibility access for UI control. Keep CommandPost's WebSocket
-bridge bound to `127.0.0.1` or `::1`. The doctor refuses to start sessions
-until Final Cut, CommandPost, an eligible LateNite license app, the loopback
-bridge, and the shared `watch` skill are present.
-
-`editor-cli setup` installs the pinned CommandPost release when it is absent,
-installs the shared watch skill when needed, links the Final Cut skill and
-CommandPost bridge, writes the two MCP registrations with backups, and verifies
-that the MCP server lists tools. It does not start or validate the CommandPost
-listener. Configure the listener and macOS permissions, then use
-`editor-cli doctor` for readiness.
-
-Measured on 2026-09-05: Final Cut Pro 12.3 (build 450152), CommandPost 2.1.0,
-and `watch` 0.2.0 are installed for Codex and Claude Code. Device readiness is
-**false** because no eligible LateNite license app is installed and no
-CommandPost listener exists on port 27480. The disposable live canary and the
-fresh Claude Code/Codex evidence-manifest comparison remain pending until both
-prerequisites are resolved.
+The native setup builds and signs the project-owned Swift helper and registers
+the MCP server. Run `editor-cli permissions request` to request macOS
+Accessibility and Automation permissions, then check `editor-cli doctor`.
+Doctor is read-only. The native controller does not require CommandPost or a
+paid LateNite application. Its live Final Cut acceptance remains pending; direct
+editing has its own readiness checks and does not use those permissions.
 
 #### Session workflow and recovery
 

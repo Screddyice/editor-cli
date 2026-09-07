@@ -1,4 +1,4 @@
-"""Four grouped MCP tools for the Final Cut closed-loop controller."""
+"""Grouped agent tools for direct video editing and Final Cut sessions."""
 
 from __future__ import annotations
 
@@ -249,10 +249,52 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
     server = MCPServer(
         "editor-cli",
         instructions=(
-            "Control the selected Final Cut project through a source-preserving, "
-            "rendered-review edit loop. The user performs final export."
+            "Use editor_direct for selected files: inspect context, transcribe, get "
+            "one strategy approval, render, inspect review media, review, export, "
+            "review the final render, and finish. Final Cut is optional and uses "
+            "the separate editor_session/timeline/media/verify tools."
         ),
     )
+
+    @server.tool()
+    async def editor_direct(
+        action: Literal["doctor", "start", "status", "resume", "inspect", "transcribe",
+                        "approve", "render", "review", "export", "finish", "acquire"],
+        session_dir: str | None = None,
+        files: list[str] | None = None,
+        prompt: str | None = None,
+        asset_id: str | None = None,
+        start: float | None = None,
+        end: float | None = None,
+        strategy: str | None = None,
+        plan: dict[str, Any] | None = None,
+        report: dict[str, Any] | None = None,
+        url: str | None = None,
+        purpose: str | None = None,
+    ) -> dict[str, Any]:
+        """Edit only explicitly selected files and render a reviewed MP4 without Final Cut.
+
+        start: files + prompt. inspect/transcribe: asset_id (inspect accepts start/end).
+        approve: user-approved strategy. render: plan with cuts[{asset_id,start,end,
+        reason,kind:speech|broll,speed,volume,grade:none|neutral|warm}], width,height,fps,
+        titles[{text,start,duration,position}], overlays[{asset_id,start,duration,
+        source_start,layout:full|pip}], captions, music{asset_id,volume,duck}.
+        Review images/audio from render output before review: report{render_id,sha256,
+        windows:[{id,visual,audio,passed}],summary}. export renders the accepted preview
+        plan at final quality. Review that new render, then finish. Up to 3 previews.
+        Source paths appear only in start; all edit decisions use returned asset IDs.
+        """
+        import asyncio
+        from editor_cli.direct.session import dispatch
+
+        try:
+            return await asyncio.to_thread(
+                dispatch, action, session_dir, files=files, prompt=prompt,
+                asset_id=asset_id, start=start, end=end, strategy=strategy,
+                plan=plan, report=report, url=url, purpose=purpose,
+            )
+        except (OSError, RuntimeError, ValueError, TypeError) as exc:
+            raise ToolError(str(exc)) from exc
 
     @server.tool()
     async def editor_session(
