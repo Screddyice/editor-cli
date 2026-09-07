@@ -865,6 +865,24 @@ final class ActionTests: XCTestCase {
     return (root, target, decoy, tile, open)
   }
 
+  func testExportPanelIsFoundWhenCreatorStudioFloatsItAsItsOwnDialog() throws {
+    let field = FakeFinalCutAXElement.textField()
+    let panel = FakeFinalCutAXElement(
+      role: kAXWindowRole as String, title: "Export XML", subrole: "AXDialog",
+      children: [field, .button("Save")]
+    )
+    // The panel takes focus, so the main window is no longer the focused one.
+    let root = FakeFinalCutAXElement.application(children: [
+      .window(title: "Final Cut Pro", children: []), panel,
+    ])
+
+    try LiveFinalCutAX(root: root).setUniqueVisibleTextField(
+      "/tmp/session/source.fcpxml", stage: .exportXML, timeout: 2
+    )
+
+    XCTAssertEqual(field.writtenValue, "/tmp/session/source.fcpxml")
+  }
+
   func testExportSheetRequiresExactSheetUnderMainWindow() throws {
     let field = FakeFinalCutAXElement.textField()
     let exportSheet = FakeFinalCutAXElement.sheet(

@@ -1370,7 +1370,7 @@ final class LiveFinalCutAX {
       let parent: any FinalCutAXElement
       switch stage {
       case .duplicate, .exportXML:
-        parent = try focusedMainWindow()
+        parent = root
       case .shareSettings:
         parent = root
       case .shareSave:
@@ -1379,18 +1379,10 @@ final class LiveFinalCutAX {
 
       let candidates: [any FinalCutAXElement]
       switch stage {
-      case .duplicate:
-        candidates = try directChildren(of: parent).filter {
-          try role(of: $0) == kAXSheetRole as String
-            && stringAttribute(kAXTitleAttribute as String, of: $0) == "Duplicate Project As"
-            && isVisible($0)
-        }
-      case .exportXML:
-        candidates = try directChildren(of: parent).filter {
-          try role(of: $0) == kAXSheetRole as String
-            && stringAttribute(kAXTitleAttribute as String, of: $0) == "Export XML"
-            && isVisible($0)
-        }
+      case .duplicate, .exportXML:
+        candidates = try savePanels(
+          titled: stage == .duplicate ? "Duplicate Project As" : "Export XML"
+        )
       case .shareSettings:
         candidates = [try shareSettingsWindow()]
       case .shareSave:
@@ -1409,6 +1401,25 @@ final class LiveFinalCutAX {
         throw AccessibilityDiscoveryError.noMatch
       }
       return container
+    }
+  }
+
+  /// Final Cut 11 attached these panels to the main window as sheets. Creator
+  /// Studio floats them as their own dialog windows, which also steal focus, so
+  /// the main-window search finds nothing and the action stalls. Accept both.
+  private func savePanels(titled title: String) throws -> [any FinalCutAXElement] {
+    let dialogs = try directChildren(of: root).filter {
+      try role(of: $0) == kAXWindowRole as String
+        && stringAttribute(kAXSubroleAttribute as String, of: $0) == "AXDialog"
+        && stringAttribute(kAXTitleAttribute as String, of: $0) == title
+        && isVisible($0)
+    }
+    if !dialogs.isEmpty { return dialogs }
+    guard let window = try? focusedMainWindow() else { return [] }
+    return try directChildren(of: window).filter {
+      try role(of: $0) == kAXSheetRole as String
+        && stringAttribute(kAXTitleAttribute as String, of: $0) == title
+        && isVisible($0)
     }
   }
 

@@ -264,9 +264,20 @@ success and clears nothing, so the reveal still deselects through
 `Edit > Deselect All` with the browser focused.
 
 `inspect_active_project` now answers from a background terminal in under three
-seconds with the full identity: library, event, project, and duration. The
-disposable canary's edit/Share/recovery pass is the next step, so PR #18 stays
-draft. No real user footage has been edited.
+seconds with the full identity: library, event, project, and duration.
+
+Export XML reaches its panel and stops there. Creator Studio floats the save
+panel as its own dialog window (`AXWindow` / `AXDialog`, identifier
+`save-panel`) instead of attaching a sheet to the main window, so the controller
+now accepts both shapes. Two things still block the export, and both need a
+decision rather than a patch. A full path written into the panel's name field
+does not choose a directory: `AXConfirm` on the field reports success and
+navigates nowhere, and pressing Save writes the path as a literal colon-mangled
+filename into whatever `Where` shows. The XML version popup offers only 1.14,
+1.13 and 1.12, and every one of them writes a `.fcpxmld` **bundle**, while the
+controller requires a flat `.fcpxml` file.
+
+PR #18 stays draft. No real user footage has been edited.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)
