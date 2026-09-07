@@ -246,12 +246,27 @@ browser. `inspect_active_project` reads the open timeline from the toolbar's
 `projectNamePopUpButton`, reveals that project in the browser, and returns the
 library, event, and project it lands on.
 
-Rebuilding the helper resets its Automation grant, because macOS keys Apple Event
-consent to the exact binary. Approve `editor-cli permissions request` once after
-each helper install, then `editor-cli doctor` shows five checks passing. The
-disposable canary still needs that approval before it can run an end-to-end
-edit/Share/recovery pass, so PR #18 stays draft. No real user footage has been
-edited.
+macOS keys the Automation grant to the terminal that launches the helper, not to
+the helper binary, so a run from a different terminal prompts again. Approve
+`editor-cli permissions request` there once and `editor-cli doctor` shows five
+checks passing.
+
+Three faults kept native navigation dark, and a live run on 2026-09-08 found all
+three. Final Cut publishes its accessibility window tree only while it is the
+active application, so a helper launched from a background terminal read an empty
+`AXWindows` list and timed out on every traversal; each action now raises Final
+Cut and waits for a window, taking the accessibility route when cooperative
+activation is refused. A menu command that does not apply to the open timeline
+reads as disabled rather than missing, which surfaced as a role mismatch or a
+bare timeout, so `disabledControl` now names it and a failed traversal closes the
+menu it opened. Writing an empty `AXSelectedChildren` to the browser reports
+success and clears nothing, so the reveal still deselects through
+`Edit > Deselect All` with the browser focused.
+
+`inspect_active_project` now answers from a background terminal in under three
+seconds with the full identity: library, event, project, and duration. The
+disposable canary's edit/Share/recovery pass is the next step, so PR #18 stays
+draft. No real user footage has been edited.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)

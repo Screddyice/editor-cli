@@ -761,6 +761,36 @@ final class ActionTests: XCTestCase {
     XCTAssertTrue(share.pressed)
   }
 
+  func testDisabledMenuCommandReportsDisabledRatherThanMissing() {
+    let duplicate = FakeFinalCutAXElement.menuItem("Duplicate Project As\u{2026}")
+    duplicate.setTestAttribute(kAXEnabledAttribute as String, false)
+    let edit = FakeFinalCutAXElement.menuBarItem("Edit", children: [.menu(children: [duplicate])])
+    let root = FakeFinalCutAXElement.application(children: [.menuBar(children: [edit])])
+
+    XCTAssertThrowsError(
+      try LiveFinalCutAX(root: root).pressMenu(path: FinalCutMenu.duplicate, timeout: 0.2)
+    ) { error in
+      XCTAssertEqual(error as? AccessibilityDiscoveryError, .disabledControl)
+    }
+    XCTAssertFalse(duplicate.pressed)
+  }
+
+  func testFailedMenuTraversalClosesTheMenuItLeftOpen() {
+    let export = FakeFinalCutAXElement.menuItem("Export File (default)\u{2026}")
+    let wrongShare = FakeFinalCutAXElement(
+      role: kAXButtonRole as String, title: "Share", children: [export]
+    )
+    let file = FakeFinalCutAXElement.menuBarItem(
+      "File", children: [.menu(children: [wrongShare])]
+    )
+    let root = FakeFinalCutAXElement.application(children: [.menuBar(children: [file])])
+
+    XCTAssertThrowsError(
+      try LiveFinalCutAX(root: root).pressMenu(path: FinalCutMenu.share, timeout: 0.2)
+    )
+    XCTAssertTrue(file.cancelled)
+  }
+
   func testActiveProjectRevealRejectsHiddenSelectedEvent() throws {
     let (root, target, _, _, _) = flatBrowser()
     target.setTestAttribute("AXHidden", true)
@@ -1079,6 +1109,7 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
   var writtenValue: String?
   var onPress: (() -> Void)?
   var onSetBool: ((Bool, String) -> Void)?
+  var cancelled = false
 
   func setTestAttribute(_ name: String, _ value: Any) { attributes[name] = value }
   func setTestElement(_ name: String, _ value: FakeFinalCutAXElement) { elementAttributes[name] = value }
@@ -1231,6 +1262,11 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
   func accessibilityPress() -> Bool {
     pressed = true
     onPress?()
+    return true
+  }
+
+  func accessibilityCancel() -> Bool {
+    cancelled = true
     return true
   }
 

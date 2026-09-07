@@ -214,9 +214,14 @@ struct FinalCutProbe<System: FinalCutSystem> {
 final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
   let sessionRoot: String
   private var expectedSheet: FinalCutSheetStage?
+  private let foreground: FinalCutForeground
 
-  init(sessionRoot: String = "/tmp/editor-cli-probe") {
+  init(
+    sessionRoot: String = "/tmp/editor-cli-probe",
+    foreground: FinalCutForeground = .live
+  ) {
     self.sessionRoot = sessionRoot
+    self.foreground = foreground
   }
 
   func runningApplications(bundleIdentifier: String) -> [FinalCutApplication] {
@@ -468,6 +473,7 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     guard isAccessibilityTrusted() else {
       throw FinalCutActionError.accessibilityNotTrusted
     }
+    try foreground.raise(processIdentifier: processIdentifier, deadline: deadline)
     _ = try FinalCutAutomationReader(transport: NativeFinalCutAutomationTransport())
       .readLibraryNames(
         processIdentifier: processIdentifier,
@@ -488,6 +494,7 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     guard isAccessibilityTrusted() else {
       throw FinalCutActionError.accessibilityNotTrusted
     }
+    try foreground.raise(processIdentifier: processIdentifier, deadline: deadline)
     _ = try remaining(before: deadline)
     return LiveFinalCutAX(processIdentifier: processIdentifier)
   }

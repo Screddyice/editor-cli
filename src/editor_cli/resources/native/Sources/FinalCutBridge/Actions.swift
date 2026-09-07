@@ -83,6 +83,7 @@ enum FinalCutActionError: Error, Equatable, LocalizedError {
   case projectNotFound
   case ambiguousProject
   case blockingDialog
+  case finalCutNotForeground
   case timedOut
 
   var errorDescription: String? {
@@ -97,6 +98,8 @@ enum FinalCutActionError: Error, Equatable, LocalizedError {
     case .projectNotFound: "The exact Final Cut project was not found."
     case .ambiguousProject: "More than one Final Cut project matched the exact identity."
     case .blockingDialog: "Final Cut displayed a blocking dialog."
+    case .finalCutNotForeground:
+      "Final Cut published no accessibility windows; it must be the active application."
     case .timedOut: "Final Cut action timed out before its postcondition completed."
     }
   }
@@ -791,6 +794,7 @@ protocol FinalCutAXElement: AnyObject {
   func accessibilityElements(for attribute: String) -> [any FinalCutAXElement]
   func accessibilityChildren() throws -> [any FinalCutAXElement]
   func accessibilityPress() -> Bool
+  func accessibilityCancel() -> Bool
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool
   func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool
@@ -853,6 +857,10 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
     AXUIElementPerformAction(element, kAXPressAction as CFString) == .success
   }
 
+  func accessibilityCancel() -> Bool {
+    AXUIElementPerformAction(element, kAXCancelAction as CFString) == .success
+  }
+
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool {
     AXUIElementSetAttributeValue(element, attribute as CFString, value as CFString) == .success
   }
@@ -860,6 +868,7 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
   func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool {
     AXUIElementSetAttributeValue(element, attribute as CFString, value as CFBoolean) == .success
   }
+
 
 
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool {
@@ -927,17 +936,34 @@ final class LiveFinalCutAX {
       )
     }
     var container = menuBar
-    for (index, title) in path.enumerated() {
-      let expectedRole = index == 0 ? kAXMenuBarItemRole as String : kAXMenuItemRole as String
-      let item = try pollUntil(deadline: deadline) {
-        try uniqueDirectElement(titled: title, role: expectedRole, beneath: container)
+    // Final Cut validates a menu when it opens, so a command that does not apply
+    // to the open timeline reads as disabled rather than missing. Say that,
+    // instead of reporting a role mismatch or a bare timeout.
+    var openedMenuBarItem: (any FinalCutAXElement)?
+    do {
+      for (index, title) in path.enumerated() {
+        let expectedRole = index == 0 ? kAXMenuBarItemRole as String : kAXMenuItemRole as String
+        let item = try pollUntil(deadline: deadline) {
+          let candidate = try uniqueDirectElement(
+            titled: title, role: expectedRole, beneath: container, requiresEnabled: false
+          )
+          guard isEnabled(candidate) else {
+            throw AccessibilityDiscoveryError.disabledControl
+          }
+          return candidate
+        }
+        try press(item)
+        if index == 0 { openedMenuBarItem = item }
+        try requireTime(before: deadline)
+        guard index < path.count - 1 else { continue }
+        container = try pollUntil(deadline: deadline) {
+          try uniqueDirectElement(titled: nil, role: kAXMenuRole as String, beneath: item)
+        }
       }
-      try press(item)
-      try requireTime(before: deadline)
-      guard index < path.count - 1 else { continue }
-      container = try pollUntil(deadline: deadline) {
-        try uniqueDirectElement(titled: nil, role: kAXMenuRole as String, beneath: item)
-      }
+    } catch {
+      // An open menu owns the event stream and poisons every later traversal.
+      if let openedMenuBarItem { _ = openedMenuBarItem.accessibilityCancel() }
+      throw error
     }
   }
 
@@ -1129,6 +1155,9 @@ final class LiveFinalCutAX {
   private func clearBrowserSelection(_ browser: any FinalCutAXElement, deadline: TimeInterval) throws {
     if !browser.accessibilityElements(for: kAXSelectedChildrenAttribute as String).isEmpty {
       try requireTime(before: deadline)
+      // Edit > Deselect All is the only route that actually clears the browser.
+      // Writing an empty AXSelectedChildren reports success and changes nothing,
+      // and the command is disabled until the browser holds focus.
       if root.accessibilityElement(for: kAXFocusedUIElementAttribute as String)?.isSameElement(as: browser) != true {
         try setBool(true, attribute: kAXFocusedAttribute as String, on: browser)
       }
@@ -1603,17 +1632,26 @@ final class LiveFinalCutAX {
   private func pollUntil<Result>(
     deadline: TimeInterval, operation: () throws -> Result
   ) throws -> Result {
+    // A control that stayed disabled for the whole window is a different fault
+    // from one that never appeared, so the last retryable cause outranks a bare
+    // timeout when the deadline runs out.
+    var lastRetryableCause: AccessibilityDiscoveryError?
+    func expired() -> Error {
+      lastRetryableCause == .disabledControl
+        ? AccessibilityDiscoveryError.disabledControl : FinalCutActionError.timedOut
+    }
     while true {
-      try requireTime(before: deadline)
+      guard ProcessInfo.processInfo.systemUptime < deadline else { throw expired() }
       do {
         let result = try operation()
         try requireTime(before: deadline)
         return result
-      } catch AccessibilityDiscoveryError.noMatch {
+      } catch let error as AccessibilityDiscoveryError
+        where error == .noMatch || error == .disabledControl
+      {
+        lastRetryableCause = error
         let remaining = deadline - ProcessInfo.processInfo.systemUptime
-        guard remaining > 0 else {
-          throw FinalCutActionError.timedOut
-        }
+        guard remaining > 0 else { throw expired() }
         Thread.sleep(forTimeInterval: min(0.05, remaining))
       }
     }
