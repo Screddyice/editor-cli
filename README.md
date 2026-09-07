@@ -66,6 +66,9 @@ for edit and review schemas.
 Run `uv run pytest tests/direct tests/test_mcp_server.py` for file isolation,
 review/recovery contracts, and offline FFmpeg tests using generated media. These
 checks verify the software; a creative acceptance edit still needs user footage.
+On 2026-09-07, the direct, MCP, and package checks passed 58 tests. The full
+committed checkout passed 478 tests with four existing native Final Cut canary
+failures; the controller PR remains draft.
 
 ## Original Final Cut workflow
 

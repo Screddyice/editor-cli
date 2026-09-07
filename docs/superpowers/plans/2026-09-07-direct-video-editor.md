@@ -51,5 +51,25 @@ add the packaged `direct-video-editor` skill and focused integration tests.
 - [x] Expose direct CLI and MCP calls without constructing Final Cut services.
 - [x] Register the skill through a direct-only setup command for both hosts.
 - [x] Run the generated-footage canary and inspect output images and decoded audio evidence.
-- [ ] Review the feature, fix defects, commit only direct-workflow files, push
+- [x] Review the feature, fix defects, commit only direct-workflow files, push
   the existing draft PR, and report exact validation and remaining acceptance.
+
+## Verification record
+
+On 2026-09-07, the direct workflow, MCP, and package tests passed: 58 tests.
+The generated-media canary completed preview, review, export, final review, and
+delivery. Rendered frames were inspected; audio checks used decoded PCM and
+synthetic fixtures, not claimed listening. The caption-timing oracle passed on
+the implemented function. The verifier council returned a verified GPT-5.6 Sol
+candidate after its local attempt and unavailable OpenRouter credit.
+
+A clean checkout with its own environment and the existing OpenMontage reference
+passed 478 tests and failed four unchanged native Final Cut canary tests at the
+preserved-project identity check. Those tests and native recovery work remain
+outside this direct-workflow change. The original checkout's pre-existing dirty
+Final Cut files remain intact, including future tests awaiting implementation.
+
+Both host skills are installed. Direct doctor confirms FFmpeg/ffprobe readiness;
+speech transcription is not configured because no ElevenLabs key was found.
+No real user footage has been selected for creative acceptance. PR #18 remains
+draft, with no merge or live Final Cut acceptance claim.
