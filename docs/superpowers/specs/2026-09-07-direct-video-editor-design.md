@@ -22,14 +22,16 @@ changed media, changed plans, or a new render.
 ## Agent workflow
 
 Codex reads the selected context, probes media, requests cached verbatim word
-transcripts, and inspects sampled source frames. It proposes the story, pacing,
+transcripts when captions or word-aware cuts need them, and inspects sampled source frames. It proposes the story, pacing,
 format, captions, and optional music or meme inserts once. After the user's
 approval, it submits structured edit decisions and runs up to three preview
 passes. It can inspect more source windows whenever the narrative needs them.
 
 Rendering supports ordered cuts, still images, silent footage, speed changes,
-simple color adjustment, titles, overlays, captions, and a music bed. Speech
-edges must avoid words and preserve 30–200 ms padding where silence permits.
+simple color adjustment, titles, overlays, captions, one finite non-looping
+narration track, and a music bed. Narration mixes with footage audio and cannot
+extend the video. Timestamped speech edges must avoid words and preserve 30–200
+ms padding where silence permits. Captions require transcripts for each audible asset.
 Audio receives 30 ms edge fades. Normalize video and audio before concat.
 Shift overlay timestamps and apply captions last. Preserve chosen aspect ratio
 with letterboxing. Avoid arbitrary FFmpeg expressions in the public interface.

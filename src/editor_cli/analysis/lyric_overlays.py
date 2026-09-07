@@ -58,6 +58,10 @@ def group_phrases(
     for i, g in enumerate(groups):
         text = " ".join(w.text.strip(",.!?") for w in g).strip()
         start = max(0.0, g[0].start - lead_in)
-        end = groups[i + 1][0].start - lead_in if i + 1 < len(groups) else g[-1].end + tail_hold
+        end = (
+            groups[i + 1][0].start - lead_in
+            if i + 1 < len(groups)
+            else g[-1].end + tail_hold
+        )
         phrases.append(Phrase(text=text, start=round(start, 2), end=round(end, 2)))
     return phrases

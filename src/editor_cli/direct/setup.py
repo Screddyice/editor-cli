@@ -13,11 +13,16 @@ MARKER = "<!-- managed by editor-cli.direct -->"
 
 def install_skills(home: Path | None = None) -> dict:
     home = home or Path.home()
-    template = importlib.resources.files("editor_cli.resources").joinpath(
-        "skills/direct-video-editor/SKILL.md").read_text()
+    template = (
+        importlib.resources.files("editor_cli.resources")
+        .joinpath("skills/direct-video-editor/SKILL.md")
+        .read_text()
+    )
     content = template.replace("@PYTHON@", shlex.quote(sys.executable))
-    targets = [home / host / "skills" / "direct-video-editor" / "SKILL.md"
-               for host in (".codex", ".claude")]
+    targets = [
+        home / host / "skills" / "direct-video-editor" / "SKILL.md"
+        for host in (".codex", ".claude")
+    ]
     # Validate both destinations before making changes. Existing managed copies
     # receive a backup; unrelated skills and symlink destinations are untouched.
     for target in targets:
@@ -37,6 +42,9 @@ def install_skills(home: Path | None = None) -> dict:
         temp.write_text(content)
         os.replace(temp, target)
         changed.append(str(target))
-    return {"installed": [str(t) for t in targets], "changed": changed,
-            "python": sys.executable,
-            "note": "Use the CLI now; restart agent sessions to refresh discovered skills/MCP tools."}
+    return {
+        "installed": [str(t) for t in targets],
+        "changed": changed,
+        "python": sys.executable,
+        "note": "Use the CLI now; restart agent sessions to refresh discovered skills/MCP tools.",
+    }

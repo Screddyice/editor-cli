@@ -7,7 +7,9 @@ import typer
 
 from editor_cli.direct.session import dispatch
 
-app = typer.Typer(help="Edit selected files to MP4 with Codex or Claude, without Final Cut.")
+app = typer.Typer(
+    help="Edit selected files to MP4 with Codex or Claude, without Final Cut."
+)
 
 
 def invoke(action: str, session_dir: str | None = None, **kwargs):
@@ -27,7 +29,9 @@ def doctor():
 
 @app.command()
 def start(
-    files: list[str] = typer.Option(..., "--file", "-f", help="Exact selected file. Repeat for each file."),
+    files: list[str] = typer.Option(
+        ..., "--file", "-f", help="Exact selected file. Repeat for each file."
+    ),
     prompt: str = typer.Option(..., "--prompt", "-p"),
 ):
     """Snapshot the exact selected files and return a resumable session."""
@@ -39,7 +43,9 @@ def run_action(
     action: str,
     session_dir: str,
     data: str = typer.Option("{}", "--data", help="Action arguments as a JSON object."),
-    data_file: Path | None = typer.Option(None, "--data-file", help="Explicit JSON arguments file."),
+    data_file: Path | None = typer.Option(
+        None, "--data-file", help="Explicit JSON arguments file."
+    ),
 ):
     """Inspect, transcribe, approve, render, review, export, or finish a session."""
     try:
@@ -56,6 +62,7 @@ def run_action(
 def setup():
     """Install the direct-video-editor skill for Codex and Claude Code."""
     from editor_cli.direct.setup import install_skills
+
     try:
         result = install_skills()
     except (OSError, ValueError) as exc:

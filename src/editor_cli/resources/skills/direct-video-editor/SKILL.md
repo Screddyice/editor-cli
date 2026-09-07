@@ -30,9 +30,9 @@ Do not use the legacy directory-scanning `edit` command for this workflow.
    editing `prompt`. Never glob or enumerate their parent folders. Include
    context documents only when selected. The first file's parent receives
    `edit/<session-id>/`; originals remain untouched. Persist `session_dir`.
-2. Read the inventory and selected context. Call `transcribe` per audible video
-   or audio source using its `asset_id`. Read verbatim word timestamps, including
-   laughs and slips. Cached results reuse the source snapshot.
+2. Read the inventory and selected context. Transcription is optional. Call
+   `transcribe` for sources that need word-aware trimming or timed captions.
+   Plans without word captions work without an ElevenLabs key.
 3. `inspect` each source's beginning, middle, and end or a broad overview. View
    the returned images with the host's image tool. Inspect the audio waveforms,
    signal measurements, and transcript; listen if an audio/video tool is available.
@@ -55,19 +55,24 @@ Build a `plan` for `render`. Refer to asset IDs, never local paths:
     "reason":"Open on the trip's surprise, retaining the reaction."}],
   "width":1920,"height":1080,"fps":30,
   "titles":[{"text":"Da Nang","start":0,"duration":2,"position":"top"}],
-  "overlays":[],"captions":true,"music":null
+  "overlays":[],
+  "narration":{"asset_id":"asset_RETURNED","source_start":0,"start":0,
+    "duration":42.5,"volume":1},
+  "captions":true,"music":null
 }
 ```
 
 Cuts: video or image, `kind` speech/broll, `speed` 0.25–4, `volume` 0–2,
 `grade` none/neutral/warm. Image cuts start at zero; their end is their duration.
-Never cut inside a word. Use 30–200 ms padding, with longer holds for intentional
-pauses, punchlines, and reactions. Transcribe audible sources before cutting.
+Never cut inside a word when timestamps exist. Use 30–200 ms padding, with longer
+holds for intentional pauses, punchlines, and reactions.
 
 Overlays: `{asset_id,start,duration,source_start,layout}`; layout full/pip.
 Overlay audio is muted. To preserve meme audio, insert it as a timeline cut.
-Music: `{asset_id,volume:0.12,duck:true}`. Titles use top/center/bottom positions.
-Captions follow retained words on the output timeline and appear after overlays.
+Music: `{asset_id,volume:0.12,duck:true}`. Narration is one selected audio asset
+with finite `source_start`, timeline `start`, `duration`, and `volume`. It plays
+once, fits the source and video, and mixes with footage audio. Captions map
+retained footage and narration words and require transcripts for audible assets.
 Choose output dimensions from the brief and footage, preserving its aspect ratio.
 The renderer provides fades at cut edges and normalizes mixed source formats.
 
@@ -86,6 +91,7 @@ quality or audio quality. State whether each audio observation comes from
 listening or signal/transcript inspection. Never claim listening without an
 audio-capable tool. If those measurements cannot resolve a required audio check,
 report that specific uncertainty and leave it pending.
+Repeat any returned unchecked word-timing limitation in the audio observation.
 
 Call `review` with `report`:
 

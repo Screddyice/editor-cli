@@ -28,8 +28,12 @@ KINDS = {
     **dict.fromkeys((".wav", ".mp3", ".m4a", ".aac", ".flac", ".ogg"), "audio"),
     **dict.fromkeys((".txt", ".md", ".srt"), "context"),
 }
-LOCAL_INPUT = ["-protocol_whitelist", "file,pipe", "-format_whitelist",
-               "mov,matroska,mp3,wav,flac,aac,ogg,image2,png_pipe,jpeg_pipe,webp_pipe"]
+LOCAL_INPUT = [
+    "-protocol_whitelist",
+    "file,pipe",
+    "-format_whitelist",
+    "mov,matroska,mp3,wav,flac,aac,ogg,image2,png_pipe,jpeg_pipe,webp_pipe",
+]
 
 
 def publish_file(staging: Path, target: Path) -> None:
@@ -45,9 +49,17 @@ def publish_file(staging: Path, target: Path) -> None:
     elif sys.platform.startswith("linux"):
         libc = ctypes.CDLL(None, use_errno=True)
         rename = libc.renameat2
-        rename.argtypes = [ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint]
+        rename.argtypes = [
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_int,
+            ctypes.c_char_p,
+            ctypes.c_uint,
+        ]
         rename.restype = ctypes.c_int
-        if rename(-100, os.fsencode(staging), -100, os.fsencode(target), 1):  # RENAME_NOREPLACE
+        if rename(
+            -100, os.fsencode(staging), -100, os.fsencode(target), 1
+        ):  # RENAME_NOREPLACE
             number = ctypes.get_errno()
             raise OSError(number, os.strerror(number), str(target))
     elif os.name == "nt":
@@ -89,8 +101,22 @@ def run(args: list[str], *, timeout: int = 3600) -> subprocess.CompletedProcess:
 
 
 def probe(path: Path) -> dict:
-    return json.loads(run(["ffprobe", "-v", "error", *LOCAL_INPUT,
-        "-show_format", "-show_streams", "-of", "json", str(path)], timeout=60).stdout)
+    return json.loads(
+        run(
+            [
+                "ffprobe",
+                "-v",
+                "error",
+                *LOCAL_INPUT,
+                "-show_format",
+                "-show_streams",
+                "-of",
+                "json",
+                str(path),
+            ],
+            timeout=60,
+        ).stdout
+    )
 
 
 def duration(metadata: dict) -> float:
@@ -120,18 +146,28 @@ def audio_evidence(path: Path, output: Path) -> dict:
     draw = ImageDraw.Draw(image)
     draw.line((0, 90, 959, 90), fill="#555555")
     for x in range(960):
-        segment = samples[x * len(samples) // 960:(x + 1) * len(samples) // 960]
+        segment = samples[x * len(samples) // 960 : (x + 1) * len(samples) // 960]
         if segment:
             low, high = min(segment) / 32768, max(segment) / 32768
             draw.line((x, 90 - high * 70, x, 90 - low * 70), fill="#76c5e0")
-    draw.text((10, 8), f"PCM waveform | {len(samples)/rate:.2f}s | peak {peak:.3f} | RMS {rms:.3f}", fill="white")
+    draw.text(
+        (10, 8),
+        f"PCM waveform | {len(samples) / rate:.2f}s | peak {peak:.3f} | RMS {rms:.3f}",
+        fill="white",
+    )
     image.save(output)
-    return {"method": "decoded_pcm", "duration": len(samples) / rate,
-            "peak": peak, "rms": rms,
-            "clipped_samples": sum(abs(s) >= 32760 for s in samples),
-            "max_adjacent_delta": max((abs(b - a) / 32768 for a, b in zip(samples, samples[1:])), default=0),
-            "waveform": str(output),
-            "limitation": "Signal measurements support audio checks; they do not establish perceptual quality."}
+    return {
+        "method": "decoded_pcm",
+        "duration": len(samples) / rate,
+        "peak": peak,
+        "rms": rms,
+        "clipped_samples": sum(abs(s) >= 32760 for s in samples),
+        "max_adjacent_delta": max(
+            (abs(b - a) / 32768 for a, b in zip(samples, samples[1:])), default=0
+        ),
+        "waveform": str(output),
+        "limitation": "Signal measurements support audio checks; they do not establish perceptual quality.",
+    }
 
 
 def window(path: Path, metadata: dict, start: float, end: float, dest: Path) -> dict:
@@ -152,9 +188,25 @@ def window(path: Path, metadata: dict, start: float, end: float, dest: Path) -> 
         for i in range(6):
             t = start + (hi - start) * i / 5
             frame = dest / f"frame-{i}.jpg"
-            run(["ffmpeg", "-nostdin", "-v", "error", *LOCAL_INPUT,
-                 "-ss", str(t), "-i", str(path), "-frames:v", "1",
-                 "-vf", "scale=320:180:force_original_aspect_ratio=decrease", str(frame)], timeout=90)
+            run(
+                [
+                    "ffmpeg",
+                    "-nostdin",
+                    "-v",
+                    "error",
+                    *LOCAL_INPUT,
+                    "-ss",
+                    str(t),
+                    "-i",
+                    str(path),
+                    "-frames:v",
+                    "1",
+                    "-vf",
+                    "scale=320:180:force_original_aspect_ratio=decrease",
+                    str(frame),
+                ],
+                timeout=90,
+            )
             with Image.open(frame) as img:
                 x, y = (i % 3) * 320, (i // 3) * 200
                 sheet.paste(img, (x + (320 - img.width) // 2, y))
@@ -166,9 +218,28 @@ def window(path: Path, metadata: dict, start: float, end: float, dest: Path) -> 
         audio = dest / "audio.wav"
         # For a wide source overview, provide first 20 seconds of audio. The
         # agent can request focused windows for the remaining material.
-        run(["ffmpeg", "-nostdin", "-v", "error", *LOCAL_INPUT,
-             "-ss", str(start), "-i", str(path), "-t", str(min(end - start, 20)),
-             "-vn", "-ac", "1", "-ar", "16000", str(audio)], timeout=120)
+        run(
+            [
+                "ffmpeg",
+                "-nostdin",
+                "-v",
+                "error",
+                *LOCAL_INPUT,
+                "-ss",
+                str(start),
+                "-i",
+                str(path),
+                "-t",
+                str(min(end - start, 20)),
+                "-vn",
+                "-ac",
+                "1",
+                "-ar",
+                "16000",
+                str(audio),
+            ],
+            timeout=120,
+        )
         result["audio"] = str(audio)
         result["audio_end"] = start + min(end - start, 20)
         result["audio_analysis"] = audio_evidence(audio, dest / "waveform.png")
@@ -179,9 +250,16 @@ def window(path: Path, metadata: dict, start: float, end: float, dest: Path) -> 
 
 def public_target(url: str) -> tuple[str, str, str]:
     parsed = urlsplit(url)
-    if (parsed.scheme != "https" or not parsed.hostname or parsed.username
-            or parsed.password or parsed.port not in (None, 443)):
-        raise ValueError("Media URL must be public HTTPS on port 443 without credentials")
+    if (
+        parsed.scheme != "https"
+        or not parsed.hostname
+        or parsed.username
+        or parsed.password
+        or parsed.port not in (None, 443)
+    ):
+        raise ValueError(
+            "Media URL must be public HTTPS on port 443 without credentials"
+        )
     host = parsed.hostname.encode("idna").decode("ascii")
     records = socket.getaddrinfo(host, 443, type=socket.SOCK_STREAM)
     addresses = list(dict.fromkeys(r[4][0] for r in records))
@@ -226,7 +304,9 @@ def download(url: str, destination: Path, *, max_bytes: int = 500_000_000) -> di
                 raise ValueError(f"Media server returned HTTP {response.status}")
             suffix = Path(urlsplit(url).path).suffix.lower()
             if KINDS.get(suffix) not in ("video", "image", "audio"):
-                raise ValueError("Use a direct media URL ending in a supported media extension")
+                raise ValueError(
+                    "Use a direct media URL ending in a supported media extension"
+                )
             length = response.getheader("Content-Length")
             if length and int(length) > max_bytes:
                 raise ValueError("Media download exceeds 500 MB")
@@ -240,8 +320,13 @@ def download(url: str, destination: Path, *, max_bytes: int = 500_000_000) -> di
                     handle.write(chunk)
             if not count:
                 raise ValueError("Media server returned an empty file")
-            return {"path": str(path), "source_url": initial, "final_url": url,
-                    "sha256": digest(path), "bytes": count}
+            return {
+                "path": str(path),
+                "source_url": initial,
+                "final_url": url,
+                "sha256": digest(path),
+                "bytes": count,
+            }
         finally:
             connection.close()
     raise ValueError("Too many media redirects")

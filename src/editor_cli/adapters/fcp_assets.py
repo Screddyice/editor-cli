@@ -25,6 +25,10 @@ DEFAULT_ASSET_ROOTS = (
         "/Applications/Final Cut Pro.app/Contents/PlugIns/"
         "MediaProviders/MotionEffect.fxp/Contents/Resources/Templates.localized"
     ),
+    Path(
+        "/Applications/Final Cut Pro Creator Studio.app/Contents/PlugIns/"
+        "MediaProviders/MotionEffect.fxp/Contents/Resources/Templates.localized"
+    ),
     Path("/Library/Plug-Ins/FxPlug"),
     Path("~/Library/Plug-Ins/FxPlug").expanduser(),
     Path("~/Movies/Motion Templates.localized").expanduser(),
@@ -65,7 +69,7 @@ class InstalledAssetCatalog:
                 if categories and categories[0] in TEMPLATE_CONTAINERS:
                     categories = categories[1:]
                 category = "/".join(categories)
-                action_id = "/".join((*categories, name)) if categories else name
+                action_id = "/".join((kind, *categories, name))
                 assets.append(
                     InstalledAsset(
                         kind=kind,
@@ -76,4 +80,6 @@ class InstalledAssetCatalog:
                         path=resolved,
                     )
                 )
-        return tuple(sorted(assets, key=lambda item: (item.kind, item.action_id, item.path)))
+        return tuple(
+            sorted(assets, key=lambda item: (item.kind, item.action_id, item.path))
+        )

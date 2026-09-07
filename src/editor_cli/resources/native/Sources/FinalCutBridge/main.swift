@@ -105,6 +105,7 @@ private func dispatch(_ request: Request) throws -> [String: Any] {
     let receipt = try actions.sharePreview(
       expected: expected, output: output, timeout: timeout
     )
+    try ShareCompletion.write(output: receipt.output, identity: receipt.project)
     return result(try encodedDictionary(receipt))
   case .inspectDialogs:
     return result(["dialogs": try encodedObject(actions.inspectDialogs())])

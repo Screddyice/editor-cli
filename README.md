@@ -7,9 +7,9 @@ without Final Cut. A separate controller supports projects in Final Cut Pro.
 ## Direct editing with Codex
 
 Select the exact clips and optional context documents in your conversation, then
-ask for an edit: “Make a five-minute vlog. Keep the beach sequence, remove dead
-air, and add captions.” Codex inventories those files, reads word transcripts
-and footage samples, and asks you to approve one editing strategy. It then
+ask for an edit: “Make a five-minute vlog. Keep the beach sequence and use this
+voice-over.” Codex inventories those files, reads footage samples and any word
+transcripts needed for captions, and asks you to approve one editing strategy. It then
 renders, inspects the result, makes corrections within three preview passes,
 and exports the finished MP4. It also inspects the final render before delivery.
 
@@ -34,19 +34,23 @@ controller checks source and render hashes on resume and rejects stale reviews.
 
 Available edits include ordered cuts, still inserts, speed changes, simple
 grades, titles, full-frame or picture-in-picture overlays, timed word captions,
-and looping music with ducking. Output dimensions and frame rate are explicit;
+one finite non-looping narration track, and looping music with ducking. Footage
+audio stays in the mix unless its cut volume is zero. Music can duck against the
+combined footage and narration. Output dimensions and frame rate are explicit;
 mixed aspect ratios receive letterboxing. Overlay audio is muted; use a timeline
 cut for an audible meme. Captions appear above inserts. Direct internet imports
 accept public HTTPS media URLs (500 MB maximum), validate and pin public IPs on
 each redirect, and record provenance. Website extraction and browser cookies
 are outside this workflow.
 
-FFmpeg and ffprobe provide local rendering. Verbatim word transcription uses
+FFmpeg and ffprobe provide local rendering. Optional verbatim word transcription uses
 ElevenLabs Scribe: set `ELEVENLABS_API_KEY` in the process or point
 `EDITOR_CLI_ENV_FILE` at your credential file. The source checkout also checks
 its own `.env` and the machine's `~/projects/.env` for that one key. No Gemini
 key is required for direct editing. `direct doctor` reports rendering and
-transcription readiness separately. No-audio clips can be edited without a key.
+transcription readiness separately. Source audio and narration render without a
+key. Word-aware trimming and timed captions require transcripts; caption plans
+with missing word coverage fail instead of dropping captions.
 
 The agent inspects returned filmstrips, waveforms, decoded audio measurements,
 and transcript timing. It can also listen with the host's audio/video tools.
@@ -66,9 +70,8 @@ for edit and review schemas.
 Run `uv run pytest tests/direct tests/test_mcp_server.py` for file isolation,
 review/recovery contracts, and offline FFmpeg tests using generated media. These
 checks verify the software; a creative acceptance edit still needs user footage.
-On 2026-09-07, the direct, MCP, and package checks passed 58 tests. The full
-committed checkout passed 478 tests with four existing native Final Cut canary
-failures; the controller PR remains draft.
+You can use your recorded speech or selected voice-over without an ASR service.
+Captions default off; enable them after obtaining word timestamps.
 
 ## Original Final Cut workflow
 
@@ -90,8 +93,8 @@ delivery export in Final Cut; the direct workflow above exports its own MP4.
 
 ## Status
 
-**Phases 1–3 are built; the full repository suite reports 240 passed on
-2026-09-05.**
+The original three phases remain available alongside the direct editor and
+native Final Cut controller:
 
 - **Phase 1 — spine:** acquire → Gemini style → transcribe/probe → reason EDL →
   ffmpeg mp4 + FCPXML → Gemini eval loop. EDL→FCPXML validated against Final
@@ -108,7 +111,7 @@ These gates apply to the original Gemini and ffmpeg workflow. They do not
 determine Final Cut controller readiness:
 
 1. **API keys required** — set `GEMINI_API_KEY` (or `CLIQK_GEMINI_API_KEY`) and
-   `ELEVENLABS_API_KEY`. They are currently empty in `~/projects/.env`.
+   `ELEVENLABS_API_KEY`. Check your selected credential configuration before use.
 2. **Manual FCP import** — import a generated `timeline.fcpxml` into Final Cut
    Pro 12.3 once to confirm it opens with media linked (DTD-valid, GUI-import
    pending).
@@ -149,6 +152,19 @@ Doctor is read-only. The native controller does not require CommandPost or a
 paid LateNite application. Its live Final Cut acceptance remains pending; direct
 editing has its own readiness checks and does not use those permissions.
 
+If you already configured your agent hosts, install the helper without changing
+their MCP registrations or skills:
+
+```bash
+uv run editor-cli setup --native-only
+uv run editor-cli permissions request
+uv run editor-cli doctor
+```
+
+Both setup modes offer `--dry-run`. Full setup refuses unmanaged name collisions;
+`--native-only` leaves those entries untouched. A successful helper build does
+not mean macOS granted control permissions or that Final Cut passed a live edit.
+
 #### Session workflow and recovery
 
 ```bash
@@ -172,31 +188,59 @@ its own FCPXML, preview, and evidence manifest. On restart, run `status`, then
 `resume` only after reopening the captured project. The controller refuses to
 replay an uncertain external action or proceed if the source export changed.
 
+Native Share writes an atomic completion receipt with the exact output path,
+project identity, size, and SHA-256. Restart recovery validates that receipt and
+the exact candidate XML before it accepts an existing render. Undo makes the
+restored checkpoint the next editing source and clears the superseded ready
+result. Downloads use the same intent/receipt workflow and preserve provenance
+across interruption; a retry does not replay uncertain network activity.
+
+Timeline inspection returns structured clips, gaps, roles, markers, effects,
+upstream transcript/pacing data when available, and installed Motion assets.
+Title text is separate from speech. Register acquired session media through
+`editor_media.register`, then refer to its asset ID in typed edit operations.
+The controller rejects arbitrary source paths and unregistered asset IDs.
+
 #### Measured automated verification
 
-On 2026-09-05, `uv run pytest -q` reported **240 passed** and
-`uv build` produced the source distribution and wheel. A bounded stdio MCP
-probe initialized `editor-cli`, listed all four grouped tools, and returned the
-same not-ready doctor report. The canary preflight exited before it created a
-workspace: `Canary failed: Run editor-cli doctor and resolve failed checks
-first`. No preview hash or live evidence manifest exists yet.
+Run the full verification gates from the checkout:
 
-PR delivery remains pending until this branch is pushed. PR #18 has no
-configured check run in the latest remote state, so this document makes no
-green-check claim.
+```bash
+uv run pytest -q
+swift test --package-path native/final-cut-bridge
+uvx ruff check src tests scripts
+uvx ruff format --check src tests scripts
+uv build
+uv run python -m editor_cli.mcp_server --help
+```
+
+The `Check` GitHub workflow runs the Python and native tests, lint, distribution
+build, and MCP entry-point check on macOS. A separate Python 3.10 job checks
+the minimum supported version. Offline tests include generated-media
+renders and simulated crash recovery. They do not prove live Final Cut control.
+
+Local verification on 2026-09-07: 530 Python tests, 65 Swift tests, and 22
+Python 3.10 setup/locking tests passed. Ruff lint/format, wheel/sdist builds,
+and MCP startup checks passed. Code review covered interruption recovery,
+media provenance and probing, and the optional-transcription voice-over path.
+
+On the development Mac, the native helper is installed and direct rendering is
+ready. Final Cut is not running, so native permissions and live acceptance remain
+unverified. Keep PR #18 draft until the disposable native canary and Codex/Claude
+preview-hash comparison pass. No real user footage has been edited.
 
 See
-[`docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md`](docs/superpowers/specs/2026-09-05-final-cut-closed-loop-controller-design.md)
+[`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)
 for the approved architecture, access boundaries, recovery model, and live
 Final Cut 12.3 acceptance test.
 
-## Setup
+## Legacy workflow setup
 
 ```bash
 uv sync --extra dev            # install deps + dev tools
 export GEMINI_API_KEY=...      # or CLIQK_GEMINI_API_KEY
 export ELEVENLABS_API_KEY=...  # https://elevenlabs.io/app/settings/api-keys
-uv run pytest -q               # 240 passed on 2026-09-05
+uv run pytest -q
 ```
 
 ## Usage
@@ -224,8 +268,8 @@ uv run editor-cli edit ./footage --prompt "..." \
 - Python — orchestrator + FCPXML generation
 - Gemini API — video understanding + style evaluation
 - ElevenLabs — word-level transcription (reused from `video-use`)
-- Final Cut Pro 12.3 — editing + preview render through the loopback-only
-  CommandPost bridge
+- Final Cut Pro 12.3 — editing and preview rendering through the signed native
+  Swift helper
 - ffmpeg — preprocessing and fast preview renders
 
 ## References (vendored, gitignored)

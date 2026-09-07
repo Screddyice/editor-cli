@@ -73,3 +73,10 @@ Both host skills are installed. Direct doctor confirms FFmpeg/ffprobe readiness;
 speech transcription is not configured because no ElevenLabs key was found.
 No real user footage has been selected for creative acceptance. PR #18 remains
 draft, with no merge or live Final Cut acceptance claim.
+
+## Voice-over follow-up
+
+- [x] Make transcription optional outside word-aware trims and captions.
+- [x] Mix one bounded, non-looping narration asset with footage audio.
+- [x] Map narration captions and reject incomplete transcript coverage.
+- [x] Return missing word-check limitations with render review evidence.

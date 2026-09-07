@@ -41,9 +41,7 @@ class MCPTransport(Protocol):
 
 class StdioMCPTransport:
     @asynccontextmanager
-    async def open(
-        self, params: StdioServerParameters
-    ) -> AsyncIterator[ClientSession]:
+    async def open(self, params: StdioServerParameters) -> AsyncIterator[ClientSession]:
         async with stdio_client(params) as (reader, writer):
             async with ClientSession(reader, writer) as session:
                 yield session
@@ -67,8 +65,12 @@ class FCPXMLMCPClient:
         if not command:
             raise ValueError("FCPXML MCP command cannot be empty")
         self.command = command
-        self.journal_root = journal_root.expanduser().resolve() if journal_root else None
-        self.allowed_roots = tuple(root.expanduser().resolve() for root in allowed_roots)
+        self.journal_root = (
+            journal_root.expanduser().resolve() if journal_root else None
+        )
+        self.allowed_roots = tuple(
+            root.expanduser().resolve() for root in allowed_roots
+        )
         self.transport = transport or StdioMCPTransport()
 
     def _parameters(self) -> StdioServerParameters:

@@ -81,7 +81,7 @@ def test_controller_config_rejects_non_loopback_commandpost():
 
 - [ ] **Step 2: Run the tests and confirm the missing API**
 
-Run: `uv run pytest tests/test_config.py -q`  
+Run: `uv run pytest tests/test_config.py -q`
 Expected: collection fails because `load_controller_config` does not exist.
 
 - [ ] **Step 3: Add dependencies and controller configuration**
@@ -131,7 +131,7 @@ def load_controller_config(env: Optional[dict[str, str]] = None) -> ControllerCo
 
 - [ ] **Step 4: Lock and verify configuration**
 
-Run: `uv lock && uv sync --extra dev && uv run pytest tests/test_config.py -q`  
+Run: `uv lock && uv sync --extra dev && uv run pytest tests/test_config.py -q`
 Expected: all config tests pass and the lock contains `fcp-mcp-server==0.22.1`.
 
 - [ ] **Step 5: Commit the dependency boundary**
@@ -176,7 +176,7 @@ def test_edit_program_rejects_unwrapped_action():
 
 - [ ] **Step 2: Confirm the tests fail**
 
-Run: `uv run pytest tests/session/test_models.py -q`  
+Run: `uv run pytest tests/session/test_models.py -q`
 Expected: import fails because `editor_cli.session.models` does not exist.
 
 - [ ] **Step 3: Implement immutable session contracts**
@@ -271,7 +271,7 @@ class PassResult:
 
 - [ ] **Step 4: Verify session contracts**
 
-Run: `uv run pytest tests/session/test_models.py -q`  
+Run: `uv run pytest tests/session/test_models.py -q`
 Expected: all model tests pass.
 
 - [ ] **Step 5: Commit session contracts**
@@ -315,7 +315,7 @@ def test_allowlist_rejects_reference_sibling(tmp_path: Path):
 
 - [ ] **Step 2: Confirm the allowlist tests fail**
 
-Run: `uv run pytest tests/session/test_paths.py -q`  
+Run: `uv run pytest tests/session/test_paths.py -q`
 Expected: import fails because `SessionPaths` does not exist.
 
 - [ ] **Step 3: Implement session paths and exact-file grants**
@@ -354,7 +354,7 @@ class SessionPaths:
 
 - [ ] **Step 4: Verify fail-closed path behavior**
 
-Run: `uv run pytest tests/session/test_paths.py -q`  
+Run: `uv run pytest tests/session/test_paths.py -q`
 Expected: all allowlist tests pass, including symlink-escape cases.
 
 - [ ] **Step 5: Commit the local access boundary**
@@ -394,7 +394,7 @@ def test_pending_external_action_survives_restart(tmp_path):
 
 - [ ] **Step 2: Confirm storage tests fail**
 
-Run: `uv run pytest tests/session/test_store.py -q`  
+Run: `uv run pytest tests/session/test_store.py -q`
 Expected: import fails because `SessionStore` does not exist.
 
 - [ ] **Step 3: Implement atomic replace and JSONL append**
@@ -430,7 +430,7 @@ class SessionStore:
 
 - [ ] **Step 4: Verify restart behavior**
 
-Run: `uv run pytest tests/session/test_store.py -q`  
+Run: `uv run pytest tests/session/test_store.py -q`
 Expected: all store tests pass, including one simulated torn state-file write.
 
 - [ ] **Step 5: Commit persistence**
@@ -482,7 +482,7 @@ def test_asset_catalog_scans_only_approved_roots(tmp_path):
 
 - [ ] **Step 2: Confirm the adapter tests fail**
 
-Run: `uv run pytest tests/adapters/test_commandpost.py -q`  
+Run: `uv run pytest tests/adapters/test_commandpost.py -q`
 Expected: import fails because the adapter does not exist.
 
 - [ ] **Step 3: Implement the narrow WebSocket client**
@@ -539,7 +539,7 @@ follow symlinks outside the approved roots.
 
 - [ ] **Step 4: Verify protocol, listener, and timeout behavior**
 
-Run: `uv run pytest tests/adapters/test_commandpost.py tests/adapters/test_fcp_assets.py -q`  
+Run: `uv run pytest tests/adapters/test_commandpost.py tests/adapters/test_fcp_assets.py -q`
 Expected: all adapter tests pass against a local fake WebSocket server and a
 temporary installed-asset tree.
 
@@ -576,7 +576,7 @@ async def test_fcpxml_client_rejects_unwrapped_tool():
 
 - [ ] **Step 2: Confirm the typed client tests fail**
 
-Run: `uv run pytest tests/adapters/test_fcpxml_mcp.py -q`  
+Run: `uv run pytest tests/adapters/test_fcpxml_mcp.py -q`
 Expected: import fails because `FCPXMLMCPClient` does not exist.
 
 - [ ] **Step 3: Implement the official MCP stdio client**
@@ -614,7 +614,7 @@ subprocess. Pass no home-directory default to the upstream server.
 
 - [ ] **Step 4: Run contract tests against the pinned package**
 
-Run: `uv run pytest tests/adapters/test_fcpxml_mcp.py -q`  
+Run: `uv run pytest tests/adapters/test_fcpxml_mcp.py -q`
 Expected: fake transport tests pass and a real `initialize` plus `tools/list`
 smoke test finds the 13 wrapped grouped tools.
 
@@ -652,7 +652,7 @@ async def test_capture_preserves_source_before_candidate(tmp_path, fake_fcp):
 
 - [ ] **Step 2: Confirm capture tests fail**
 
-Run: `uv run pytest tests/session/test_capture.py -q`  
+Run: `uv run pytest tests/session/test_capture.py -q`
 Expected: import fails because the capture module does not exist.
 
 - [ ] **Step 3: Implement identity-checked capture**
@@ -680,7 +680,7 @@ uncertain export or duplicate command.
 
 - [ ] **Step 4: Verify ordering and resume safety**
 
-Run: `uv run pytest tests/session/test_capture.py -q`  
+Run: `uv run pytest tests/session/test_capture.py -q`
 Expected: all capture tests pass and the fake records export validation before
 duplication.
 
@@ -714,7 +714,7 @@ def test_watch_builds_reusable_evidence_bundle(tmp_path, fake_runner):
 
 - [ ] **Step 2: Confirm watch-adapter tests fail**
 
-Run: `uv run pytest tests/adapters/test_watch.py -q`  
+Run: `uv run pytest tests/adapters/test_watch.py -q`
 Expected: import fails because `WatchAdapter` does not exist.
 
 - [ ] **Step 3: Implement deterministic watch invocation**
@@ -746,7 +746,7 @@ Add a setup dry-run test that produces this exact command without executing it:
 npx skills add bradautomates/claude-video -g -y
 ```
 
-Run: `uv run pytest tests/adapters/test_watch.py tests/test_setup.py -q`  
+Run: `uv run pytest tests/adapters/test_watch.py tests/test_setup.py -q`
 Expected: all perception and setup tests pass.
 
 - [ ] **Step 5: Commit shared video perception**
@@ -784,7 +784,7 @@ def test_technical_probe_rejects_black_or_missing_preview(fake_ffprobe):
 
 - [ ] **Step 2: Confirm verifier tests fail**
 
-Run: `uv run pytest tests/verification -q`  
+Run: `uv run pytest tests/verification -q`
 Expected: imports fail because verification modules do not exist.
 
 - [ ] **Step 3: Implement evidence-based pass reports**
@@ -818,7 +818,7 @@ watch evidence bundle and request. Reject malformed or missing required keys.
 
 - [ ] **Step 4: Verify all failure modes**
 
-Run: `uv run pytest tests/verification -q`  
+Run: `uv run pytest tests/verification -q`
 Expected: all verifier tests pass, including malformed JSON, black preview,
 unexpected silence, missing media, and a failed required edit.
 
@@ -854,7 +854,7 @@ def test_acquire_rejects_non_http_sources(tmp_path, url):
 
 - [ ] **Step 2: Confirm acquisition tests fail**
 
-Run: `uv run pytest tests/acquire/test_internet.py -q`  
+Run: `uv run pytest tests/acquire/test_internet.py -q`
 Expected: import fails because `InternetAcquirer` does not exist.
 
 - [ ] **Step 3: Implement bounded downloads and provenance**
@@ -887,7 +887,7 @@ pass browser cookies or credential files to yt-dlp in this release.
 
 - [ ] **Step 4: Verify content limits and provenance**
 
-Run: `uv run pytest tests/acquire/test_internet.py -q`  
+Run: `uv run pytest tests/acquire/test_internet.py -q`
 Expected: all acquisition tests pass, including oversized content, redirects
 to non-HTTPS, executable signatures, and duplicate content hashes.
 
@@ -935,7 +935,7 @@ async def test_controller_caps_at_three_and_leaves_best_candidate(deps, request)
 
 - [ ] **Step 2: Confirm controller tests fail**
 
-Run: `uv run pytest tests/session/test_controller.py -q`  
+Run: `uv run pytest tests/session/test_controller.py -q`
 Expected: import fails because the controller does not exist.
 
 - [ ] **Step 3: Implement the host-driven three-pass state machine**
@@ -984,7 +984,7 @@ to reconcile any pending external action.
 
 - [ ] **Step 4: Verify ordering, cap, and recovery**
 
-Run: `uv run pytest tests/session/test_controller.py -q`  
+Run: `uv run pytest tests/session/test_controller.py -q`
 Expected: all state-machine tests pass, including process restart after each
 transition, strict three-pass enforcement, and selection of the strongest
 failed pass.
@@ -1020,7 +1020,7 @@ def test_final_cut_skill_requires_rendered_visual_verification():
 
 - [ ] **Step 2: Confirm the skill is missing**
 
-Run: `uv run pytest tests/test_final_cut_editor_skill.py -q`  
+Run: `uv run pytest tests/test_final_cut_editor_skill.py -q`
 Expected: failure because `skills/final-cut-editor/SKILL.md` does not exist.
 
 - [ ] **Step 3: Write the shared editing skill**
@@ -1056,7 +1056,7 @@ Cut Pro timeline.
 
 - [ ] **Step 4: Verify the skill contract**
 
-Run: `uv run pytest tests/test_final_cut_editor_skill.py -q`  
+Run: `uv run pytest tests/test_final_cut_editor_skill.py -q`
 Expected: all required control-loop and safety phrases are present.
 
 - [ ] **Step 5: Commit the shared host workflow**
@@ -1090,7 +1090,7 @@ async def test_editor_session_doctor_is_read_only(mcp_client, fake_controller):
 
 - [ ] **Step 2: Confirm server tests fail**
 
-Run: `uv run pytest tests/test_mcp_server.py -q`  
+Run: `uv run pytest tests/test_mcp_server.py -q`
 Expected: import fails because `mcp_server` does not exist.
 
 - [ ] **Step 3: Implement the grouped FastMCP surface**
@@ -1135,7 +1135,7 @@ raw FCPXML tools private to the process.
 
 - [ ] **Step 4: Verify initialize, tools/list, and real read**
 
-Run: `uv run pytest tests/test_mcp_server.py -q`  
+Run: `uv run pytest tests/test_mcp_server.py -q`
 Expected: MCP initialize succeeds, exactly four tools appear, and `doctor`
 returns a harmless device read without opening Final Cut.
 
@@ -1174,7 +1174,7 @@ def test_setup_second_run_has_no_changes(tmp_path, fake_platform):
 
 - [ ] **Step 2: Confirm setup tests fail**
 
-Run: `uv run pytest tests/test_setup.py -q`  
+Run: `uv run pytest tests/test_setup.py -q`
 Expected: import fails because setup functions do not exist.
 
 - [ ] **Step 3: Implement staged setup with backups**
@@ -1217,10 +1217,10 @@ unrelated key.
 
 - [ ] **Step 4: Run setup tests and a dry run**
 
-Run: `uv run pytest tests/test_setup.py tests/test_cli_smoke.py -q`  
+Run: `uv run pytest tests/test_setup.py tests/test_cli_smoke.py -q`
 Expected: all tests pass.
 
-Run: `uv run editor-cli setup --dry-run`  
+Run: `uv run editor-cli setup --dry-run`
 Expected: reports planned CommandPost, watch-skill, and MCP changes without
 writing outside the repository.
 
@@ -1256,7 +1256,7 @@ def test_session_status_reports_blocked_checks(monkeypatch, blocked_session):
 
 - [ ] **Step 2: Confirm CLI workflow tests fail**
 
-Run: `uv run pytest tests/integration/test_edit_active.py -q`  
+Run: `uv run pytest tests/integration/test_edit_active.py -q`
 Expected: the CLI reports that `edit-active` and `session` do not exist.
 
 - [ ] **Step 3: Add thin Typer controllers**
@@ -1276,7 +1276,7 @@ edit.
 
 - [ ] **Step 4: Verify CLI and MCP parity**
 
-Run: `uv run pytest tests/integration/test_edit_active.py tests/test_mcp_server.py -q`  
+Run: `uv run pytest tests/integration/test_edit_active.py tests/test_mcp_server.py -q`
 Expected: both surfaces return the same session ID, pass count, best candidate,
 and required-check results.
 
@@ -1308,7 +1308,7 @@ def test_canary_definition_covers_visible_and_structural_edits():
 
 - [ ] **Step 2: Confirm the fixture and script are missing**
 
-Run: `uv run pytest tests/integration/test_live_canary_contract.py -q`  
+Run: `uv run pytest tests/integration/test_live_canary_contract.py -q`
 Expected: failure because the canary fixture does not exist.
 
 - [ ] **Step 3: Implement deterministic canary media and checks**
@@ -1340,7 +1340,7 @@ It refuses a path that already exists and never opens a real user library.
 
 - [ ] **Step 4: Run the contract test, then the live canary**
 
-Run: `uv run pytest tests/integration/test_live_canary_contract.py -q`  
+Run: `uv run pytest tests/integration/test_live_canary_contract.py -q`
 Expected: contract test passes.
 
 Run with Final Cut and CommandPost open:
@@ -1368,17 +1368,17 @@ git commit -m "test: add Final Cut 12.3 controller canary"
 
 - [ ] **Step 1: Run the complete automated suite**
 
-Run: `uv run pytest -q`  
+Run: `uv run pytest -q`
 Expected: all tests pass with only tests marked as optional live-network checks
 skipped.
 
 - [ ] **Step 2: Run static and packaging checks**
 
-Run: `uv build && uv run python -m editor_cli.mcp_server --help`  
+Run: `uv build && uv run python -m editor_cli.mcp_server --help`
 Expected: wheel and source distribution build; MCP entry point imports without
 warnings.
 
-Run: `git diff --check`  
+Run: `git diff --check`
 Expected: no whitespace errors.
 
 - [ ] **Step 3: Verify both agent hosts**

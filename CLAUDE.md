@@ -64,6 +64,9 @@ final export in Final Cut Pro.
 ### Environment (already wired)
 
 - **Keys:** direct editing uses `ELEVENLABS_API_KEY` for Scribe speech transcription; check `direct doctor`, do not assume a key exists. `EDITOR_CLI_ENV_FILE` selects an exact credential file. Legacy Gemini workflows also need `GEMINI_API_KEY`. Never echo or commit keys.
+- **Voice-over:** direct plans accept one finite, non-looping selected audio asset.
+  Source audio and narration do not require transcription. Transcribe for
+  word-aware cuts or captions, and never claim word precision without timestamps.
 - **ffmpeg / ffprobe:** required, present on this machine.
 - **yt-dlp:** optional, only for pulling sources from URLs (in editor-cli's deps).
 - **Animation engines** (HyperFrames / Remotion / Manim): installed lazily per animation slot — don't install globally. `manim` is an optional extra of video-use; the `manim-video` sub-skill is at `vendor/video-use/skills/manim-video/`.

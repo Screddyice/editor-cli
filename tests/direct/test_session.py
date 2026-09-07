@@ -10,10 +10,13 @@ def start(tmp_path, monkeypatch):
     source = tmp_path / "selected.mp4"
     source.write_bytes(b"selected content")
     (tmp_path / "private.mp4").write_bytes(b"not selected")
-    monkeypatch.setattr("editor_cli.direct.session.probe", lambda p: {
-        "format": {"duration": "5"},
-        "streams": [{"codec_type": "video", "width": 320, "height": 180}],
-    })
+    monkeypatch.setattr(
+        "editor_cli.direct.session.probe",
+        lambda p: {
+            "format": {"duration": "5"},
+            "streams": [{"codec_type": "video", "width": 320, "height": 180}],
+        },
+    )
     result = DirectSession.start([str(source)], "make a vlog")
     return DirectSession(Path(result["session_dir"])), result
 
@@ -40,8 +43,17 @@ def test_rejects_directory_symlink_and_playlist(tmp_path):
 def test_requires_strategy_and_rejects_unknown_asset(tmp_path, monkeypatch):
     session, result = start(tmp_path, monkeypatch)
     asset_id = next(iter(result["assets"]))
-    plan = {"cuts": [{"asset_id": asset_id, "start": 0, "end": 2,
-                     "kind": "broll", "reason": "opening"}]}
+    plan = {
+        "cuts": [
+            {
+                "asset_id": asset_id,
+                "start": 0,
+                "end": 2,
+                "kind": "broll",
+                "reason": "opening",
+            }
+        ]
+    }
     with pytest.raises(ValueError, match="strategy"):
         session.render(plan)
     session.approve("Short chronological vlog; preserve the arrival.")
@@ -66,6 +78,44 @@ def test_context_selection_reads_only_exact_document(tmp_path):
 
 def test_nonfinite_plan_rejected():
     from editor_cli.direct.models import EditPlan
+
     with pytest.raises(ValueError):
-        EditPlan.model_validate({"cuts": [{"asset_id": "a", "start": 0,
-            "end": float("inf"), "reason": "invalid"}]})
+        EditPlan.model_validate(
+            {
+                "cuts": [
+                    {
+                        "asset_id": "a",
+                        "start": 0,
+                        "end": float("inf"),
+                        "reason": "invalid",
+                    }
+                ]
+            }
+        )
+
+
+def test_narration_requires_strict_finite_bounds_inside_timeline():
+    from editor_cli.direct.models import EditPlan
+
+    base = {
+        "cuts": [{"asset_id": "picture", "start": 0, "end": 2, "reason": "picture"}]
+    }
+    valid = EditPlan.model_validate(
+        {
+            **base,
+            "narration": {
+                "asset_id": "voice",
+                "source_start": 0,
+                "start": 0.5,
+                "duration": 1,
+            },
+        }
+    )
+    assert valid.narration.duration == 1
+    for narration in (
+        {"asset_id": "voice", "source_start": 0, "start": 0, "duration": float("inf")},
+        {"asset_id": "voice", "source_start": 0, "start": 1.5, "duration": 0.6},
+        {"asset_id": "voice", "source_start": -0.1, "start": 0, "duration": 0.5},
+    ):
+        with pytest.raises(ValueError):
+            EditPlan.model_validate({**base, "narration": narration})

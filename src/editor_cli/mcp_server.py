@@ -258,8 +258,20 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
 
     @server.tool()
     async def editor_direct(
-        action: Literal["doctor", "start", "status", "resume", "inspect", "transcribe",
-                        "approve", "render", "review", "export", "finish", "acquire"],
+        action: Literal[
+            "doctor",
+            "start",
+            "status",
+            "resume",
+            "inspect",
+            "transcribe",
+            "approve",
+            "render",
+            "review",
+            "export",
+            "finish",
+            "acquire",
+        ],
         session_dir: str | None = None,
         files: list[str] | None = None,
         prompt: str | None = None,
@@ -278,7 +290,9 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
         approve: user-approved strategy. render: plan with cuts[{asset_id,start,end,
         reason,kind:speech|broll,speed,volume,grade:none|neutral|warm}], width,height,fps,
         titles[{text,start,duration,position}], overlays[{asset_id,start,duration,
-        source_start,layout:full|pip}], captions, music{asset_id,volume,duck}.
+        source_start,layout:full|pip}], captions, music{asset_id,volume,duck},
+        narration{asset_id,source_start,start,duration,volume}. transcribe accepts
+        an optional asset_id.
         Review images/audio from render output before review: report{render_id,sha256,
         windows:[{id,visual,audio,passed}],summary}. export renders the accepted preview
         plan at final quality. Review that new render, then finish. Up to 3 previews.
@@ -289,9 +303,19 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
 
         try:
             return await asyncio.to_thread(
-                dispatch, action, session_dir, files=files, prompt=prompt,
-                asset_id=asset_id, start=start, end=end, strategy=strategy,
-                plan=plan, report=report, url=url, purpose=purpose,
+                dispatch,
+                action,
+                session_dir,
+                files=files,
+                prompt=prompt,
+                asset_id=asset_id,
+                start=start,
+                end=end,
+                strategy=strategy,
+                plan=plan,
+                report=report,
+                url=url,
+                purpose=purpose,
             )
         except (OSError, RuntimeError, ValueError, TypeError) as exc:
             raise ToolError(str(exc)) from exc
@@ -329,14 +353,23 @@ def create_mcp(services: ServiceRegistry | None = None) -> MCPServer:
 
     @server.tool()
     async def editor_media(
-        action: Literal["acquire", "list"],
+        action: Literal["acquire", "list", "register"],
         session_id: str,
         url: str | None = None,
         purpose: str | None = None,
+        asset_path: str | None = None,
+        name: str | None = None,
+        duration_seconds: float | None = None,
     ) -> dict[str, Any]:
-        """Acquire public HTTPS media or list session-approved assets."""
+        """Acquire, list, or register hash-matched session media by path and duration."""
         return await service_registry().media.dispatch(
-            action, session_id=session_id, url=url, purpose=purpose
+            action,
+            session_id=session_id,
+            url=url,
+            purpose=purpose,
+            asset_path=asset_path,
+            name=name,
+            duration_seconds=duration_seconds,
         )
 
     @server.tool()

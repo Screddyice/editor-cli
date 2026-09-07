@@ -31,12 +31,17 @@ def setup_controller(
     dry_run: bool = typer.Option(
         False, "--dry-run", help="Show host changes without applying them."
     ),
+    native_only: bool = typer.Option(
+        False,
+        "--native-only",
+        help="Install only the helper; leave host configurations unchanged.",
+    ),
 ) -> None:
     """Install and configure the local Final Cut controller."""
     from editor_cli.setup import SetupError, run_setup
 
     try:
-        result = run_setup(dry_run=dry_run)
+        result = run_setup(dry_run=dry_run, native_only=native_only)
     except (SetupError, OSError) as exc:
         typer.secho(f"Setup failed: {exc}", fg=typer.colors.RED, err=True)
         raise typer.Exit(1)
@@ -48,7 +53,12 @@ def setup_controller(
     else:
         typer.echo("Editor CLI is already configured.")
     if not dry_run:
-        typer.secho("Editor CLI host setup is complete.", fg=typer.colors.GREEN)
+        typer.secho(
+            "Native helper installation is complete; run doctor to check permissions."
+            if native_only
+            else "Editor CLI host setup is complete.",
+            fg=typer.colors.GREEN,
+        )
 
 
 @app.command("doctor")

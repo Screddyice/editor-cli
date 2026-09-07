@@ -20,9 +20,7 @@ FRAME_LINE = re.compile(
     r"^- `(?P<path>[^`]+)` \(t=(?P<time>[^,]+), reason=(?P<reason>[^)]+)\)$",
     re.MULTILINE,
 )
-TRANSCRIPT_BLOCK = re.compile(
-    r"## Transcript\s+.*?```\n(?P<text>.*?)\n```", re.DOTALL
-)
+TRANSCRIPT_BLOCK = re.compile(r"## Transcript\s+.*?```\n(?P<text>.*?)\n```", re.DOTALL)
 
 
 def run_command(args: list[str], timeout: int) -> subprocess.CompletedProcess[str]:
@@ -107,7 +105,9 @@ class WatchAdapter:
     def __init__(
         self,
         script: Path,
-        runner: Callable[[list[str], int], subprocess.CompletedProcess[str]] = run_command,
+        runner: Callable[
+            [list[str], int], subprocess.CompletedProcess[str]
+        ] = run_command,
     ):
         self.script = script.expanduser().resolve()
         if not self.script.is_file():
@@ -206,7 +206,9 @@ class WatchAdapter:
         for match in FRAME_LINE.finditer(report):
             path = Path(match.group("path")).expanduser().resolve()
             if not path.is_file() or not path.is_relative_to(evidence_root):
-                raise ValueError(f"watch returned a frame outside the evidence bundle: {path}")
+                raise ValueError(
+                    f"watch returned a frame outside the evidence bundle: {path}"
+                )
             frames.append(
                 {
                     "path": str(path),

@@ -10,28 +10,65 @@ from editor_cli.direct.session import DirectSession, atomic_json, speech_edges
 
 
 def approval(attempt, passed=True):
-    return {"render_id": attempt["id"], "sha256": attempt["sha256"],
-            "windows": [{"id": w["id"], "visual": "Synthetic test fixture",
-                         "audio": "Synthetic silent fixture", "passed": passed}
-                        for w in attempt["windows"]], "summary": "Synthetic contract test."}
+    return {
+        "render_id": attempt["id"],
+        "sha256": attempt["sha256"],
+        "windows": [
+            {
+                "id": w["id"],
+                "visual": "Synthetic test fixture",
+                "audio": "Synthetic silent fixture",
+                "passed": passed,
+            }
+            for w in attempt["windows"]
+        ],
+        "summary": "Synthetic contract test.",
+    }
 
 
 @pytest.fixture
 def session(tmp_path, monkeypatch):
-    from tests.direct.test_session import start
-    session, state = start(tmp_path, monkeypatch)
+    source = tmp_path / "selected.mp4"
+    source.write_bytes(b"selected content")
+    monkeypatch.setattr(
+        "editor_cli.direct.session.probe",
+        lambda p: {
+            "format": {"duration": "5"},
+            "streams": [{"codec_type": "video", "width": 320, "height": 180}],
+        },
+    )
+    result = DirectSession.start([str(source)], "make a vlog")
+    session, state = DirectSession(Path(result["session_dir"])), result
     monkeypatch.setattr("editor_cli.direct.session.run", lambda *a, **k: None)
-    monkeypatch.setattr("editor_cli.direct.session.probe", lambda p: {
-        "format": {"duration": "2"}, "streams": [{"codec_type": "video"}, {"codec_type": "audio"}]})
+    monkeypatch.setattr(
+        "editor_cli.direct.session.probe",
+        lambda p: {
+            "format": {"duration": "2"},
+            "streams": [{"codec_type": "video"}, {"codec_type": "audio"}],
+        },
+    )
+
     def render(plan, assets, transcripts, work, preview=False):
         path = work / "render.mp4"
         path.write_bytes(b"render" + work.name.encode())
         return path
+
     monkeypatch.setattr("editor_cli.direct.render.render", render)
-    monkeypatch.setattr(session, "review_windows", lambda *a: [{"id": "window_0", "sha256": {}}])
+    monkeypatch.setattr(
+        session, "review_windows", lambda *a: [{"id": "window_0", "sha256": {}}]
+    )
     session.approve("Keep the strongest moment and finish.")
-    plan = {"cuts": [{"asset_id": next(iter(state["assets"])), "start": 0,
-                     "end": 2, "kind": "broll", "reason": "strong opening"}]}
+    plan = {
+        "cuts": [
+            {
+                "asset_id": next(iter(state["assets"])),
+                "start": 0,
+                "end": 2,
+                "kind": "broll",
+                "reason": "strong opening",
+            }
+        ]
+    }
     return session, plan
 
 
@@ -83,8 +120,10 @@ def test_three_preview_limit_survives_new_session_object(session):
 def test_failed_render_can_retry_without_spending_preview_pass(session, monkeypatch):
     session, plan = session
     original = __import__("editor_cli.direct.render", fromlist=["render"]).render
+
     def fail(*a, **k):
         raise RuntimeError("simulated renderer crash")
+
     monkeypatch.setattr("editor_cli.direct.render.render", fail)
     with pytest.raises(RuntimeError):
         session.render(plan)
@@ -96,12 +135,69 @@ def test_failed_render_can_retry_without_spending_preview_pass(session, monkeypa
 
 
 def test_word_edges_and_padding():
-    transcript = {"words": [{"text": "Hello", "start": 0.5, "end": 1.0},
-                            {"text": "world", "start": 1.5, "end": 2.0}]}
+    transcript = {
+        "words": [
+            {"text": "Hello", "start": 0.5, "end": 1.0},
+            {"text": "world", "start": 1.5, "end": 2.0},
+        ]
+    }
     for a, b in [(0.7, 2.1), (0.5, 2.1), (0.4, 2.0)]:
         with pytest.raises(ValueError):
             speech_edges({"start": a, "end": b}, transcript, 3)
     speech_edges({"start": 0.4, "end": 2.1}, transcript, 3)
+
+
+def test_audible_footage_needs_no_transcription_unless_captions_requested(session):
+    session, plan = session
+    state_path = session.root / "session.json"
+    state = json.loads(state_path.read_text())
+    asset_id = plan["cuts"][0]["asset_id"]
+    state["assets"][asset_id]["metadata"]["streams"].append({"codec_type": "audio"})
+    atomic_json(state_path, state)
+
+    value, transcripts = session.validate_plan(state, plan)
+    assert value["captions"] is False and transcripts == {}
+    value, _ = session.validate_plan(state, {**plan, "captions": False})
+    assert value["cuts"][0]["volume"] == 1
+    attempt = session.render(plan)
+    assert attempt["word_timing_checks"]["unchecked_assets"] == [asset_id]
+    assert (
+        "cannot confirm word-safe cuts" in attempt["word_timing_checks"]["limitation"]
+    )
+    with pytest.raises(ValueError, match="Captions require word transcripts"):
+        session.validate_plan(state, {**plan, "captions": True})
+
+
+def test_narration_source_bounds_and_caption_coverage_are_validated(session, tmp_path):
+    session, plan = session
+    state_path = session.root / "session.json"
+    state = json.loads(state_path.read_text())
+    voice = session.root / "sources" / "voice.wav"
+    voice.write_bytes(b"voice")
+    state["assets"]["voice"] = {
+        "path": str(voice),
+        "original": None,
+        "name": "voice.wav",
+        "sha256": digest(voice),
+        "kind": "audio",
+        "metadata": {"format": {"duration": "1"}, "streams": [{"codec_type": "audio"}]},
+    }
+    atomic_json(state_path, state)
+    narration = {
+        "asset_id": "voice",
+        "source_start": 0.7,
+        "start": 0,
+        "duration": 0.4,
+        "volume": 1,
+    }
+    with pytest.raises(ValueError, match="Narration exceeds source duration"):
+        session.validate_plan(state, {**plan, "narration": narration})
+
+    narration.update(source_start=0.2, duration=0.4)
+    value, _ = session.validate_plan(state, {**plan, "narration": narration})
+    assert value["narration"]["duration"] == 0.4
+    with pytest.raises(ValueError, match="Captions require word transcripts.*voice"):
+        session.validate_plan(state, {**plan, "narration": narration, "captions": True})
 
 
 def test_interrupted_final_copy_is_retryable(session, monkeypatch):
@@ -109,9 +205,11 @@ def test_interrupted_final_copy_is_retryable(session, monkeypatch):
     session.review(approval(session.render(plan)))
     session.review(approval(session.render(final=True)))
     original = shutil.copyfileobj
+
     def interrupt(source, dest, *args, **kwargs):
         dest.write(b"partial")
         raise OSError("disk temporarily full")
+
     monkeypatch.setattr(shutil, "copyfileobj", interrupt)
     with pytest.raises(OSError):
         session.finish()
@@ -151,21 +249,56 @@ def test_no_audio_transcript_cached_by_asset_and_hash(session):
 @pytest.mark.skipif(not shutil.which("ffmpeg"), reason="FFmpeg required")
 def test_real_session_render_review_export_finish(tmp_path):
     video = tmp_path / "clip.mp4"
-    subprocess.run(["ffmpeg", "-v", "error", "-f", "lavfi", "-i",
-        "color=blue:s=320x180:r=30", "-t", "1.5", "-c:v", "libx264",
-        "-pix_fmt", "yuv420p", str(video)], check=True)
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "color=blue:s=320x180:r=30",
+            "-t",
+            "1.5",
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            str(video),
+        ],
+        check=True,
+    )
     source_hash = digest(video)
     inventory = DirectSession.start([str(video)], "synthetic two-cut acceptance")
     session = DirectSession(Path(inventory["session_dir"]))
     asset_id = next(iter(inventory["assets"]))
     session.approve("Synthetic fixture: two blue shots with a title.")
-    plan = {"width": 320, "height": 180, "cuts": [
-        {"asset_id": asset_id, "start": 0, "end": 0.6, "kind": "broll", "reason": "opening"},
-        {"asset_id": asset_id, "start": 0.7, "end": 1.4, "kind": "broll", "reason": "ending"}],
-        "titles": [{"text": "DIRECT EDIT", "start": 0, "duration": 1}]}
+    plan = {
+        "width": 320,
+        "height": 180,
+        "cuts": [
+            {
+                "asset_id": asset_id,
+                "start": 0,
+                "end": 0.6,
+                "kind": "broll",
+                "reason": "opening",
+            },
+            {
+                "asset_id": asset_id,
+                "start": 0.7,
+                "end": 1.4,
+                "kind": "broll",
+                "reason": "ending",
+            },
+        ],
+        "titles": [{"text": "DIRECT EDIT", "start": 0, "duration": 1}],
+    }
     preview = session.render(plan)
-    assert all(Path(w["images"][0]).exists() and Path(w["audio"]).exists()
-               for w in preview["windows"])
+    assert all(
+        Path(w["images"][0]).exists() and Path(w["audio"]).exists()
+        for w in preview["windows"]
+    )
     session.review(approval(preview))
     final = session.render(final=True)
     session.review(approval(final))

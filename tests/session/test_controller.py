@@ -1,6 +1,8 @@
 import json
+import xml.etree.ElementTree as ET
 from dataclasses import replace
 from hashlib import sha256
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -18,9 +20,11 @@ from editor_cli.session.models import (
     EditOperation,
     EditProgram,
     EditRequest,
+    EvidenceBinding,
     ProjectIdentity,
     SessionState,
 )
+from editor_cli.session.store import SessionStore
 from editor_cli.verification.review import ReviewReport
 from editor_cli.verification.technical import inspect_candidate_fcpxml
 
@@ -73,6 +77,19 @@ class FakeFinalCut:
     async def render_preview(self, identity, destination):
         self.rendered.append(identity)
         destination.write_bytes(b"rendered preview")
+        Path(str(destination) + ".receipt.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "kind": "final_cut_share",
+                    "identity": identity.__dict__,
+                    "output": str(destination.resolve()),
+                    "sha256": sha256(destination.read_bytes()).hexdigest(),
+                    "size_bytes": destination.stat().st_size,
+                }
+            ),
+            encoding="utf-8",
+        )
 
     async def open_project(self, identity):
         self.opened_project = identity.project
@@ -87,11 +104,13 @@ class FakeFinalCut:
 class FakeTimeline:
     def __init__(self):
         self.candidate_xml = None
+        self.sources = []
 
     async def analyze(self, _source):
         return {"duration_seconds": 12.0, "clips": 2, "gaps": 1}
 
     async def apply(self, source, program, destination):
+        self.sources.append(source)
         value = self.candidate_xml or (
             source.read_text(encoding="utf-8")
             + f"\n<!-- {program.operations[0].action} -->\n"
@@ -165,6 +184,16 @@ def test_controller_dependencies_require_candidate_validator(tmp_path):
             timeline=FakeTimeline(),
             watch=FakeWatch(),
         )
+
+
+def test_repository_restores_captured_media_references(tmp_path):
+    deps = controller_deps(tmp_path)
+    record = deps.sessions.create(EditRequest("remove gaps"))
+    media = tmp_path / "source.mov"
+    record["capture"] = {"media_references": [str(media)]}
+    deps.sessions.save(record)
+
+    assert deps.sessions.paths(record["id"]).media_references == (media.resolve(),)
 
 
 def valid_edit_program():
@@ -549,6 +578,31 @@ async def test_controller_rejects_review_keys_or_binding_not_owned_by_candidate(
 
 
 @pytest.mark.anyio
+async def test_review_cannot_turn_an_observed_controller_failure_true(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+    supplied = {name: True for name in candidate.required_check_names}
+    supplied["source_unchanged"] = False
+
+    result = await controller.record_review(
+        session.id,
+        candidate.number,
+        ReviewReport(
+            required=supplied,
+            observations=("source tree changed",),
+            binding=candidate.binding,
+        ),
+    )
+
+    assert result.state is SessionState.CORRECT
+    assert result.best_pass.required_checks["source_unchanged"] is False
+
+
+@pytest.mark.anyio
 async def test_controller_names_candidates_with_short_session_id(tmp_path):
     deps = controller_deps(tmp_path)
     controller = EditSessionController(deps)
@@ -559,6 +613,26 @@ async def test_controller_names_candidates_with_short_session_id(tmp_path):
     candidate = await controller.apply(session.id, valid_edit_program())
 
     assert session.id[:8] in candidate.project_name
+    project = ET.parse(candidate.fcpxml_path).getroot().find(".//project")
+    assert project is not None
+    assert project.get("name") == candidate.project_name
+
+
+@pytest.mark.anyio
+async def test_apply_consumes_registered_working_xml(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(EditRequest("remove gaps"))
+    working = deps.sessions.paths(session.id).candidates / "register-01.fcpxml"
+    working.write_bytes(deps.fcp.source_bytes)
+    record = deps.sessions.load(session.id)
+    record["working_xml"] = str(working)
+    deps.sessions.save(record)
+
+    await controller.apply(session.id, valid_edit_program())
+
+    assert deps.timeline.sources[-1] == working
+    assert "working_xml" not in deps.sessions.load(session.id)
 
 
 @pytest.mark.anyio
@@ -623,38 +697,97 @@ async def test_apply_fails_under_competing_session_lock_before_timeline_mutation
 
 
 @pytest.mark.anyio
-async def test_resume_reconciles_completed_import_without_replay(tmp_path):
+async def test_resume_continues_after_import_receipt_without_replay(
+    tmp_path, monkeypatch
+):
     deps = controller_deps(tmp_path)
     controller = EditSessionController(deps)
     session = await controller.start(
         EditRequest("remove gaps", required_operations=("gap_removed",))
     )
+    original_complete = SessionStore.complete_external_action
+
+    def crash_after_import_receipt(store, token, result=None):
+        pending = next(
+            action for action in store.pending_actions() if action.token == token
+        )
+        event_id = original_complete(store, token, result)
+        if pending.action == "finalcut.import_xml":
+            raise RuntimeError("crash after import receipt")
+        return event_id
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            SessionStore, "complete_external_action", crash_after_import_receipt
+        )
+        with pytest.raises(RuntimeError, match="crash after import receipt"):
+            await controller.apply(session.id, valid_edit_program())
+
+    assert len(deps.fcp.imported) == 1
+    assert deps.fcp.rendered == []
+
+    resumed = await controller.resume(session.id)
     record = deps.sessions.load(session.id)
-    candidate = deps.sessions.paths(session.id).candidates / "pass-01.fcpxml"
-    candidate.write_bytes(deps.fcp.source_bytes)
-    expected = ProjectIdentity(
-        "Library", "Event", f"Demo - {session.id[:8]} - AI Pass 1", 12.0
-    )
-    deps.fcp.identity = expected
-    deps.fcp.imported.clear()
-    record["state"] = SessionState.IMPORT.value
-    deps.sessions.save(record)
-    store = deps.sessions.store(session.id)
-    store.begin_external_action(
-        "finalcut.import_xml",
-        {"path": str(candidate), "identity": expected.__dict__},
-        expected_identity=expected.__dict__,
-        idempotency={
-            "candidate_sha256": sha256(candidate.read_bytes()).hexdigest(),
-            "project_name": expected.project,
-        },
-    )
 
-    result = await controller.resume(session.id)
+    assert resumed.state is SessionState.VERIFY
+    assert len(record["candidates"]) == 1
+    assert len(deps.fcp.imported) == 1
+    assert len(deps.fcp.rendered) == 1
+    candidate = controller._candidate(record["candidates"][0])
+    ready = await controller.record_review(
+        session.id, candidate.number, verified_report(candidate)
+    )
+    assert ready.state is SessionState.READY
 
-    assert result.state is SessionState.PREVIEW
-    assert deps.fcp.imported == []
-    assert store.pending_actions() == []
+
+@pytest.mark.anyio
+async def test_resume_continues_after_share_receipt_without_replay(
+    tmp_path, monkeypatch
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    original_complete = SessionStore.complete_external_action
+
+    def crash_after_share_receipt(store, token, result=None):
+        pending = next(
+            action for action in store.pending_actions() if action.token == token
+        )
+        event_id = original_complete(store, token, result)
+        if pending.action == "finalcut.share_preview":
+            raise RuntimeError("crash after share receipt")
+        return event_id
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            SessionStore, "complete_external_action", crash_after_share_receipt
+        )
+        with pytest.raises(RuntimeError, match="crash after share receipt"):
+            await controller.apply(session.id, valid_edit_program())
+
+    assert len(deps.fcp.imported) == 1
+    assert len(deps.fcp.rendered) == 1
+
+    resumed = await controller.resume(session.id)
+    record = deps.sessions.load(session.id)
+
+    assert resumed.state is SessionState.VERIFY
+    assert len(record["candidates"]) == 1
+    assert len(deps.fcp.imported) == 1
+    assert len(deps.fcp.rendered) == 1
+    binding = EvidenceBinding.from_dict(record["candidates"][0]["binding"])
+    ready = await controller.record_review(
+        session.id,
+        1,
+        ReviewReport(
+            required={name: True for name in record["required_checks"]},
+            observations=(),
+            binding=binding,
+        ),
+    )
+    assert ready.state is SessionState.READY
 
 
 @pytest.mark.anyio
@@ -684,6 +817,7 @@ async def test_resume_reconstructs_capture_after_completed_duplicate_without_rep
             "identity": original.__dict__,
             "path": str(source),
             "sha256": sha256(source.read_bytes()).hexdigest(),
+            "size_bytes": source.stat().st_size,
         },
     )
     preserved = ProjectIdentity(
@@ -723,7 +857,146 @@ async def test_undo_is_journaled_and_creates_a_new_project_version(tmp_path):
     result = await controller.undo(session.id)
 
     assert result.project_name.endswith("Undo 1")
+    assert result.source_version == 0
     assert deps.fcp.imported[-1][0] == result.fcpxml_path
     assert deps.fcp.opened_project == result.project_name
     kinds = [event["kind"] for event in deps.sessions.store(session.id).events()]
     assert "undo_created" in kinds
+
+    await controller.apply(session.id, valid_edit_program())
+    assert deps.timeline.sources[-1] == result.fcpxml_path
+
+
+@pytest.mark.anyio
+async def test_undo_from_ready_replaces_old_best_with_editing_source(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+    ready = await controller.record_review(
+        session.id, candidate.number, verified_report(candidate)
+    )
+    assert ready.state is SessionState.READY
+
+    undone = await controller.undo(session.id)
+    status = controller.status(session.id)
+
+    assert status.state is SessionState.CORRECT
+    assert status.best_pass is None
+    assert deps.sessions.load(session.id)["working_xml"] == str(undone.fcpxml_path)
+
+
+@pytest.mark.anyio
+async def test_undo_rejects_mutated_prior_accepted_candidate(tmp_path):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    first = await controller.apply(session.id, valid_edit_program())
+    await controller.record_review(session.id, first.number, failed_report(first, 0.0))
+    second = await controller.apply(session.id, valid_edit_program())
+    await controller.record_review(
+        session.id, second.number, failed_report(second, 0.0)
+    )
+    record = deps.sessions.load(session.id)
+    record["candidates"][0]["required_checks"] = {
+        name: True for name in record["candidates"][0]["required_check_names"]
+    }
+    deps.sessions.save(record)
+    first.fcpxml_path.write_text(
+        first.fcpxml_path.read_text(encoding="utf-8") + "\n<!-- mutated -->\n",
+        encoding="utf-8",
+    )
+
+    with pytest.raises(SessionError, match="accepted undo source hash changed"):
+        await controller.undo(session.id)
+
+
+@pytest.mark.anyio
+async def test_undo_resumes_matching_file_created_after_durable_intent(
+    tmp_path, monkeypatch
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+    await controller.record_review(
+        session.id, candidate.number, failed_report(candidate, 0.0)
+    )
+    original_write = EditSessionController._write_undo_candidate
+
+    def crash_after_file(source, destination, name):
+        original_write(source, destination, name)
+        raise RuntimeError("crash after undo file")
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(
+            EditSessionController,
+            "_write_undo_candidate",
+            staticmethod(crash_after_file),
+        )
+        with pytest.raises(RuntimeError, match="crash after undo file"):
+            await controller.undo(session.id)
+
+    crashed = deps.sessions.load(session.id)
+    assert crashed["undo_inflight"]["phase"] == "create"
+    assert Path(crashed["undo_inflight"]["output"]["path"]).is_file()
+
+    resumed = await controller.resume(session.id)
+    saved = deps.sessions.load(session.id)
+
+    assert resumed.state is SessionState.CORRECT
+    assert "undo_inflight" not in saved
+    assert saved["undo_versions"][-1]["source_version"] == 0
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize(
+    "crash_action", ["finalcut.import_xml", "finalcut.open_project"]
+)
+async def test_undo_resumes_completed_receipt_without_replay(
+    tmp_path, monkeypatch, crash_action
+):
+    deps = controller_deps(tmp_path)
+    controller = EditSessionController(deps)
+    session = await controller.start(
+        EditRequest("remove gaps", required_operations=("gap_removed",))
+    )
+    candidate = await controller.apply(session.id, valid_edit_program())
+    await controller.record_review(
+        session.id, candidate.number, failed_report(candidate, 0.0)
+    )
+    imported_before = len(deps.fcp.imported)
+    original_complete = SessionStore.complete_external_action
+
+    def crash_after_receipt(store, token, result=None):
+        pending = next(
+            action for action in store.pending_actions() if action.token == token
+        )
+        event_id = original_complete(store, token, result)
+        if pending.action == crash_action:
+            raise RuntimeError(f"crash after {crash_action} receipt")
+        return event_id
+
+    with monkeypatch.context() as scoped:
+        scoped.setattr(SessionStore, "complete_external_action", crash_after_receipt)
+        with pytest.raises(RuntimeError, match="crash after"):
+            await controller.undo(session.id)
+
+    imports_after_crash = len(deps.fcp.imported)
+    opened_after_crash = deps.fcp.opened_project
+    resumed = await controller.resume(session.id)
+    saved = deps.sessions.load(session.id)
+
+    assert resumed.state is SessionState.CORRECT
+    assert len(deps.fcp.imported) == imports_after_crash
+    assert len(deps.fcp.imported) == imported_before + 1
+    if crash_action == "finalcut.open_project":
+        assert deps.fcp.opened_project == opened_after_crash
+    assert "undo_inflight" not in saved
+    assert saved["undo_versions"][-1]["source_version"] == 0

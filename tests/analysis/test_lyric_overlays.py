@@ -1,6 +1,6 @@
 from dataclasses import dataclass
 
-from editor_cli.analysis.lyric_overlays import Phrase, group_phrases
+from editor_cli.analysis.lyric_overlays import group_phrases
 
 
 @dataclass
@@ -13,9 +13,12 @@ class W:
 def _words():
     # "Tay Keith" intro, then two lyric lines with a vocal gap between them
     return [
-        W("Tay", 0.04, 0.24), W("Keith", 0.26, 0.62),
-        W("Just", 2.46, 2.58), W("cool,", 2.64, 2.86),
-        W("its", 3.26, 3.44), W("calm.", 3.48, 3.86),
+        W("Tay", 0.04, 0.24),
+        W("Keith", 0.26, 0.62),
+        W("Just", 2.46, 2.58),
+        W("cool,", 2.64, 2.86),
+        W("its", 3.26, 3.44),
+        W("calm.", 3.48, 3.86),
     ]
 
 
@@ -27,7 +30,7 @@ def test_groups_by_vocal_gap_and_drops_intro():
 def test_phrase_starts_on_first_word_and_runs_to_next():
     ph = group_phrases(_words(), gap=0.34, intro_end=2.2)
     assert ph[0].start == 2.46
-    assert ph[0].end == ph[1].start == 3.26   # first phrase ends as the next begins
+    assert ph[0].end == ph[1].start == 3.26  # first phrase ends as the next begins
 
 
 def test_last_phrase_holds_past_final_word():

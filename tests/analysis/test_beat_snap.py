@@ -17,7 +17,7 @@ def test_quantize_every_cut_is_a_beat_or_end():
 
 def test_quantize_minimum_one_beat_per_shot():
     out = quantize_to_beats([0.05, 0.05], BEATS, end=2.8)
-    assert out[1] == 0.4   # tiny shot still advances a full beat
+    assert out[1] == 0.4  # tiny shot still advances a full beat
 
 
 def test_internal_cuts_snap_to_nearest_beat():

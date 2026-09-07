@@ -12,7 +12,9 @@ from editor_cli.mcp_server import create_mcp
 def test_direct_cli_start_accepts_only_explicit_files(tmp_path):
     file = tmp_path / "brief.md"
     file.write_text("The trip context.")
-    result = CliRunner().invoke(app, ["direct", "start", "--file", str(file), "--prompt", "vlog"])
+    result = CliRunner().invoke(
+        app, ["direct", "start", "--file", str(file), "--prompt", "vlog"]
+    )
     assert result.exit_code == 0, result.output
     state = json.loads(result.output)
     assert len(state["assets"]) == 1
@@ -24,6 +26,7 @@ def test_direct_cli_start_accepts_only_explicit_files(tmp_path):
 def test_mcp_direct_does_not_construct_final_cut_services(monkeypatch):
     def forbidden():
         pytest.fail("Direct editing touched Final Cut services")
+
     monkeypatch.setattr("editor_cli.mcp_server.build_default_services", forbidden)
     result = asyncio.run(create_mcp().call_tool("editor_direct", {"action": "doctor"}))
     assert result.structured_content["engine"] == "direct"

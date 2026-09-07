@@ -3,7 +3,9 @@
 from __future__ import annotations
 
 import json
+import subprocess
 from collections.abc import Callable
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -12,8 +14,10 @@ from editor_cli.adapters.fcpxml_mcp import FCPXMLMCPClient
 from editor_cli.adapters.final_cut_control import FinalCutControl
 from editor_cli.adapters.native_final_cut import NativeFinalCutClient
 from editor_cli.adapters.timeline_engine import FCPXMLTimelineEngine
+from editor_cli.adapters.fcp_assets import InstalledAssetCatalog
 from editor_cli.adapters.watch import WatchAdapter
 from editor_cli.config import ControllerConfig, load_controller_config
+from editor_cli.direct.media import LOCAL_INPUT
 from editor_cli.session.controller import (
     Candidate,
     ControllerDeps,
@@ -31,6 +35,7 @@ from editor_cli.session.models import (
     SessionState,
     required_checks_for_operations,
 )
+from editor_cli.session.locking import SessionLock
 from editor_cli.verification.review import parse_creative_review
 from editor_cli.verification.technical import (
     inspect_candidate_fcpxml,
@@ -163,10 +168,11 @@ class SessionService:
 
 
 class TimelineService:
-    def __init__(self, controller, sessions, fcpxml):
+    def __init__(self, controller, sessions, fcpxml, *, asset_catalog=None):
         self.controller = controller
         self.sessions = sessions
         self.fcpxml = fcpxml
+        self.asset_catalog = asset_catalog
 
     async def dispatch(
         self,
@@ -178,9 +184,36 @@ class TimelineService:
         if action == "apply":
             if not isinstance(edit_program, dict):
                 raise ValueError("editor_timeline apply requires edit_program")
+
+            def require_string_keys(value: Any, location: str) -> None:
+                if isinstance(value, dict):
+                    if any(not isinstance(key, str) for key in value):
+                        raise ValueError(f"{location} keys must be strings")
+                    for key, nested in value.items():
+                        require_string_keys(nested, f"{location}.{key}")
+                elif isinstance(value, list):
+                    for index, nested in enumerate(value):
+                        require_string_keys(nested, f"{location}[{index}]")
+
+            require_string_keys(edit_program, "edit_program")
+            unexpected = set(edit_program) - {"operations", "changed_ranges"}
+            if unexpected:
+                raise ValueError(
+                    f"edit_program has unexpected fields: {sorted(unexpected)}"
+                )
             raw_operations = edit_program.get("operations")
             if not isinstance(raw_operations, list):
                 raise ValueError("edit_program.operations must be a list")
+            for item in raw_operations:
+                if not isinstance(item, dict):
+                    raise TypeError("Each edit operation must be an object")
+                unexpected = set(item) - {"group", "action", "arguments"}
+                if unexpected:
+                    raise ValueError(
+                        f"edit operation has unexpected fields: {sorted(unexpected)}"
+                    )
+                if not isinstance(item.get("arguments", {}), dict):
+                    raise TypeError("Edit operation arguments must be an object")
             program = EditProgram(
                 operations=tuple(
                     EditOperation(
@@ -195,6 +228,36 @@ class TimelineService:
                     for item in edit_program.get("changed_ranges", [])
                 ),
             )
+            if self.sessions is not None:
+                record = self.sessions.load(session_id)
+                source = Path(
+                    record.get("working_xml")
+                    or (
+                        record["candidates"][-1]["fcpxml_path"]
+                        if record.get("candidates")
+                        else record["capture"]["source_xml"]
+                    )
+                )
+                import xml.etree.ElementTree as ET
+
+                known_ids = {
+                    node.get("id") for node in ET.parse(source).findall(".//asset")
+                }
+                for operation in program.operations:
+                    args = operation.arguments
+                    ids = [args.get("asset_id")]
+                    if operation.action == "apply_template":
+                        ids.extend(
+                            item.get("asset_id")
+                            for item in args.get("clips", {}).values()
+                        )
+                    unknown_ids = [
+                        item for item in ids if item and item not in known_ids
+                    ]
+                    if unknown_ids:
+                        raise PermissionError(
+                            f"Unknown session asset_id: {unknown_ids[0]}"
+                        )
             return {
                 "candidate": _candidate(
                     await self.controller.apply(session_id, program)
@@ -204,13 +267,38 @@ class TimelineService:
             raise RuntimeError("Session repository is unavailable")
         record = self.sessions.load(session_id)
         if action == "inspect":
-            return {
+            result = {
                 "session_id": session_id,
                 "state": record["state"],
                 "analysis": record["analysis"],
                 "source_xml": record["capture"]["source_xml"],
                 "candidates": record["candidates"],
             }
+            if self.asset_catalog is not None:
+                result["installed_assets"] = [
+                    {
+                        "kind": asset.kind,
+                        "name": asset.name,
+                        "category": asset.category,
+                        "action_id": asset.action_id,
+                        "handler": asset.handler,
+                    }
+                    for asset in self.asset_catalog.scan()
+                ]
+            else:
+                result["installed_assets"] = []
+            planning = record.get("analysis") or {}
+            for key, default in {
+                "clips": [],
+                "gaps": [],
+                "roles": [],
+                "markers": [],
+                "effects": [],
+                "transcript": [],
+                "pacing": {},
+            }.items():
+                result[key] = planning.get(key, default)
+            return result
         if action == "diff":
             if not record["candidates"]:
                 raise RuntimeError("The session has no candidate to compare")
@@ -235,8 +323,52 @@ class TimelineService:
 
 
 class MediaService:
-    def __init__(self, sessions: SessionRepository):
+    def __init__(
+        self,
+        sessions: SessionRepository,
+        *,
+        timeline=None,
+        probe_media: Callable[[Path], tuple[bool, bool]] | None = None,
+    ):
         self.sessions = sessions
+        self.timeline = timeline
+        self.probe_media = probe_media or self._probe_media
+
+    @staticmethod
+    def _probe_media(path: Path) -> tuple[bool, bool]:
+        completed = subprocess.run(
+            (
+                "ffprobe",
+                "-v",
+                "error",
+                *LOCAL_INPUT,
+                "-show_entries",
+                "stream=codec_type",
+                "-of",
+                "json",
+                str(path),
+            ),
+            capture_output=True,
+            text=True,
+            check=False,
+            timeout=30,
+        )
+        if completed.returncode != 0:
+            raise ValueError("Registered asset is not readable media")
+        try:
+            streams = json.loads(completed.stdout)["streams"]
+            kinds = {
+                stream["codec_type"]
+                for stream in streams
+                if isinstance(stream, dict) and "codec_type" in stream
+            }
+        except (KeyError, TypeError, json.JSONDecodeError) as exc:
+            raise ValueError("Registered asset has invalid media metadata") from exc
+        has_video = "video" in kinds
+        has_audio = "audio" in kinds
+        if not has_video and not has_audio:
+            raise ValueError("Registered asset has no audio or video streams")
+        return has_video, has_audio
 
     async def dispatch(
         self,
@@ -245,13 +377,28 @@ class MediaService:
         session_id: str,
         url: str | None,
         purpose: str | None,
+        asset_path: str | None = None,
+        name: str | None = None,
+        duration_seconds: float | None = None,
+        has_audio: bool | None = None,
     ) -> dict[str, Any]:
         paths = self.sessions.paths(session_id)
-        acquirer = InternetAcquirer(paths.assets)
+        store = self.sessions.store(session_id)
+        acquirer = InternetAcquirer(paths.assets, store=store)
         if action == "acquire":
             if not url or not purpose:
                 raise ValueError("Media acquisition requires url and purpose")
-            asset = acquirer.acquire(url, purpose)
+            with SessionLock(paths.root, blocking=False):
+                record = self.sessions.load(session_id)
+                if not record.get("request", {}).get("internet_media", True):
+                    raise PermissionError(
+                        "This edit session does not allow internet media"
+                    )
+                if store.pending_actions():
+                    raise RuntimeError(
+                        "A pending external action requires reconciliation"
+                    )
+                asset = acquirer.acquire(url, purpose)
             return {
                 "path": str(asset.path),
                 "source_url": asset.source_url,
@@ -271,6 +418,86 @@ class MediaService:
                     if line.strip()
                 ]
             return {"session_id": session_id, "assets": rows}
+        if action == "register":
+            if self.timeline is None:
+                raise RuntimeError("Timeline media registration is unavailable")
+            if (
+                not asset_path
+                or not name
+                or isinstance(duration_seconds, bool)
+                or not isinstance(duration_seconds, (int, float))
+            ):
+                raise ValueError("Media registration requires complete asset metadata")
+            media = paths.require_read(Path(asset_path))
+            with SessionLock(paths.root, blocking=False):
+                record = self.sessions.load(session_id)
+                if record["state"] not in {"apply", "correct"}:
+                    raise RuntimeError(
+                        f"Session cannot register media while {record['state']}"
+                    )
+                if self.sessions.store(session_id).pending_actions():
+                    raise RuntimeError(
+                        "A pending Final Cut action requires reconciliation"
+                    )
+                if not media.is_file():
+                    raise PermissionError("Registered asset is not a regular file")
+                rows = []
+                if acquirer.provenance_path.is_file():
+                    rows = [
+                        json.loads(line)
+                        for line in acquirer.provenance_path.read_text(
+                            encoding="utf-8"
+                        ).splitlines()
+                        if line.strip()
+                    ]
+                digest = sha256(media.read_bytes()).hexdigest()
+                if not any(
+                    row.get("path") == str(media) and row.get("sha256") == digest
+                    for row in rows
+                ):
+                    raise PermissionError(
+                        "Media does not match an acquired session asset"
+                    )
+                has_video, probed_has_audio = self.probe_media(media)
+                source = Path(
+                    record.get("working_xml")
+                    or (
+                        record["candidates"][-1]["fcpxml_path"]
+                        if record.get("candidates")
+                        else record["capture"]["source_xml"]
+                    )
+                )
+                registered = list(record.get("registered_assets", []))
+                destination = (
+                    paths.candidates / f"register-{len(registered) + 1:02d}.fcpxml"
+                )
+                receipt = await self.timeline.register_media(
+                    source,
+                    media,
+                    destination,
+                    name=name,
+                    duration_seconds=duration_seconds,
+                    has_video=has_video,
+                    has_audio=probed_has_audio,
+                )
+                if sha256(media.read_bytes()).hexdigest() != digest:
+                    raise PermissionError("Media changed during registration")
+                registered.append(
+                    {
+                        "asset_id": receipt.asset_id,
+                        "path": str(media),
+                        "sha256": digest,
+                        "name": name,
+                    }
+                )
+                record["registered_assets"] = registered
+                record["working_xml"] = str(receipt.path)
+                self.sessions.save(record)
+            return {
+                "asset_id": receipt.asset_id,
+                "path": str(media),
+                "working_xml": str(receipt.path),
+            }
         raise ValueError(f"Unknown editor_media action: {action}")
 
 
@@ -400,7 +627,9 @@ def build_services(
     )
     return ServiceRegistry(
         session=SessionService(controller, doctor=doctor),
-        timeline=TimelineService(controller, sessions, fcpxml),
-        media=MediaService(sessions),
+        timeline=TimelineService(
+            controller, sessions, fcpxml, asset_catalog=InstalledAssetCatalog()
+        ),
+        media=MediaService(sessions, timeline=timeline),
         verify=VerifyService(controller, sessions, fcpxml),
     )

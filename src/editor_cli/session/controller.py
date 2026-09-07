@@ -3,9 +3,12 @@
 from __future__ import annotations
 
 import asyncio
+import io
 import json
 import math
+import os
 import re
+import tempfile
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import asdict, dataclass
@@ -14,6 +17,7 @@ from typing import Any, Protocol
 
 from fcpxml.safe_xml import safe_parse
 
+from editor_cli.acquire.internet import AcquisitionError, InternetAcquirer
 from editor_cli.config import ControllerConfig
 from editor_cli.session.capture import (
     capture_active_project,
@@ -25,6 +29,7 @@ from editor_cli.session.models import (
     EditProgram,
     EditRequest,
     EvidenceBinding,
+    ExternalAction,
     ProjectIdentity,
     SessionState,
     required_checks_for_operations,
@@ -33,6 +38,7 @@ from editor_cli.session.paths import SessionPaths
 from editor_cli.session.reconcile import (
     ReconciliationError,
     reconcile_external_action,
+    validate_completed_external_action,
 )
 from editor_cli.session.store import SessionStore
 from editor_cli.verification.review import ReviewReport
@@ -148,7 +154,20 @@ class SessionRepository:
         root = (self.root / session_id).resolve()
         if not root.is_relative_to(self.root) or not root.is_dir():
             raise SessionError(f"Edit session does not exist: {session_id}")
-        return SessionPaths.create(self.root, session_id)
+        stored = SessionStore(root).load_state()
+        capture = stored.get("capture") if isinstance(stored, dict) else None
+        references = (
+            capture.get("media_references", []) if isinstance(capture, dict) else []
+        )
+        if not isinstance(references, list) or any(
+            not isinstance(item, str) for item in references
+        ):
+            raise SessionError("Edit session capture has invalid media references")
+        return SessionPaths.create(
+            self.root,
+            session_id,
+            media_references=(Path(item) for item in references),
+        )
 
     def store(self, session_id: str) -> SessionStore:
         return SessionStore(self.paths(session_id).root)
@@ -232,10 +251,13 @@ class EditSessionController:
         number = int(record["pass_count"]) + 1
         identity = ProjectIdentity(**record["identity"])
         project_name = f"{identity.project} - {session_id[:8]} - AI Pass {number}"
-        source = (
-            Path(record["candidates"][-1]["fcpxml_path"])
-            if record["candidates"]
-            else Path(record["capture"]["source_xml"])
+        source = Path(
+            record.get("working_xml")
+            or (
+                record["candidates"][-1]["fcpxml_path"]
+                if record["candidates"]
+                else record["capture"]["source_xml"]
+            )
         )
         destination = paths.candidates / f"pass-{number:02d}.fcpxml"
 
@@ -246,6 +268,7 @@ class EditSessionController:
         if written != destination.resolve() or not written.is_file():
             raise SessionError("Timeline engine wrote outside the candidate path")
 
+        self._rename_candidate_project(written, project_name)
         candidate_sha256 = file_sha256(written)
         candidate_qc = await self.deps.candidate_validator(written)
         self._require_artifact_hash(
@@ -270,29 +293,66 @@ class EditSessionController:
             project=project_name,
             duration_seconds=candidate_qc.duration_seconds,
         )
+        preview = paths.previews / f"pass-{number:02d}.mp4"
+        record["candidate_inflight"] = {
+            "kind": "candidate",
+            "version": 1,
+            "phase": "import",
+            "number": number,
+            "project_name": project_name,
+            "fcpxml_path": str(written),
+            "candidate_sha256": candidate_sha256,
+            "preview_path": str(preview),
+            "identity": asdict(candidate_identity),
+            "duration_seconds": candidate_qc.duration_seconds,
+            "media_references": [str(path) for path in candidate_qc.media_references],
+            "candidate_verified": candidate_qc.verified,
+            "candidate_observations": list(candidate_qc.observations),
+            "changed_ranges": [list(item) for item in program.changed_ranges],
+        }
         self._transition(record, SessionState.IMPORT)
-        await self._external(
-            session_id,
-            "finalcut.import_xml",
-            {"path": str(written), "identity": asdict(candidate_identity)},
-            self.deps.fcp.import_project(written, candidate_identity),
-            expected_identity=candidate_identity,
-            idempotency={
-                "candidate_sha256": candidate_sha256,
-                "project_name": project_name,
-            },
+        return await self._continue_candidate(record)
+
+    async def _continue_candidate(self, record: dict[str, Any]) -> Candidate:
+        inflight = self._candidate_inflight(record)
+        session_id = record["id"]
+        paths = self.deps.sessions.paths(session_id)
+        written = Path(inflight["fcpxml_path"])
+        preview = Path(inflight["preview_path"])
+        identity = ProjectIdentity(**inflight["identity"])
+        candidate_sha256 = inflight["candidate_sha256"]
+        self._require_artifact_hash(
+            written,
+            candidate_sha256,
+            "In-flight candidate XML hash changed",
         )
 
-        self._transition(record, SessionState.PREVIEW)
-        preview = paths.previews / f"pass-{number:02d}.mp4"
-        await self._external(
+        if inflight["phase"] == "import":
+            await self._ensure_external(
+                session_id,
+                "finalcut.import_xml",
+                {"path": str(written), "identity": asdict(identity)},
+                lambda: self.deps.fcp.import_project(written, identity),
+                expected_identity=identity,
+                idempotency={
+                    "candidate_sha256": candidate_sha256,
+                    "project_name": identity.project,
+                },
+            )
+            inflight["phase"] = "share"
+            self._transition(record, SessionState.PREVIEW)
+
+        if inflight["phase"] != "share":
+            raise SessionError("In-flight candidate phase is invalid")
+        await self._ensure_external(
             session_id,
             "finalcut.share_preview",
-            {"identity": asdict(candidate_identity), "destination": str(preview)},
-            self.deps.fcp.render_preview(candidate_identity, preview),
-            expected_identity=candidate_identity,
+            {"identity": asdict(identity), "destination": str(preview)},
+            lambda: self.deps.fcp.render_preview(identity, preview),
+            expected_identity=identity,
             idempotency={
                 "candidate_sha256": candidate_sha256,
+                "candidate_path": str(written),
                 "destination": str(preview),
             },
         )
@@ -304,8 +364,8 @@ class EditSessionController:
         preview_qc = await asyncio.to_thread(
             preview_inspector,
             preview,
-            expected_duration=candidate_qc.duration_seconds,
-            fcpxml_qc=candidate_qc.verified,
+            expected_duration=inflight["duration_seconds"],
+            fcpxml_qc=inflight["candidate_verified"],
         )
         self._require_artifact_hash(
             preview,
@@ -316,8 +376,8 @@ class EditSessionController:
         evidence = await asyncio.to_thread(
             self.deps.watch.analyze,
             preview,
-            paths.evidence / f"pass-{number:02d}",
-            program.changed_ranges,
+            paths.evidence / f"pass-{inflight['number']:02d}",
+            tuple(tuple(item) for item in inflight["changed_ranges"]),
         )
         manifest = Path(evidence.manifest).resolve()
         if not manifest.is_file() or not manifest.is_relative_to(paths.evidence):
@@ -334,9 +394,9 @@ class EditSessionController:
         )
         binding = EvidenceBinding(
             session_id=session_id,
-            pass_number=number,
+            pass_number=inflight["number"],
             state_version=int(record["version"]) + 1,
-            project_name=project_name,
+            project_name=inflight["project_name"],
             candidate_sha256=candidate_sha256,
             preview_sha256=preview_sha256,
             manifest_sha256=manifest_sha256,
@@ -344,30 +404,33 @@ class EditSessionController:
         )
         controller_checks = {
             "source_unchanged": True,
-            "candidate_xml_valid": candidate_qc.verified,
+            "candidate_xml_valid": inflight["candidate_verified"],
             "preview_rendered": preview_qc.verified,
             "preview_watched": True,
         }
 
         raw_candidate = {
-            "number": number,
-            "project_name": project_name,
+            "number": inflight["number"],
+            "project_name": inflight["project_name"],
             "fcpxml_path": str(written),
             "preview_path": str(preview),
             "evidence_manifest": str(manifest),
-            "identity": asdict(candidate_identity),
-            "duration_seconds": candidate_qc.duration_seconds,
-            "media_references": [str(path) for path in candidate_qc.media_references],
+            "identity": asdict(identity),
+            "duration_seconds": inflight["duration_seconds"],
+            "media_references": list(inflight["media_references"]),
             "binding": binding.to_dict(),
             "required_check_names": list(record["required_checks"]),
             "controller_checks": controller_checks,
             "technical_checks": dict(preview_qc.required),
             "required_checks": {},
-            "observations": list(candidate_qc.observations + preview_qc.observations),
+            "observations": list(inflight["candidate_observations"])
+            + list(preview_qc.observations),
             "score": None,
         }
         record["candidates"].append(raw_candidate)
-        record["pass_count"] = number
+        record["pass_count"] = inflight["number"]
+        record.pop("working_xml", None)
+        del record["candidate_inflight"]
         self._transition(record, SessionState.VERIFY)
         return self._candidate(raw_candidate)
 
@@ -391,7 +454,10 @@ class EditSessionController:
             raise SessionError("Review pass does not match the current candidate")
 
         required_check_names = tuple(record["required_checks"])
-        if set(report.required) != set(required_check_names):
+        controller_check_names = set(candidate["controller_checks"])
+        if not set(required_check_names).issubset(report.required) or not set(
+            report.required
+        ).issubset(set(required_check_names) | controller_check_names):
             raise SessionError("Review must contain the exact required checks")
         if any(type(value) is not bool for value in report.required.values()):
             raise SessionError("Review check results must be strict booleans")
@@ -402,7 +468,8 @@ class EditSessionController:
         self._require_original(record)
 
         accepted_checks = dict(report.required)
-        accepted_checks.update(candidate["controller_checks"])
+        for name, passed in candidate["controller_checks"].items():
+            accepted_checks[name] = accepted_checks.get(name, True) and passed
         accepted_report = ReviewReport(
             required=accepted_checks,
             observations=tuple(report.observations),
@@ -433,7 +500,11 @@ class EditSessionController:
     def status(self, session_id: str) -> SessionResult:
         record = self.deps.sessions.load(session_id)
         reviewed = [item for item in record["candidates"] if item["score"] is not None]
-        best = select_best_pass(reviewed) if reviewed else None
+        best = (
+            select_best_pass(reviewed)
+            if reviewed and record.get("working_xml") is None
+            else None
+        )
         return self._result(record, best)
 
     async def resume(self, session_id: str) -> SessionHandle:
@@ -444,29 +515,16 @@ class EditSessionController:
         record = self.deps.sessions.load(session_id)
         store = self.deps.sessions.store(session_id)
         pending = store.pending_actions()
-        reconciled_actions: list[str] = []
         if len(pending) > 1:
             raise SessionError(
                 "Edit session journal contains multiple pending external actions"
             )
-        if pending:
-            for action in pending:
-                try:
-                    result = await reconcile_external_action(
-                        action,
-                        self.deps.fcp,
-                        self.deps.sessions.paths(session_id).root,
-                    )
-                except ReconciliationError as exc:
-                    raise SessionError(
-                        f"Pending Final Cut action could not be reconciled: {action.action}"
-                    ) from exc
-                store.complete_external_action(action.token, result)
-                reconciled_actions.append(action.action)
 
         if record.get("identity") is None:
             if SessionState(record["state"]) is not SessionState.CAPTURE:
                 raise SessionError("Edit session has no captured project identity")
+            if pending:
+                await self._reconcile_pending(store, pending[0], session_id)
             capture = await recover_active_project_capture(
                 self.deps.fcp, self.deps.sessions.paths(session_id), store
             )
@@ -483,23 +541,24 @@ class EditSessionController:
             self._transition(record, SessionState.APPLY)
             return self._handle(record)
 
-        if any(self._action_kind(name) == "import_xml" for name in reconciled_actions):
-            self._transition(record, SessionState.PREVIEW)
-        elif any(
-            self._action_kind(name) == "open_project" for name in reconciled_actions
-        ):
-            candidate = record["candidates"][-1] if record["candidates"] else None
-            if (
-                candidate
-                and candidate.get("required_checks")
-                and all(candidate["required_checks"].values())
-            ):
-                self._transition(record, SessionState.READY)
-            elif record["pass_count"] >= self.deps.sessions.config.max_passes:
-                self._transition(record, SessionState.BLOCKED)
+        if record.get("undo_inflight") is not None:
+            await self._continue_undo(record)
+            return self._handle(record)
+        if record.get("candidate_inflight") is not None:
+            await self._continue_candidate(record)
+            return self._handle(record)
+        if await self._resume_review_state(record):
+            return self._handle(record)
+
+        if pending:
+            if self._action_kind(pending[0].action) in {"import_xml", "share_preview"}:
+                raise SessionError(
+                    "Pending candidate action has no durable continuation state"
+                )
+            await self._reconcile_pending(store, pending[0], session_id)
 
         active = tuple(await self.deps.fcp.active_projects())
-        expected = self._latest_active_identity(store, record)
+        expected = await self._latest_active_identity(store, record)
         if len(active) != 1 or active[0] != expected:
             raise SessionError(
                 "The active project changed; reopen the captured Final Cut project"
@@ -507,97 +566,220 @@ class EditSessionController:
         self._require_original(record)
         return self._handle(record)
 
+    async def _resume_review_state(self, record: dict[str, Any]) -> bool:
+        if SessionState(record["state"]) is not SessionState.VERIFY:
+            return False
+        if not record["candidates"]:
+            raise SessionError("Review state has no candidate")
+        latest = record["candidates"][-1]
+        if latest.get("score") is None:
+            return False
+        checks = latest.get("required_checks")
+        if (
+            isinstance(checks, dict)
+            and checks
+            and all(type(value) is bool and value for value in checks.values())
+        ):
+            target = latest
+            terminal = SessionState.READY
+        elif record["pass_count"] < self.deps.sessions.config.max_passes:
+            self._transition(record, SessionState.CORRECT)
+            return True
+        else:
+            target = select_best_pass(record["candidates"])
+            terminal = SessionState.BLOCKED
+        await self._open_project(record, target)
+        self._transition(record, terminal)
+        return True
+
+    async def _reconcile_pending(
+        self, store: SessionStore, action: ExternalAction, session_id: str
+    ) -> dict[str, Any]:
+        if self._action_kind(action.action) == "download":
+            try:
+                acquirer = InternetAcquirer(
+                    self.deps.sessions.paths(session_id).assets,
+                    store=store,
+                )
+                asset = acquirer.reconcile(action)
+                result = acquirer.result_for(asset)
+            except AcquisitionError as exc:
+                raise SessionError(
+                    "Pending internet download could not be reconciled"
+                ) from exc
+            store.complete_external_action(action.token, result)
+            return result
+        try:
+            result = await reconcile_external_action(
+                action,
+                self.deps.fcp,
+                self.deps.sessions.paths(session_id).root,
+            )
+        except ReconciliationError as exc:
+            raise SessionError(
+                f"Pending Final Cut action could not be reconciled: {action.action}"
+            ) from exc
+        store.complete_external_action(action.token, result)
+        return result
+
     async def undo(self, session_id: str) -> UndoResult:
         with self._session_lock(session_id):
             return await self._undo_locked(session_id)
 
     async def _undo_locked(self, session_id: str) -> UndoResult:
         record = self.deps.sessions.load(session_id)
+        if record.get("undo_inflight") is not None:
+            return await self._continue_undo(record)
         self._require_no_pending(session_id)
         if not record["candidates"]:
             raise SessionError("Undo requires a candidate version")
-        if len(record["candidates"]) > 1:
-            previous = record["candidates"][-2]
-            source_path = Path(previous["fcpxml_path"])
-            source_version = int(previous["number"])
-            duration = float(previous["duration_seconds"])
-        else:
-            source_path = Path(record["capture"]["source_xml"])
-            source_version = 0
-            duration = float(record["identity"]["duration_seconds"])
+        target = self._select_undo_target(record)
         source_identity = ProjectIdentity(**record["identity"])
         undo_count = int(record.get("undo_count", 0)) + 1
         identity = ProjectIdentity(
             source_identity.library,
             source_identity.event,
             f"{source_identity.project} - {session_id[:8]} - Undo {undo_count}",
-            duration,
+            target["duration_seconds"],
         )
         path = (
             self.deps.sessions.paths(session_id).candidates
             / f"undo-{undo_count:02d}.fcpxml"
         )
-        self._write_undo_candidate(source_path, path, identity.project)
-        candidate_sha256 = file_sha256(path)
-        inspection = await self.deps.candidate_validator(path)
-        self._require_artifact_hash(
-            path, candidate_sha256, "Undo candidate changed during inspection"
-        )
-        if (
-            not inspection.verified
-            or inspection.duration_seconds != identity.duration_seconds
-        ):
-            raise SessionError("Undo candidate failed exact timeline validation")
-        imported = await self._external(
-            session_id,
-            "finalcut.import_xml",
-            {"path": str(path), "identity": asdict(identity)},
-            self.deps.fcp.import_project(path, identity),
-            expected_identity=identity,
-            idempotency={
-                "candidate_sha256": candidate_sha256,
+        record["undo_inflight"] = {
+            "kind": "undo",
+            "version": 1,
+            "number": undo_count,
+            "phase": "create",
+            "target": target,
+            "output": {
+                "path": str(path),
+                "project_name": identity.project,
+                "identity": asdict(identity),
+            },
+            "idempotency": {
+                "target_sha256": target["sha256"],
+                "output_path": str(path),
                 "project_name": identity.project,
             },
-        )
-        if imported != identity:
-            raise SessionError("Final Cut did not import the exact undo project")
-        opened = await self._external(
+        }
+        self.deps.sessions.save(record)
+        return await self._continue_undo(record)
+
+    async def _continue_undo(self, record: dict[str, Any]) -> UndoResult:
+        inflight = self._undo_inflight(record)
+        session_id = record["id"]
+        target = inflight["target"]
+        output = inflight["output"]
+        self._validate_undo_target(record, target)
+        source_path = Path(target["path"])
+        path = Path(output["path"])
+        identity = ProjectIdentity(**output["identity"])
+
+        if inflight["phase"] == "create":
+            candidate_sha256 = self._write_undo_candidate(
+                source_path, path, identity.project
+            )
+            inspection = await self.deps.candidate_validator(path)
+            self._require_artifact_hash(
+                path, candidate_sha256, "Undo candidate changed during inspection"
+            )
+            if (
+                not inspection.verified
+                or inspection.duration_seconds != identity.duration_seconds
+            ):
+                raise SessionError("Undo candidate failed exact timeline validation")
+            output["sha256"] = candidate_sha256
+            output["size_bytes"] = path.stat().st_size
+            inflight["phase"] = "import"
+            self.deps.sessions.save(record)
+
+        if inflight["phase"] == "import":
+            candidate_sha256 = output.get("sha256")
+            if not isinstance(candidate_sha256, str):
+                raise SessionError("Undo import phase has no candidate hash")
+            self._require_artifact_hash(
+                path, candidate_sha256, "Undo candidate hash changed before import"
+            )
+            await self._ensure_external(
+                session_id,
+                "finalcut.import_xml",
+                {"path": str(path), "identity": asdict(identity)},
+                lambda: self.deps.fcp.import_project(path, identity),
+                expected_identity=identity,
+                idempotency={
+                    "candidate_sha256": candidate_sha256,
+                    "project_name": identity.project,
+                },
+            )
+            inflight["phase"] = "open"
+            self.deps.sessions.save(record)
+
+        if inflight["phase"] != "open":
+            raise SessionError("Undo workflow phase is invalid")
+        await self._ensure_external(
             session_id,
             "finalcut.open_project",
             {"identity": asdict(identity)},
-            self.deps.fcp.open_project(identity),
+            lambda: self.deps.fcp.open_project(identity),
             expected_identity=identity,
             idempotency={"project_name": identity.project},
         )
-        if opened != identity:
-            raise SessionError("Final Cut did not open the exact undo project")
-        record["undo_count"] = undo_count
-        record.setdefault("undo_versions", []).append(
-            {
-                "number": undo_count,
-                "project_name": identity.project,
-                "fcpxml_path": str(path),
-                "sha256": candidate_sha256,
-                "identity": asdict(identity),
-                "source_version": source_version,
-            }
+        version = {
+            "number": inflight["number"],
+            "project_name": identity.project,
+            "fcpxml_path": str(path),
+            "sha256": output["sha256"],
+            "identity": asdict(identity),
+            "source_version": target["source_version"],
+        }
+        versions = record.setdefault("undo_versions", [])
+        matches = [
+            item for item in versions if item.get("number") == inflight["number"]
+        ]
+        if matches and matches != [version]:
+            raise SessionError("Undo version conflicts with durable workflow intent")
+        if not matches:
+            versions.append(version)
+        event_id = f"undo-created:{session_id}:{inflight['number']}"
+        store = self.deps.sessions.store(session_id)
+        if not any(event.get("id") == event_id for event in store.events()):
+            store.append(
+                "undo_created",
+                {
+                    "project_name": identity.project,
+                    "source_version": target["source_version"],
+                },
+                event_id=event_id,
+            )
+        record["undo_count"] = inflight["number"]
+        record["working_xml"] = str(path)
+        record["active_source_version"] = {
+            "kind": "undo",
+            "number": inflight["number"],
+            "source_version": target["source_version"],
+            "path": str(path),
+            "sha256": output["sha256"],
+        }
+        del record["undo_inflight"]
+        self._transition(record, SessionState.CORRECT)
+        return UndoResult(
+            version["number"],
+            version["project_name"],
+            path,
+            version["source_version"],
         )
-        self.deps.sessions.save(record)
-        self.deps.sessions.store(session_id).append(
-            "undo_created",
-            {"project_name": identity.project, "source_version": source_version},
-        )
-        return UndoResult(undo_count, identity.project, path, source_version)
 
     async def _open_project(
         self, record: dict[str, Any], candidate: dict[str, Any]
     ) -> None:
-        await self._external(
+        identity = ProjectIdentity(**candidate["identity"])
+        await self._ensure_external(
             record["id"],
             "finalcut.open_project",
             {"identity": candidate["identity"]},
-            self.deps.fcp.open_project(ProjectIdentity(**candidate["identity"])),
-            expected_identity=ProjectIdentity(**candidate["identity"]),
+            lambda: self.deps.fcp.open_project(identity),
+            expected_identity=identity,
             idempotency={"project_name": candidate["project_name"]},
         )
 
@@ -621,6 +803,362 @@ class EditSessionController:
         result = await operation
         store.complete_external_action(token, self._external_result(result))
         return result
+
+    def _candidate_inflight(self, record: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = record["candidate_inflight"]
+            if not isinstance(value, dict) or set(value) != {
+                "kind",
+                "version",
+                "phase",
+                "number",
+                "project_name",
+                "fcpxml_path",
+                "candidate_sha256",
+                "preview_path",
+                "identity",
+                "duration_seconds",
+                "media_references",
+                "candidate_verified",
+                "candidate_observations",
+                "changed_ranges",
+            }:
+                raise ValueError
+            number = value["number"]
+            duration = value["duration_seconds"]
+            if (
+                value["kind"] != "candidate"
+                or value["version"] != 1
+                or value["phase"] not in {"import", "share"}
+                or type(number) is not int
+                or number <= 0
+                or number != int(record["pass_count"]) + 1
+                or any(item.get("number") == number for item in record["candidates"])
+                or not isinstance(value["project_name"], str)
+                or not value["project_name"]
+                or type(duration) is not float
+                or not math.isfinite(duration)
+                or duration < 0
+                or not re.fullmatch(r"[0-9a-f]{64}", value["candidate_sha256"])
+                or type(value["candidate_verified"]) is not bool
+                or not isinstance(value["candidate_observations"], list)
+                or any(
+                    not isinstance(item, str)
+                    for item in value["candidate_observations"]
+                )
+                or not isinstance(value["media_references"], list)
+                or any(not isinstance(item, str) for item in value["media_references"])
+                or not isinstance(value["changed_ranges"], list)
+            ):
+                raise ValueError
+            paths = self.deps.sessions.paths(record["id"])
+            xml = Path(value["fcpxml_path"]).expanduser().resolve()
+            preview = Path(value["preview_path"]).expanduser().resolve()
+            if (
+                xml != (paths.candidates / f"pass-{number:02d}.fcpxml").resolve()
+                or preview != (paths.previews / f"pass-{number:02d}.mp4").resolve()
+            ):
+                raise ValueError
+            identity = ProjectIdentity(**value["identity"])
+            if (
+                identity.project != value["project_name"]
+                or identity.duration_seconds != duration
+            ):
+                raise ValueError
+            for changed in value["changed_ranges"]:
+                if (
+                    not isinstance(changed, list)
+                    or len(changed) != 2
+                    or any(type(item) not in {int, float} for item in changed)
+                    or any(not math.isfinite(float(item)) for item in changed)
+                    or float(changed[0]) < 0
+                    or float(changed[1]) <= float(changed[0])
+                ):
+                    raise ValueError
+            return value
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError("In-flight candidate state is malformed") from exc
+
+    async def _ensure_external(
+        self,
+        session_id: str,
+        action: str,
+        arguments: dict[str, Any],
+        operation: Callable[[], Awaitable[Any]],
+        *,
+        expected_identity: ProjectIdentity,
+        idempotency: dict[str, Any],
+    ) -> dict[str, Any]:
+        store = self.deps.sessions.store(session_id)
+        expected = {
+            "identity": asdict(expected_identity),
+            "idempotency": dict(idempotency),
+        }
+        intent = (action, arguments, expected)
+        pending = store.pending_actions()
+        if len(pending) > 1:
+            raise SessionError(
+                "Edit session journal contains multiple pending external actions"
+            )
+        if pending:
+            current = pending[0]
+            if (
+                current.action,
+                current.arguments.thaw(),
+                current.expected.thaw(),
+            ) != intent:
+                raise SessionError(
+                    "Pending Final Cut action does not match durable workflow state"
+                )
+            return await self._reconcile_pending(store, current, session_id)
+
+        completed: list[tuple[ExternalAction, dict[str, Any]]] = []
+        for event in store.events():
+            if event.get("kind") != "external_action":
+                continue
+            data = event.get("data")
+            if not isinstance(data, dict) or data.get("status") != "complete":
+                continue
+            try:
+                candidate = ExternalAction(
+                    token=data["token"],
+                    action=data["action"],
+                    arguments=data["arguments"],
+                    expected=data["expected"],
+                    status="complete",
+                )
+                result = data["result"]
+                if not isinstance(result, dict):
+                    raise TypeError
+            except (KeyError, TypeError, ValueError) as exc:
+                raise SessionError(
+                    "Completed Final Cut action receipt is malformed"
+                ) from exc
+            candidate_intent = (
+                candidate.action,
+                candidate.arguments.thaw(),
+                candidate.expected.thaw(),
+            )
+            if candidate_intent == intent:
+                completed.append((candidate, result))
+            elif candidate.action == action and candidate.expected.thaw() == expected:
+                raise SessionError(
+                    "Completed Final Cut action conflicts with durable workflow state"
+                )
+        if len(completed) > 1:
+            raise SessionError("Final Cut action has duplicate completed receipts")
+        if completed:
+            candidate, result = completed[0]
+            try:
+                return await validate_completed_external_action(
+                    candidate,
+                    result,
+                    self.deps.fcp,
+                    self.deps.sessions.paths(session_id).root,
+                )
+            except ReconciliationError as exc:
+                raise SessionError(
+                    "Completed Final Cut action receipt is malformed or stale"
+                ) from exc
+
+        if self._action_kind(action) == "share_preview":
+            destination = Path(arguments["destination"]).expanduser().resolve()
+            if destination.exists():
+                destination.unlink()
+            Path(str(destination) + ".receipt.json").unlink(missing_ok=True)
+        token = store.begin_external_action(action, arguments, expected=expected)
+        result = await operation()
+        if isinstance(result, ProjectIdentity) and result != expected_identity:
+            raise SessionError("Final Cut returned a different project identity")
+        pending_action = next(
+            item for item in store.pending_actions() if item.token == token
+        )
+        try:
+            canonical = await reconcile_external_action(
+                pending_action,
+                self.deps.fcp,
+                self.deps.sessions.paths(session_id).root,
+            )
+        except ReconciliationError as exc:
+            raise SessionError(
+                f"Final Cut action did not satisfy its postcondition: {action}"
+            ) from exc
+        store.complete_external_action(token, canonical)
+        return canonical
+
+    def _undo_inflight(self, record: dict[str, Any]) -> dict[str, Any]:
+        try:
+            value = record["undo_inflight"]
+            if not isinstance(value, dict) or set(value) != {
+                "kind",
+                "version",
+                "number",
+                "phase",
+                "target",
+                "output",
+                "idempotency",
+            }:
+                raise ValueError
+            number = value["number"]
+            if (
+                value["kind"] != "undo"
+                or value["version"] != 1
+                or value["phase"] not in {"create", "import", "open"}
+                or type(number) is not int
+                or number <= 0
+                or number != int(record.get("undo_count", 0)) + 1
+            ):
+                raise ValueError
+            target = value["target"]
+            output = value["output"]
+            idem = value["idempotency"]
+            if not isinstance(target, dict) or set(target) != {
+                "path",
+                "sha256",
+                "duration_seconds",
+                "source_version",
+            }:
+                raise ValueError
+            required_output = {"path", "project_name", "identity"}
+            if value["phase"] != "create":
+                required_output |= {"sha256", "size_bytes"}
+            if not isinstance(output, dict) or set(output) != required_output:
+                raise ValueError
+            if not isinstance(idem, dict) or set(idem) != {
+                "target_sha256",
+                "output_path",
+                "project_name",
+            }:
+                raise ValueError
+            identity = ProjectIdentity(**output["identity"])
+            paths = self.deps.sessions.paths(record["id"])
+            expected_path = (paths.candidates / f"undo-{number:02d}.fcpxml").resolve()
+            if (
+                Path(output["path"]).expanduser().resolve() != expected_path
+                or output["project_name"] != identity.project
+                or idem
+                != {
+                    "target_sha256": target["sha256"],
+                    "output_path": str(expected_path),
+                    "project_name": identity.project,
+                }
+                or identity.duration_seconds != target["duration_seconds"]
+                or any(
+                    item.get("number") == number
+                    for item in record.get("undo_versions", [])
+                )
+            ):
+                raise ValueError
+            if value["phase"] != "create" and (
+                not re.fullmatch(r"[0-9a-f]{64}", output["sha256"])
+                or type(output["size_bytes"]) is not int
+                or output["size_bytes"] <= 0
+            ):
+                raise ValueError
+            return value
+        except (KeyError, TypeError, ValueError) as exc:
+            raise SessionError("In-flight undo state is malformed") from exc
+
+    def _select_undo_target(self, record: dict[str, Any]) -> dict[str, Any]:
+        for candidate in reversed(record["candidates"][:-1]):
+            if self._accepted_candidate(record, candidate):
+                target = {
+                    "path": candidate["fcpxml_path"],
+                    "sha256": candidate["binding"]["candidate_sha256"],
+                    "duration_seconds": candidate["duration_seconds"],
+                    "source_version": candidate["number"],
+                }
+                self._validate_undo_target(record, target)
+                return target
+        target = {
+            "path": record["capture"]["source_xml"],
+            "sha256": record["capture"]["source_sha256"],
+            "duration_seconds": record["identity"]["duration_seconds"],
+            "source_version": 0,
+        }
+        self._validate_undo_target(record, target)
+        return target
+
+    def _accepted_candidate(
+        self, record: dict[str, Any], candidate: dict[str, Any]
+    ) -> bool:
+        try:
+            review_required = set(candidate["required_check_names"])
+            all_required = review_required | {
+                "source_unchanged",
+                "candidate_xml_valid",
+                "preview_rendered",
+                "preview_watched",
+            }
+            checks = candidate["required_checks"]
+            binding = EvidenceBinding.from_dict(candidate["binding"])
+            return (
+                isinstance(checks, dict)
+                and set(checks) in {frozenset(review_required), frozenset(all_required)}
+                and all(type(value) is bool and value for value in checks.values())
+                and binding.session_id == record["id"]
+                and binding.pass_number == candidate["number"]
+                and binding.project_name == candidate["project_name"]
+                and binding.candidate_sha256
+                == candidate.get("binding", {}).get("candidate_sha256")
+            )
+        except (KeyError, OSError, TypeError, ValueError):
+            return False
+
+    def _validate_undo_target(
+        self, record: dict[str, Any], target: dict[str, Any]
+    ) -> None:
+        try:
+            if not isinstance(target, dict) or set(target) != {
+                "path",
+                "sha256",
+                "duration_seconds",
+                "source_version",
+            }:
+                raise ValueError
+            version = target["source_version"]
+            duration = target["duration_seconds"]
+            path = Path(target["path"]).expanduser().resolve()
+            paths = self.deps.sessions.paths(record["id"])
+            if (
+                type(version) is not int
+                or version < 0
+                or type(duration) is not float
+                or not math.isfinite(duration)
+                or duration < 0
+                or not re.fullmatch(r"[0-9a-f]{64}", target["sha256"])
+                or not path.is_file()
+                or not path.is_relative_to(paths.root)
+                or file_sha256(path) != target["sha256"]
+            ):
+                raise ValueError
+            if version == 0:
+                if (
+                    path != Path(record["capture"]["source_xml"]).resolve()
+                    or target["sha256"] != record["capture"]["source_sha256"]
+                ):
+                    raise ValueError
+                return
+            matches = [
+                item
+                for item in record["candidates"][:-1]
+                if item.get("number") == version
+            ]
+            if len(matches) != 1 or not self._accepted_candidate(record, matches[0]):
+                raise ValueError
+            candidate = matches[0]
+            if (
+                path != Path(candidate["fcpxml_path"]).resolve()
+                or duration != candidate["duration_seconds"]
+            ):
+                raise ValueError
+        except (KeyError, OSError, TypeError, ValueError) as exc:
+            message = (
+                "Captured undo source is invalid"
+                if target.get("source_version") == 0
+                else "Prior accepted undo source hash changed"
+            )
+            raise SessionError(message) from exc
 
     def _session_lock(self, session_id: str) -> SessionLock:
         return SessionLock(
@@ -648,9 +1186,8 @@ class EditSessionController:
         }
         return aliases.get(action, action)
 
-    @classmethod
-    def _latest_active_identity(
-        cls, store: SessionStore, record: dict[str, Any]
+    async def _latest_active_identity(
+        self, store: SessionStore, record: dict[str, Any]
     ) -> ProjectIdentity:
         for event in reversed(store.events()):
             if event.get("kind") != "external_action":
@@ -658,8 +1195,7 @@ class EditSessionController:
             data = event.get("data")
             if not isinstance(data, dict) or data.get("status") != "complete":
                 continue
-            if cls._action_kind(str(data.get("action"))) not in {
-                "export_xml",
+            if self._action_kind(str(data.get("action"))) not in {
                 "duplicate_project",
                 "import_xml",
                 "share_preview",
@@ -667,21 +1203,34 @@ class EditSessionController:
             }:
                 continue
             try:
-                expected = data["expected"]
-                if not isinstance(expected, dict) or set(expected) != {
-                    "identity",
-                    "idempotency",
-                }:
+                required = {
+                    "token",
+                    "action",
+                    "arguments",
+                    "expected",
+                    "status",
+                    "result",
+                }
+                if not isinstance(data, dict) or set(data) != required:
                     raise ValueError
-                identity = expected["identity"]
-                if not isinstance(identity, dict) or set(identity) != {
-                    "library",
-                    "event",
-                    "project",
-                    "duration_seconds",
-                }:
-                    raise ValueError
-                return ProjectIdentity(**identity)
+                action = ExternalAction(
+                    token=data["token"],
+                    action=data["action"],
+                    arguments=data["arguments"],
+                    expected=data["expected"],
+                    status="complete",
+                )
+                await validate_completed_external_action(
+                    action,
+                    data["result"],
+                    self.deps.fcp,
+                    self.deps.sessions.paths(record["id"]).root,
+                )
+                return ProjectIdentity(**data["expected"]["identity"])
+            except ReconciliationError as exc:
+                raise SessionError(
+                    "The active project changed; reopen the exact controller project"
+                ) from exc
             except (KeyError, TypeError, ValueError) as exc:
                 raise SessionError(
                     "Completed Final Cut action has malformed identity evidence"
@@ -689,24 +1238,84 @@ class EditSessionController:
         return ProjectIdentity(**record["identity"])
 
     @staticmethod
-    def _write_undo_candidate(source: Path, destination: Path, name: str) -> None:
+    def _write_undo_candidate(source: Path, destination: Path, name: str) -> str:
+        temp: Path | None = None
         try:
-            if destination.exists():
-                raise SessionError("Undo candidate path already exists")
             tree = safe_parse(str(source))
             projects = tree.getroot().findall(".//project")
             if len(projects) != 1:
                 raise SessionError("Undo source must contain one Final Cut project")
             projects[0].set("name", name)
-            tree.write(
-                str(destination),
-                encoding="utf-8",
-                xml_declaration=True,
+            output = io.BytesIO()
+            tree.write(output, encoding="utf-8", xml_declaration=True)
+            expected = output.getvalue()
+            digest = __import__("hashlib").sha256(expected).hexdigest()
+            if destination.exists():
+                if not destination.is_file() or destination.read_bytes() != expected:
+                    raise SessionError("Undo candidate path contains different bytes")
+                return digest
+            fd, raw = tempfile.mkstemp(
+                prefix=".undo-", suffix=".tmp", dir=destination.parent
             )
+            temp = Path(raw)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(expected)
+                handle.flush()
+                os.fsync(handle.fileno())
+            try:
+                os.link(temp, destination)
+            except FileExistsError:
+                if not destination.is_file() or destination.read_bytes() != expected:
+                    raise SessionError("Undo candidate path contains different bytes")
+            directory_fd = os.open(destination.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+            return digest
         except SessionError:
             raise
         except (OSError, TypeError, ValueError) as exc:
             raise SessionError("Could not create the undo candidate") from exc
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
+
+    @staticmethod
+    def _rename_candidate_project(path: Path, name: str) -> None:
+        temp: Path | None = None
+        try:
+            tree = safe_parse(str(path))
+            projects = tree.getroot().findall(".//project")
+            if len(projects) != 1:
+                raise SessionError("Candidate must contain one Final Cut project")
+            projects[0].set("name", name)
+            output = io.BytesIO()
+            tree.write(output, encoding="utf-8", xml_declaration=True)
+            fd, raw = tempfile.mkstemp(
+                prefix=".candidate-", suffix=".tmp", dir=path.parent
+            )
+            temp = Path(raw)
+            with os.fdopen(fd, "wb") as handle:
+                handle.write(output.getvalue())
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temp, path)
+            temp = None
+            directory_fd = os.open(path.parent, os.O_RDONLY)
+            try:
+                os.fsync(directory_fd)
+            finally:
+                os.close(directory_fd)
+        except SessionError:
+            raise
+        except (OSError, TypeError, ValueError) as exc:
+            raise SessionError(
+                "Could not bind candidate XML to its project identity"
+            ) from exc
+        finally:
+            if temp is not None:
+                temp.unlink(missing_ok=True)
 
     @staticmethod
     def _validate_evidence_manifest(

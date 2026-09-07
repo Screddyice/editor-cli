@@ -1,1 +1,1 @@
-"""Adapters for Final Cut, CommandPost, FCPXML, and rendered evidence."""
+"""Adapters for native Final Cut control, FCPXML, and rendered evidence."""

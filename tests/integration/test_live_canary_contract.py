@@ -295,20 +295,41 @@ class _FakeFinalCut:
 
     async def inspect_xml(self, _path):
         return SimpleNamespace(
-            project=self.identity.project, duration_seconds=8.0, frame_seconds=1 / 30
+            project=fcp_live_canary.ET.parse(_path).find(".//project").get("name"),
+            duration_seconds=8.0,
+            frame_seconds=1 / 30,
         )
 
     async def duplicate_project(self, _identity, _name):
-        return None
+        self.identity = ProjectIdentity(_identity.library, _identity.event, _name, 8.0)
+        return self.identity
 
     async def import_project(self, _path, _project_name):
-        return None
+        self.identity = _project_name
+        return self.identity
 
     async def render_preview(self, _project_name, destination):
         destination.write_bytes(b"rendered canary preview")
+        Path(str(destination) + ".receipt.json").write_text(
+            json.dumps(
+                {
+                    "version": 1,
+                    "kind": "final_cut_share",
+                    "identity": _project_name.__dict__,
+                    "output": str(destination.resolve()),
+                    "sha256": hashlib.sha256(destination.read_bytes()).hexdigest(),
+                    "size_bytes": destination.stat().st_size,
+                }
+            )
+        )
+        return SimpleNamespace(
+            kind="final_cut_share", output=destination, project=_project_name
+        )
 
     async def open_project(self, project_name):
-        self.opened_project = project_name
+        self.identity = project_name
+        self.opened_project = project_name.project
+        return project_name
 
 
 class _FakeTimeline:
@@ -374,15 +395,19 @@ async def _run_controller_backed_canary(
         ),
         watch=_FakeWatch(),
         candidate_validator=validate_candidate,
-    )
-    controller = EditSessionController(deps)
-    monkeypatch.setattr(
-        fcp_live_canary,
-        "build_services",
-        lambda _config, doctor: SimpleNamespace(
-            session=SimpleNamespace(controller=controller)
+        preview_inspector=lambda *_args, **_kwargs: ReviewReport(
+            required={"technical": technical_valid}, observations=()
         ),
     )
+    builds = []
+
+    def build(_config, doctor):
+        builds.append(doctor)
+        return SimpleNamespace(
+            session=SimpleNamespace(controller=EditSessionController(deps))
+        )
+
+    monkeypatch.setattr(fcp_live_canary, "build_services", build)
     monkeypatch.setattr(fcp_live_canary, "FCPXMLMCPClient", _FakeBootstrap)
 
     async def wait_for_canary(*_args, **_kwargs):
@@ -403,45 +428,51 @@ async def _run_controller_backed_canary(
         fcp_live_canary.canary_program(),
         source_hashes,
     )
-    return result, fcp
+    return result, fcp, builds
 
 
 @pytest.mark.anyio
 async def test_run_canary_records_all_checks_before_opening_candidate(
     monkeypatch, tmp_path
 ):
-    result, fcp = await _run_controller_backed_canary(monkeypatch, tmp_path)
+    result, fcp, builds = await _run_controller_backed_canary(monkeypatch, tmp_path)
 
     assert result["state"] == "ready"
     assert result["required_checks"] == _expected()["passing_result"]
-    assert fcp.opened_project == "Editor CLI Canary Source - AI Pass 1"
+    assert (
+        fcp.opened_project
+        == f"Editor CLI Canary Source - {result['session_id'][:8]} - AI Pass 1"
+    )
+    assert result["required_checks"]["restart_reconciled"] is True
+    assert result["source_before_sha256"] == result["source_after_sha256"]
+    assert len(builds) == 2
 
 
 @pytest.mark.anyio
 async def test_run_canary_fails_closed_when_source_tree_changes(monkeypatch, tmp_path):
-    result, fcp = await _run_controller_backed_canary(
+    result, fcp, _builds = await _run_controller_backed_canary(
         monkeypatch, tmp_path, mutate_source=True
     )
 
     assert result["state"] == "correct"
     assert result["required_checks"]["source_unchanged"] is False
-    assert fcp.opened_project is None
+    assert fcp.opened_project.endswith("AI Pass 1")
 
 
 @pytest.mark.anyio
 async def test_run_canary_does_not_open_wrong_candidate(monkeypatch, tmp_path):
-    result, fcp = await _run_controller_backed_canary(
+    result, fcp, _builds = await _run_controller_backed_canary(
         monkeypatch, tmp_path, candidate_xml=_candidate_xml(title_offset="5s")
     )
 
     assert result["state"] == "correct"
     assert result["required_checks"]["title_visible"] is False
-    assert fcp.opened_project is None
+    assert fcp.opened_project.endswith("AI Pass 1")
 
 
 @pytest.mark.anyio
 async def test_run_canary_does_not_open_an_unreadable_preview(monkeypatch, tmp_path):
-    result, fcp = await _run_controller_backed_canary(
+    result, fcp, _builds = await _run_controller_backed_canary(
         monkeypatch,
         tmp_path,
         technical_valid=_expected()["failure_cases"]["unreadable_preview"]["technical"],
@@ -449,19 +480,22 @@ async def test_run_canary_does_not_open_an_unreadable_preview(monkeypatch, tmp_p
 
     assert result["state"] == "correct"
     assert result["required_checks"]["preview_rendered"] is False
-    assert fcp.opened_project is None
+    assert fcp.opened_project.endswith("AI Pass 1")
 
 
 def test_all_required_checks_requires_exact_booleans_and_ready_state():
     passing = _expected()["passing_result"]
     assert fcp_live_canary._all_required_checks_pass(
-        {"state": "ready", "required_checks": passing}
+        {"state": "ready", "required_checks": passing, "render_kind": "final_cut_share"}
     )
     assert not fcp_live_canary._all_required_checks_pass(
         {"state": "ready", "required_checks": {**passing, "title_visible": 1}}
     )
     assert not fcp_live_canary._all_required_checks_pass(
         {"state": "correct", "required_checks": passing}
+    )
+    assert not fcp_live_canary._all_required_checks_pass(
+        {"state": "ready", "required_checks": passing, "render_kind": "ffmpeg_proxy"}
     )
 
 

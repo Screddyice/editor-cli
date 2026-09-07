@@ -13,7 +13,7 @@ def test_asset_catalog_scans_only_approved_roots(tmp_path):
     catalog = InstalledAssetCatalog((approved,)).scan()
 
     assert [(item.kind, item.name) for item in catalog] == [("effect", "Punch In")]
-    assert catalog[0].action_id == "Comedy/Punch In"
+    assert catalog[0].action_id == "effect/Comedy/Punch In"
 
 
 def test_asset_catalog_does_not_follow_symlink_outside_root(tmp_path):

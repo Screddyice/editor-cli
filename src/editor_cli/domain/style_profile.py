@@ -8,7 +8,15 @@ import json
 from dataclasses import dataclass
 from typing import Any, Optional
 
-_REQUIRED = ("pacing", "transitions", "automations", "color", "captions", "sound", "vibe")
+_REQUIRED = (
+    "pacing",
+    "transitions",
+    "automations",
+    "color",
+    "captions",
+    "sound",
+    "vibe",
+)
 
 
 @dataclass
@@ -17,7 +25,10 @@ class Pacing:
     avg_shot_len_s: float
 
     def to_dict(self) -> dict[str, Any]:
-        return {"cuts_per_min": self.cuts_per_min, "avg_shot_len_s": self.avg_shot_len_s}
+        return {
+            "cuts_per_min": self.cuts_per_min,
+            "avg_shot_len_s": self.avg_shot_len_s,
+        }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Pacing":
@@ -59,11 +70,18 @@ class Sound:
     bpm: Optional[int] = None
 
     def to_dict(self) -> dict[str, Any]:
-        return {"name": self.name, "energy": self.energy, "genre": self.genre, "bpm": self.bpm}
+        return {
+            "name": self.name,
+            "energy": self.energy,
+            "genre": self.genre,
+            "bpm": self.bpm,
+        }
 
     @classmethod
     def from_dict(cls, d: dict[str, Any]) -> "Sound":
-        return cls(name=d.get("name"), energy=d["energy"], genre=d["genre"], bpm=d.get("bpm"))
+        return cls(
+            name=d.get("name"), energy=d["energy"], genre=d["genre"], bpm=d.get("bpm")
+        )
 
 
 @dataclass

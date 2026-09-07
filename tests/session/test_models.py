@@ -1,6 +1,7 @@
 import math
 
 import pytest
+from pydantic import ValidationError
 
 from editor_cli.session.models import (
     EditOperation,
@@ -130,12 +131,11 @@ def test_edit_program_rejects_unknown_action_arguments():
         program.validated_for({"duration_seconds": 12.0}, lambda value: value)
 
 
-def test_edit_program_canonicalizes_each_nested_source_path(tmp_path):
+def test_edit_program_rejects_raw_source_paths_even_with_authorizer(tmp_path):
     audio = tmp_path / "sound.wav"
     audio.write_bytes(b"wave")
     template_clip = tmp_path / "clip.mov"
     template_clip.write_bytes(b"movie")
-    allowed = {audio.resolve(), template_clip.resolve()}
 
     program = EditProgram(
         (
@@ -157,19 +157,19 @@ def test_edit_program_canonicalizes_each_nested_source_path(tmp_path):
         )
     )
 
-    validated = program.validated_for(
-        {"duration_seconds": 12.0},
-        lambda value: (
-            value.resolve()
-            if value.resolve() in allowed
-            else (_ for _ in ()).throw(PermissionError())
-        ),
-    )
+    with pytest.raises(ValueError, match="unknown arguments"):
+        program.validated_for({"duration_seconds": 12.0}, lambda value: value.resolve())
 
-    assert validated.operations[0].arguments["src"] == str(audio.resolve())
-    assert validated.operations[1].arguments["clips"]["intro"]["src"] == str(
-        template_clip.resolve()
-    )
+
+def test_edit_action_rejects_unknown_and_raw_path_fields():
+    with pytest.raises(ValidationError):
+        EditOperation.model_validate(
+            {
+                "group": "edit",
+                "action": "add_audio",
+                "arguments": {"src": "/Users/me/private.mov"},
+            }
+        )
 
 
 def test_edit_program_rejects_unknown_nested_template_keys(tmp_path):

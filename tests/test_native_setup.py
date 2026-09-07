@@ -58,6 +58,28 @@ def setup_paths(tmp_path: Path) -> SetupPaths:
     )
 
 
+def test_native_only_setup_preserves_unmanaged_host_configs(tmp_path):
+    paths = setup_paths(tmp_path)
+    paths.claude_config.write_text('{"mcpServers":{"editor-cli":{"command":"custom"}}}')
+    before = paths.claude_config.read_bytes()
+    platform = FakePlatform()
+    result = run_setup(paths, platform=platform, native_only=True)
+    assert paths.claude_config.read_bytes() == before
+    assert not paths.codex_config.exists()
+    assert not paths.claude_skills.exists()
+    assert platform.python is None
+    assert result.checks["native_helper"] is True
+
+
+def test_native_only_dry_run_changes_nothing(tmp_path):
+    paths = setup_paths(tmp_path)
+    platform = FakePlatform()
+    result = run_setup(paths, platform=platform, native_only=True, dry_run=True)
+    assert result.planned
+    assert not paths.application_support.exists()
+    assert platform.commands == []
+
+
 def test_setup_builds_and_signs_stable_helper(tmp_path):
     platform = FakePlatform()
 

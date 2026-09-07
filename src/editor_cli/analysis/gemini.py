@@ -26,12 +26,14 @@ from editor_cli.domain.style_profile import StyleProfile
 GenerateFn = Callable[[str, list[str]], str]
 
 _FENCE = re.compile(r"```(?:json)?\s*(.*?)```", re.DOTALL)
-_RETRY_SUFFIX = "\n\nReturn ONLY a valid JSON object. No markdown fences, no commentary."
+_RETRY_SUFFIX = (
+    "\n\nReturn ONLY a valid JSON object. No markdown fences, no commentary."
+)
 
 _STYLE_PROMPT = (
     "You are a video-editing analyst. Watch the reference video(s) and return ONLY "
     "a JSON object describing the editing style with EXACTLY these keys: "
-    'pacing{cuts_per_min, avg_shot_len_s}, transitions[], automations[], '
+    "pacing{cuts_per_min, avg_shot_len_s}, transitions[], automations[], "
     "color{description, lut}, captions{style, position, font}, "
     "sound{name, energy, genre, bpm}, vibe. Use null where unknown."
 )
@@ -79,7 +81,7 @@ _EFFECTS_INTENSITY = {
 
 _EVAL_PROMPT = (
     "Watch the rendered edit and score how well it matches the target style and "
-    "intent. Return ONLY JSON: {{\"score\": 0.0-1.0, \"issues\": [\"...\"]}}. "
+    'intent. Return ONLY JSON: {{"score": 0.0-1.0, "issues": ["..."]}}. '
     "Be specific about pacing, bad cuts, color, and caption issues.\n\n"
     "STYLE:\n{style}\n\nINTENT:\n{prompt}"
 )
@@ -123,7 +125,7 @@ def _retry(
             if not _is_retryable(exc) or i == attempts - 1:
                 raise
             last = exc
-            sleep(base_delay * (2 ** i))
+            sleep(base_delay * (2**i))
     assert last is not None
     raise last
 
@@ -161,21 +163,28 @@ class GeminiClient:
             effects_intensity, _EFFECTS_INTENSITY["subtle"]
         )
         effects = (
-            guidance
-            if effects_intensity == "none"
-            else f"{_EFFECTS_SPEC}\n{guidance}"
+            guidance if effects_intensity == "none" else f"{_EFFECTS_SPEC}\n{guidance}"
         )
         p = _EDL_PROMPT.format(
-            style=style.to_json(), manifest=manifest, transcript=transcript,
-            prompt=prompt, feedback=fb, effects=effects,
+            style=style.to_json(),
+            manifest=manifest,
+            transcript=transcript,
+            prompt=prompt,
+            feedback=fb,
+            effects=effects,
         )
         return self._json(p, footage or [], EDL.from_dict)
 
-    def evaluate(self, render_path: str, style: StyleProfile, prompt: str) -> EvalResult:
+    def evaluate(
+        self, render_path: str, style: StyleProfile, prompt: str
+    ) -> EvalResult:
         p = _EVAL_PROMPT.format(style=style.to_json(), prompt=prompt)
         return self._json(
-            p, [render_path],
-            lambda d: EvalResult(score=float(d["score"]), issues=list(d.get("issues", []))),
+            p,
+            [render_path],
+            lambda d: EvalResult(
+                score=float(d["score"]), issues=list(d.get("issues", []))
+            ),
         )
 
 
@@ -237,7 +246,9 @@ class FileUploader:
             self._sleep(self._poll_interval)
             handle = self._get(handle.name)
         if handle.state and "FAILED" in str(handle.state):
-            raise RuntimeError(f"Gemini could not process {path} (state={handle.state})")
+            raise RuntimeError(
+                f"Gemini could not process {path} (state={handle.state})"
+            )
         return handle
 
     def _upload_one(self, path: str) -> Any:
@@ -253,9 +264,11 @@ class FileUploader:
     def upload_all(self, paths: list[str]) -> list[Any]:
         """Return file handles for ``paths`` (order preserved), uploading the
         distinct uncached ones concurrently."""
-        pending = [p for p in dict.fromkeys(os.path.abspath(p) for p in paths)
-                   if self._cache.get(p) is None
-                   or self._cache[p].sig != self._signature(p)]
+        pending = [
+            p
+            for p in dict.fromkeys(os.path.abspath(p) for p in paths)
+            if self._cache.get(p) is None or self._cache[p].sig != self._signature(p)
+        ]
         if pending:
             workers = min(self._max_workers, len(pending))
             with ThreadPoolExecutor(max_workers=workers) as pool:
@@ -285,7 +298,9 @@ def make_gemini_generate(
     def generate(prompt: str, files: list[str]) -> str:
         contents: list[Any] = list(uploader.upload_all(files))
         contents.append(prompt)
-        resp = _retry(lambda: client.models.generate_content(model=model, contents=contents))
+        resp = _retry(
+            lambda: client.models.generate_content(model=model, contents=contents)
+        )
         return resp.text or ""
 
     return generate
@@ -309,9 +324,13 @@ def make_vision_generate(api_key: str, model: str = "gemini-2.5-flash") -> Gener
         contents: list[Any] = []
         for path in files:
             with open(path, "rb") as fh:
-                contents.append(types.Part.from_bytes(data=fh.read(), mime_type="image/jpeg"))
+                contents.append(
+                    types.Part.from_bytes(data=fh.read(), mime_type="image/jpeg")
+                )
         contents.append(prompt)
-        resp = _retry(lambda: client.models.generate_content(model=model, contents=contents))
+        resp = _retry(
+            lambda: client.models.generate_content(model=model, contents=contents)
+        )
         return resp.text or ""
 
     return generate

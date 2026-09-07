@@ -7,7 +7,6 @@ import os
 import time
 from pathlib import Path
 from types import TracebackType
-from typing import Self
 
 
 class SessionBusy(RuntimeError):
@@ -30,7 +29,7 @@ class SessionLock:
         self.path = self.session_root / ".lock"
         self._fd: int | None = None
 
-    def __enter__(self) -> Self:
+    def __enter__(self) -> SessionLock:
         self.session_root.mkdir(mode=0o700, parents=True, exist_ok=True)
         fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
         os.chmod(self.path, 0o600)

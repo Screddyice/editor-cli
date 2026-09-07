@@ -7,7 +7,9 @@
     "transition_visible",
     "reaction_insert_visible",
     "preview_rendered",
-    "preview_watched"
+    "preview_watched",
+    "candidate_xml_valid",
+    "restart_reconciled"
   ],
   "passing_result": {
     "source_unchanged": true,
@@ -16,7 +18,9 @@
     "transition_visible": true,
     "reaction_insert_visible": true,
     "preview_rendered": true,
-    "preview_watched": true
+    "preview_watched": true,
+    "candidate_xml_valid": true,
+    "restart_reconciled": true
   },
   "failure_cases": {
     "wrong_offsets": {"title_offset": "5s"},

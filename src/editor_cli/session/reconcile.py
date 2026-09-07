@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import hashlib
+import json
 import math
 import re
 from collections.abc import Sequence
@@ -54,6 +55,45 @@ async def reconcile_external_action(
 
     if action.status != "pending":
         raise ReconciliationError("Only pending external actions can be reconciled")
+    return await _canonical_result(
+        action,
+        control,
+        session_root,
+        require_active=True,
+    )
+
+
+async def validate_completed_external_action(
+    action: ExternalAction,
+    result: dict[str, Any],
+    control: ReconciliationControl,
+    session_root: Path,
+) -> dict[str, Any]:
+    """Validate a stored receipt against its intent and durable postcondition."""
+
+    if action.status != "complete":
+        raise ReconciliationError("Only completed external actions have receipts")
+    kind = _ACTION_KIND.get(action.action)
+    canonical = await _canonical_result(
+        action,
+        control,
+        session_root,
+        require_active=kind != "export_xml",
+    )
+    if not isinstance(result, dict) or result != canonical:
+        raise ReconciliationError(
+            f"Completed {action.action} result evidence does not match its postcondition"
+        )
+    return canonical
+
+
+async def _canonical_result(
+    action: ExternalAction,
+    control: ReconciliationControl,
+    session_root: Path,
+    *,
+    require_active: bool,
+) -> dict[str, Any]:
     try:
         kind = _ACTION_KIND[action.action]
         expected = _plain_dict(action.expected, "expected data")
@@ -70,13 +110,14 @@ async def reconcile_external_action(
             return _reconcile_download(arguments, identity_data, idempotency, root)
 
         identity = _project_identity(identity_data)
-        await _require_exact_active(control, identity)
+        if require_active:
+            await _require_exact_active(control, identity)
         if kind == "export_xml":
             return await _reconcile_export(
                 control, arguments, idempotency, identity, root
             )
         if kind == "import_xml":
-            _reconcile_import_source(arguments, idempotency, identity, root)
+            return _reconcile_import_source(arguments, idempotency, identity, root)
         elif kind == "share_preview":
             return _reconcile_share(arguments, idempotency, identity, root)
         elif kind in {"duplicate_project", "open_project"}:
@@ -156,7 +197,12 @@ async def _reconcile_export(
     expected_hash = idempotency.get("sha256")
     if expected_hash is not None and _digest(expected_hash) != digest:
         raise ReconciliationError("Interrupted export output hash does not match")
-    return {"identity": asdict(identity), "path": str(destination), "sha256": digest}
+    return {
+        "identity": asdict(identity),
+        "path": str(destination),
+        "sha256": digest,
+        "size_bytes": destination.stat().st_size,
+    }
 
 
 def _reconcile_import_source(
@@ -164,7 +210,7 @@ def _reconcile_import_source(
     idempotency: dict[str, Any],
     identity: ProjectIdentity,
     root: Path,
-) -> None:
+) -> dict[str, Any]:
     if set(arguments) != {"path", "identity"}:
         raise ValueError
     if set(idempotency) != {"project_name", "candidate_sha256"}:
@@ -180,6 +226,12 @@ def _reconcile_import_source(
         raise ValueError
     if not source.is_file() or _file_sha256(source) != expected_hash:
         raise ReconciliationError("Interrupted import candidate hash does not match")
+    return {
+        "identity": asdict(identity),
+        "path": str(source),
+        "sha256": expected_hash,
+        "size_bytes": source.stat().st_size,
+    }
 
 
 def _reconcile_share(
@@ -190,7 +242,11 @@ def _reconcile_share(
 ) -> dict[str, Any]:
     if set(arguments) != {"identity", "destination"}:
         raise ValueError
-    if set(idempotency) != {"destination", "candidate_sha256"}:
+    if set(idempotency) != {
+        "destination",
+        "candidate_path",
+        "candidate_sha256",
+    }:
         raise ValueError
     if (
         _project_identity(_plain_dict(arguments["identity"], "arguments identity"))
@@ -198,21 +254,48 @@ def _reconcile_share(
     ):
         raise ValueError
     candidate_hash = _digest(idempotency.get("candidate_sha256"))
-    if _unique_file_with_hash(root / "candidates", candidate_hash) is None:
+    candidate_path = _exact_path(
+        idempotency.get("candidate_path"),
+        idempotency.get("candidate_path"),
+        root,
+    )
+    if (
+        not candidate_path.is_relative_to(root / "candidates")
+        or not candidate_path.is_file()
+        or _file_sha256(candidate_path) != candidate_hash
+    ):
         raise ReconciliationError(
-            "Interrupted share candidate hash does not match one exact candidate"
+            "Interrupted share candidate hash and path do not match"
         )
     destination = _exact_path(
         arguments["destination"], idempotency.get("destination"), root
     )
-    if not destination.is_file() or destination.stat().st_size <= 0:
-        raise ReconciliationError("Interrupted share did not create its exact output")
-    return {
+    receipt_path = _contained_path(str(destination) + ".receipt.json", root)
+    try:
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ReconciliationError(
+            "Interrupted share has no durable native completion receipt"
+        ) from exc
+    canonical: dict[str, Any] = {
         "kind": "final_cut_share",
         "identity": asdict(identity),
         "output": str(destination),
-        "sha256": _file_sha256(destination),
+        "sha256": _file_sha256(destination) if destination.is_file() else "",
+        "size_bytes": destination.stat().st_size if destination.is_file() else 0,
     }
+    expected_receipt = {"version": 1, **canonical}
+    if (
+        not isinstance(receipt, dict)
+        or receipt != expected_receipt
+        or not re.fullmatch(r"[0-9a-f]{64}", canonical["sha256"])
+        or type(canonical["size_bytes"]) is not int
+        or canonical["size_bytes"] <= 0
+    ):
+        raise ReconciliationError(
+            "Interrupted share native completion receipt does not match output"
+        )
+    return canonical
 
 
 def _require_project_name(
@@ -276,44 +359,17 @@ def _reconcile_download(
         raise ValueError
     expected_hash = _digest(idempotency.get("sha256"))
     supplied = arguments.get("path") or arguments.get("staging_path")
-    candidates: list[Path] = []
-    if supplied is not None:
-        candidate = _contained_path(supplied, root)
-        if candidate.is_file() and _file_sha256(candidate) == expected_hash:
-            candidates.append(candidate)
-    if not candidates:
-        for candidate in root.rglob("*"):
-            if (
-                candidate.is_file()
-                and candidate.name
-                not in {
-                    "journal.jsonl",
-                    "provenance.jsonl",
-                    "state.json",
-                    ".lock",
-                    ".session.lock",
-                }
-                and _file_sha256(candidate) == expected_hash
-            ):
-                candidates.append(candidate.resolve())
-    unique = tuple(dict.fromkeys(candidates))
-    if len(unique) != 1:
+    candidate = _contained_path(supplied, root)
+    if not candidate.is_file() or _file_sha256(candidate) != expected_hash:
         raise ReconciliationError(
             "Interrupted download does not have one exact source and output hash"
         )
-    return {"path": str(unique[0]), "sha256": expected_hash, "source_url": source_url}
-
-
-def _unique_file_with_hash(root: Path, digest: str) -> Path | None:
-    if not root.is_dir():
-        return None
-    matches = [
-        path.resolve()
-        for path in root.rglob("*")
-        if path.is_file() and _file_sha256(path) == digest
-    ]
-    unique = tuple(dict.fromkeys(matches))
-    return unique[0] if len(unique) == 1 else None
+    return {
+        "path": str(candidate),
+        "sha256": expected_hash,
+        "size_bytes": candidate.stat().st_size,
+        "source_url": source_url,
+    }
 
 
 def _exact_path(actual: Any, expected: Any, root: Path) -> Path:

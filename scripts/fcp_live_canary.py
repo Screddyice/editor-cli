@@ -9,6 +9,7 @@ import hashlib
 import json
 import subprocess
 import sys
+import uuid
 import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -22,6 +23,7 @@ from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import device_report
 from editor_cli.services import build_services
 from editor_cli.session.models import EditOperation, EditProgram, EditRequest
+from editor_cli.session.models import ProjectIdentity
 from editor_cli.verification.review import ReviewReport
 from editor_cli.verification.technical import inspect_preview
 
@@ -33,6 +35,8 @@ EXPECTED_CHECKS = (
     "reaction_insert_visible",
     "preview_rendered",
     "preview_watched",
+    "candidate_xml_valid",
+    "restart_reconciled",
 )
 
 _FRAME_TARGETS = {
@@ -66,7 +70,7 @@ def create_canary_workspace(root: Path) -> CanaryWorkspace:
         root=root,
         source=source,
         sessions=sessions,
-        library=root / "Editor CLI Canary.fcpbundle",
+        library=root / f"Editor CLI Canary {uuid.uuid4().hex[:12]}.fcpbundle",
         result_path=root / "result.json",
     )
 
@@ -488,11 +492,11 @@ async def _wait_for_project(control, library: Path, timeout_seconds: int = 60) -
     while asyncio.get_running_loop().time() < deadline:
         try:
             projects = await control.active_projects()
-            active_library = getattr(control, "_active_library_path", None)
             if (
                 len(projects) == 1
                 and projects[0].project == "Editor CLI Canary Source"
-                and active_library == expected_library
+                and projects[0].library == expected_library.stem
+                and projects[0].event == "Canary Event"
             ):
                 return
         except Exception as exc:  # noqa: BLE001 - any bridge failure blocks the canary
@@ -535,10 +539,81 @@ async def run_canary(
     session = await controller.start(
         EditRequest(
             "Remove the one-second gap, add the canary title, cross-dissolve, "
-            "and reaction card."
+            "and reaction card.",
+            required_operations=(
+                "gap_removed",
+                "title_visible",
+                "add_transition",
+                "reaction_insert_visible",
+            ),
         )
     )
-    candidate = await controller.apply(session.id, program)
+    source_capture = controller.deps.sessions.load(session.id)["capture"]
+    source_before = _file_sha256(Path(source_capture["source_xml"]))
+
+    # Lose the first controller after Final Cut completes Share, before the
+    # completion receipt. A new controller must reconcile, never share again.
+    class InterruptedShare(RuntimeError):
+        pass
+
+    first_control = controller.deps.fcp
+    share = first_control.render_preview
+    share_calls = 0
+
+    async def interrupt_after_share(identity, destination):
+        nonlocal share_calls
+        share_calls += 1
+        receipt = await share(identity, destination)
+        if getattr(receipt, "kind", None) != "final_cut_share":
+            raise RuntimeError("Canary requires a native Final Cut Share receipt")
+        raise InterruptedShare("Restart before Share receipt is saved")
+
+    first_control.render_preview = interrupt_after_share
+    try:
+        try:
+            await controller.apply(session.id, program)
+        except InterruptedShare:
+            pass
+        else:
+            raise RuntimeError("Canary did not exercise the Share crash window")
+    finally:
+        first_control.render_preview = share
+    if share_calls != 1:
+        raise RuntimeError("Canary Share was not invoked exactly once")
+    pending = controller.deps.sessions.store(session.id).pending_actions()
+    if len(pending) != 1 or pending[0].action != "finalcut.share_preview":
+        raise RuntimeError("Canary lost its pending Share intent")
+
+    services = build_services(config, doctor=lambda: report)
+    controller = services.session.controller
+    second_control = controller.deps.fcp
+    second_share = second_control.render_preview
+
+    async def reject_share_replay(*_args, **_kwargs):
+        raise RuntimeError("Canary attempted to replay a completed Share")
+
+    second_control.render_preview = reject_share_replay
+    try:
+        await controller.resume(session.id)
+    finally:
+        second_control.render_preview = second_share
+    record = controller.deps.sessions.load(session.id)
+    if len(record["candidates"]) != 1:
+        raise RuntimeError("Canary resume did not recover one candidate")
+    candidate = controller._candidate(record["candidates"][0])
+    store = controller.deps.sessions.store(session.id)
+    share_result = store.completed_action_result(pending[0].token)
+    restart_reconciled = bool(share_result) and not store.pending_actions()
+
+    # Re-export the original project through the same native bridge, then restore
+    # the candidate before its bound review. These are disposable canary projects.
+    original = ProjectIdentity(**record["identity"])
+    candidate_identity = ProjectIdentity(**record["candidates"][0]["identity"])
+    await second_control.open_project(original)
+    recapture = controller.deps.sessions.paths(session.id).source / "recaptured.fcpxml"
+    await second_control.export_xml(original, recapture)
+    source_after = _file_sha256(recapture)
+    await second_control.open_project(candidate_identity)
     structure = candidate_structure_checks(candidate.fcpxml_path)
     technical = inspect_preview(
         candidate.preview_path,
@@ -553,7 +628,8 @@ async def run_canary(
         candidate.evidence_manifest, candidate.preview_path, program.changed_ranges
     )
     required = {
-        "source_unchanged": source_hashes == hash_tree(workspace.source),
+        "source_unchanged": source_hashes == hash_tree(workspace.source)
+        and source_before == source_after,
         "gap_removed": structure["gap_removed"],
         "title_visible": structure["title_visible"] and watched["title_visible"],
         "transition_visible": structure["transition_visible"]
@@ -562,14 +638,19 @@ async def run_canary(
         and watched["reaction_insert_visible"],
         "preview_rendered": technical.verified and watched["preview_fresh"],
         "preview_watched": watched["preview_watched"],
+        "candidate_xml_valid": record["candidates"][0]["controller_checks"][
+            "candidate_xml_valid"
+        ],
+        "restart_reconciled": restart_reconciled,
     }
     result = await controller.record_review(
         session.id,
         candidate.number,
         ReviewReport(
-            required=required,
+            required={name: required[name] for name in record["required_checks"]},
             observations=technical.observations,
             changed_ranges=program.changed_ranges,
+            binding=candidate.binding,
         ),
     )
     return {
@@ -580,6 +661,9 @@ async def run_canary(
         "preview_path": str(candidate.preview_path),
         "evidence_manifest": str(candidate.evidence_manifest),
         "required_checks": required,
+        "render_kind": (share_result or {}).get("kind"),
+        "source_before_sha256": source_before,
+        "source_after_sha256": source_after,
         "final_export": "user",
     }
 
@@ -608,6 +692,7 @@ def _all_required_checks_pass(result: dict) -> bool:
         and all(type(value) is bool for value in checks.values())
         and all(checks.values())
         and result.get("state") == "ready"
+        and result.get("render_kind") == "final_cut_share"
     )
 
 

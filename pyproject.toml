@@ -54,3 +54,15 @@ where = ["src"]
 # which ships its own (differently-configured) test suite.
 testpaths = ["tests"]
 norecursedirs = ["vendor", ".venv", "references"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+# Keep the repository gate independent of each contributor's global settings.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Small injected callbacks keep test fixtures readable.
+"tests/**" = ["E731"]

@@ -1,8 +1,8 @@
 # Final Cut Closed-Loop Controller Design
 
-**Date:** 2026-09-05  
+**Date:** 2026-09-05
 **Status:** Superseded for live control
-**Owner:** Shawn  
+**Owner:** Shawn
 **Target:** Final Cut Pro 12.3 on Apple silicon
 
 The session, access, and verification goals remain valid. The paid

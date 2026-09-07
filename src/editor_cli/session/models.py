@@ -11,6 +11,8 @@ from math import isfinite
 from pathlib import Path
 from typing import Any, Literal, cast
 
+from pydantic import ConfigDict, create_model
+
 
 class FrozenDict(dict[str, Any]):
     """A JSON-compatible mapping that cannot change after construction."""
@@ -225,11 +227,52 @@ class EditOperation:
     def __post_init__(self) -> None:
         object.__setattr__(self, "arguments", FrozenDict(self.arguments))
 
+    @classmethod
+    def model_validate(cls, value: Any) -> EditOperation:
+        """Validate untrusted MCP input while retaining the dataclass API."""
+        envelope = create_model(
+            "EditOperationEnvelope",
+            __config__=ConfigDict(extra="forbid"),
+            group=(str, ...),
+            action=(str, ...),
+            arguments=(dict[str, Any], ...),
+        ).model_validate(value)
+        operation = cls(envelope.group, envelope.action, envelope.arguments)
+        if (operation.group, operation.action) not in ALLOWED_EDIT_ACTIONS:
+            raise ValueError(
+                f"Unsupported edit action: {operation.group}.{operation.action}"
+            )
+        key = (operation.group, operation.action)
+        pydantic_fields: dict[str, tuple[Any, Any]] = {}
+        for name, expected in _ACTION_FIELDS[key].items():
+            annotation = (
+                expected if isinstance(expected, type) else expected[0] | expected[1]
+            )
+            pydantic_fields[name] = (
+                annotation,
+                ... if name in _REQUIRED_FIELDS[key] else None,
+            )
+        arguments = (
+            create_model(
+                f"{operation.action.title().replace('_', '')}Arguments",
+                __config__=ConfigDict(extra="forbid"),
+                **pydantic_fields,
+            )
+            .model_validate(envelope.arguments)
+            .model_dump(exclude_none=True)
+        )
+        return cls(
+            operation.group,
+            operation.action,
+            _validated_arguments(
+                cls(operation.group, operation.action, arguments), None
+            ),
+        )
+
 
 _ACTION_FIELDS: dict[tuple[str, str], dict[str, type | tuple[type, ...]]] = {
     ("edit", "insert_clip"): {
         "asset_id": str,
-        "asset_name": str,
         "position": str,
         "duration": str,
         "in_point": str,
@@ -263,7 +306,6 @@ _ACTION_FIELDS: dict[tuple[str, str], dict[str, type | tuple[type, ...]]] = {
     ("edit", "add_audio"): {
         "parent_clip_id": str,
         "asset_id": str,
-        "src": str,
         "offset": str,
         "duration": str,
         "role": str,
@@ -272,7 +314,6 @@ _ACTION_FIELDS: dict[tuple[str, str], dict[str, type | tuple[type, ...]]] = {
     ("edit", "add_connected_clip"): {
         "parent_clip_id": str,
         "asset_id": str,
-        "asset_name": str,
         "offset": str,
         "duration": str,
         "lane": int,
@@ -378,23 +419,16 @@ def _validate_template_clips(
     for slot, raw in clips.items():
         if not isinstance(slot, str) or not slot or not isinstance(raw, dict):
             raise ValueError("Template clips must map named slots to objects")
-        unknown = set(raw) - {"src", "asset_id", "name", "duration"}
+        unknown = set(raw) - {"asset_id", "name", "duration"}
         if unknown:
             raise ValueError(
                 f"Template clip {slot} has unknown arguments: {sorted(unknown)}"
             )
-        if ("src" in raw) == ("asset_id" in raw):
-            raise ValueError(
-                f"Template clip {slot} needs exactly one of src or asset_id"
-            )
+        if "asset_id" not in raw:
+            raise ValueError(f"Template clip {slot} needs asset_id")
         if any(not isinstance(value, str) or not value for value in raw.values()):
             raise ValueError(f"Template clip {slot} values must be non-empty strings")
-        item = dict(raw)
-        if "src" in item:
-            if path_resolver is None:
-                raise ValueError("Template clip src requires a session path authorizer")
-            item["src"] = str(path_resolver(Path(item["src"])))
-        normalized[slot] = item
+        normalized[slot] = dict(raw)
     return normalized
 
 
@@ -421,6 +455,9 @@ def _validated_arguments(
         choices = _ENUM_FIELDS.get((key, name))
         if choices is not None and value not in choices:
             raise ValueError(f"Edit argument {name} has an unsupported value")
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            if not isfinite(float(value)):
+                raise ValueError(f"Edit argument {name} must be finite")
 
     for name in ("clip_ids", "split_points"):
         if name in arguments:
@@ -446,22 +483,12 @@ def _validated_arguments(
         arguments["markers"] = normalized_markers
     if key == ("generate", "apply_template"):
         arguments["clips"] = _validate_template_clips(arguments["clips"], path_resolver)
-    if key == ("edit", "add_audio") and "src" in arguments:
-        if path_resolver is None:
-            raise ValueError("add_audio src requires a session path authorizer")
-        arguments["src"] = str(path_resolver(Path(arguments["src"])))
-    if key == ("edit", "insert_clip") and not (
-        arguments.get("asset_id") or arguments.get("asset_name")
-    ):
-        raise ValueError("insert_clip needs asset_id or asset_name")
-    if key == ("edit", "add_audio") and not (
-        arguments.get("asset_id") or arguments.get("src")
-    ):
-        raise ValueError("add_audio needs asset_id or src")
-    if key == ("edit", "add_connected_clip") and not (
-        arguments.get("asset_id") or arguments.get("asset_name")
-    ):
-        raise ValueError("add_connected_clip needs asset_id or asset_name")
+    if key in {
+        ("edit", "insert_clip"),
+        ("edit", "add_audio"),
+        ("edit", "add_connected_clip"),
+    } and not arguments.get("asset_id"):
+        raise ValueError(f"{operation.action} needs asset_id")
     if key == ("edit", "assign_role") and not (
         arguments.get("audio_role") or arguments.get("video_role")
     ):
@@ -498,8 +525,16 @@ class EditProgram:
         path_resolver: Callable[[Path], Path] | None = None,
     ) -> EditProgram:
         duration = float(analysis["duration_seconds"])
+        if not isfinite(duration) or duration < 0:
+            raise ValueError("Timeline duration must be finite and non-negative")
         for start, end in self.changed_ranges:
-            if start < 0 or end <= start or end > duration:
+            if (
+                not isfinite(start)
+                or not isfinite(end)
+                or start < 0
+                or end <= start
+                or end > duration
+            ):
                 raise ValueError(
                     f"Changed range is outside the timeline: {start}-{end}"
                 )

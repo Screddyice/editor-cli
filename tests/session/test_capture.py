@@ -159,6 +159,7 @@ async def test_capture_recovery_uses_completed_export_without_replay(tmp_path):
             "identity": identity.__dict__,
             "path": str(destination),
             "sha256": file_sha256(destination),
+            "size_bytes": destination.stat().st_size,
         },
     )
     fake_fcp = FakeFinalCut([identity])

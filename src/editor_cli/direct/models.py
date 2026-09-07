@@ -47,6 +47,14 @@ class Music(StrictModel):
     duck: bool = True
 
 
+class Narration(StrictModel):
+    asset_id: str
+    source_start: float = Field(default=0, ge=0)
+    start: float = Field(default=0, ge=0)
+    duration: float = Field(gt=0)
+    volume: float = Field(default=1, ge=0, le=2)
+
+
 class EditPlan(StrictModel):
     cuts: list[Cut] = Field(min_length=1, max_length=500)
     width: int = Field(default=1920, ge=128, le=3840)
@@ -56,6 +64,7 @@ class EditPlan(StrictModel):
     overlays: list[Overlay] = Field(default_factory=list, max_length=100)
     captions: bool = False
     music: Music | None = None
+    narration: Narration | None = None
 
     @model_validator(mode="after")
     def timeline(self):
@@ -64,6 +73,13 @@ class EditPlan(StrictModel):
         duration = sum((c.end - c.start) / c.speed for c in self.cuts)
         if duration > 7200:
             raise ValueError("Direct edits are limited to two hours")
-        if any(t.start + t.duration > duration + 0.001 for t in self.titles + self.overlays):
+        if any(
+            t.start + t.duration > duration + 0.001 for t in self.titles + self.overlays
+        ):
             raise ValueError("Titles and overlays must fit the output timeline")
+        if (
+            self.narration
+            and self.narration.start + self.narration.duration > duration + 0.001
+        ):
+            raise ValueError("Narration must fit the output timeline")
         return self

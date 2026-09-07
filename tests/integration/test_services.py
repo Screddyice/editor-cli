@@ -1,4 +1,5 @@
 import json
+import subprocess
 from hashlib import sha256
 from pathlib import Path
 from types import SimpleNamespace
@@ -8,6 +9,7 @@ import pytest
 from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import build_default_services
 from editor_cli.services import (
+    MediaService,
     ServiceError,
     SessionService,
     TimelineService,
@@ -217,6 +219,78 @@ async def test_timeline_service_routes_undo_through_controller():
     assert controller.undo_calls == ["d" * 32]
 
 
+@pytest.mark.anyio
+async def test_timeline_service_rejects_unknown_program_and_operation_keys():
+    service = TimelineService(FakeTimelineController(), sessions=None, fcpxml=None)
+    with pytest.raises(ValueError, match="unexpected fields"):
+        await service.dispatch(
+            "apply",
+            session_id="d" * 32,
+            edit_program={"operations": [], "run_shell": True},
+        )
+    with pytest.raises(ValueError, match="unexpected fields"):
+        await service.dispatch(
+            "apply",
+            session_id="d" * 32,
+            edit_program={
+                "operations": [
+                    {
+                        "group": "edit",
+                        "action": "fill_gaps",
+                        "arguments": {},
+                        "path": "/tmp/private",
+                    }
+                ]
+            },
+        )
+
+
+@pytest.mark.anyio
+async def test_timeline_inspection_surfaces_installed_final_cut_assets(tmp_path):
+    class Sessions:
+        def load(self, _session_id):
+            return {
+                "state": "apply",
+                "analysis": {
+                    "clips": [],
+                    "gaps": [],
+                    "roles": [],
+                    "markers": [],
+                    "effects": [],
+                    "transcript": [],
+                    "pacing": {},
+                },
+                "capture": {"source_xml": "/tmp/source.fcpxml"},
+                "candidates": [],
+            }
+
+    asset = SimpleNamespace(
+        kind="title",
+        name="Basic Title",
+        category="Titles",
+        action_id="Titles/Basic Title",
+        handler="fcpx_title",
+        path=tmp_path / "Basic Title.moti",
+    )
+    catalog = SimpleNamespace(scan=lambda: (asset,))
+    service = TimelineService(
+        FakeTimelineController(), Sessions(), fcpxml=None, asset_catalog=catalog
+    )
+
+    result = await service.dispatch("inspect", session_id="d" * 32, edit_program=None)
+
+    assert result["analysis"]["clips"] == []
+    assert result["installed_assets"] == [
+        {
+            "kind": "title",
+            "name": "Basic Title",
+            "category": "Titles",
+            "action_id": "Titles/Basic Title",
+            "handler": "fcpx_title",
+        }
+    ]
+
+
 def test_default_mcp_registry_has_concrete_services():
     services = build_default_services()
 
@@ -224,6 +298,7 @@ def test_default_mcp_registry_has_concrete_services():
     assert type(services.timeline).__name__ == "TimelineService"
     assert type(services.media).__name__ == "MediaService"
     assert type(services.verify).__name__ == "VerifyService"
+    assert type(services.timeline.asset_catalog).__name__ == "InstalledAssetCatalog"
 
 
 def test_default_service_construction_does_not_require_watch_install(monkeypatch):
@@ -361,4 +436,202 @@ async def test_review_rejects_stale_preview_hash(ready_verify_service):
                 },
                 "binding": binding,
             },
+        )
+
+
+class FakeRegistrationTimeline:
+    def __init__(self):
+        self.calls = []
+
+    async def register_media(self, source, media, destination, **metadata):
+        self.calls.append((source, media, destination, metadata))
+        destination.write_text(source.read_text(encoding="utf-8"), encoding="utf-8")
+        return SimpleNamespace(asset_id="r_editor_abc", path=destination)
+
+
+@pytest.mark.anyio
+async def test_media_service_registers_acquired_asset_for_timeline_use(tmp_path):
+    sessions = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    record = sessions.create(
+        EditRequest("insert reaction", required_operations=("reaction_visible",))
+    )
+    paths = sessions.paths(record["id"])
+    source = paths.source / "active-source.fcpxml"
+    source.write_text("<fcpxml><resources/></fcpxml>", encoding="utf-8")
+    record["capture"] = {"source_xml": str(source), "source_sha256": "0" * 64}
+    record["state"] = "apply"
+    sessions.save(record)
+    media = paths.assets / "reaction.mp4"
+    media.write_bytes(b"movie")
+    (paths.assets / "provenance.jsonl").write_text(
+        json.dumps(
+            {
+                "path": str(media),
+                "sha256": sha256(media.read_bytes()).hexdigest(),
+                "source_url": "https://example.com/reaction.mp4",
+                "purpose": "reaction",
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    timeline = FakeRegistrationTimeline()
+    service = MediaService(
+        sessions, timeline=timeline, probe_media=lambda _path: (True, False)
+    )
+
+    result = await service.dispatch(
+        "register",
+        session_id=record["id"],
+        url=None,
+        purpose=None,
+        asset_path=str(media),
+        name="Reaction",
+        duration_seconds=1.0,
+        has_audio=False,
+    )
+
+    assert result["asset_id"] == "r_editor_abc"
+    saved = sessions.load(record["id"])
+    assert saved["registered_assets"][0]["path"] == str(media.resolve())
+    assert saved["working_xml"].endswith("register-01.fcpxml")
+    assert timeline.calls[0][3]["has_video"] is True
+    assert timeline.calls[0][3]["has_audio"] is False
+
+
+@pytest.mark.anyio
+async def test_media_service_rejects_acquired_asset_changed_after_download(tmp_path):
+    sessions = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    record = sessions.create(
+        EditRequest("insert reaction", required_operations=("reaction_visible",))
+    )
+    paths = sessions.paths(record["id"])
+    source = paths.source / "source.fcpxml"
+    source.write_text("<fcpxml><resources/></fcpxml>", encoding="utf-8")
+    record.update({"capture": {"source_xml": str(source)}, "state": "apply"})
+    sessions.save(record)
+    media = paths.assets / "reaction.mp4"
+    media.write_bytes(b"original")
+    (paths.assets / "provenance.jsonl").write_text(
+        json.dumps(
+            {"path": str(media), "sha256": sha256(media.read_bytes()).hexdigest()}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    media.write_bytes(b"changed")
+    service = MediaService(
+        sessions,
+        timeline=FakeRegistrationTimeline(),
+        probe_media=lambda _path: (True, False),
+    )
+
+    with pytest.raises(PermissionError, match="acquired session asset"):
+        await service.dispatch(
+            "register",
+            session_id=record["id"],
+            url=None,
+            purpose=None,
+            asset_path=str(media),
+            name="Reaction",
+            duration_seconds=1.0,
+        )
+
+
+@pytest.mark.anyio
+async def test_media_service_uses_probe_for_audio_only_mp4(tmp_path):
+    sessions = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    record = sessions.create(
+        EditRequest("add music", required_operations=("add_audio",))
+    )
+    paths = sessions.paths(record["id"])
+    source = paths.source / "source.fcpxml"
+    source.write_text("<fcpxml><resources/></fcpxml>", encoding="utf-8")
+    record.update({"capture": {"source_xml": str(source)}, "state": "apply"})
+    sessions.save(record)
+    media = paths.assets / "audio-only.mp4"
+    media.write_bytes(b"audio container")
+    (paths.assets / "provenance.jsonl").write_text(
+        json.dumps(
+            {"path": str(media), "sha256": sha256(media.read_bytes()).hexdigest()}
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    timeline = FakeRegistrationTimeline()
+    service = MediaService(
+        sessions, timeline=timeline, probe_media=lambda _path: (False, True)
+    )
+
+    await service.dispatch(
+        "register",
+        session_id=record["id"],
+        url=None,
+        purpose=None,
+        asset_path=str(media),
+        name="Music",
+        duration_seconds=1.0,
+    )
+
+    assert timeline.calls[0][3]["has_video"] is False
+    assert timeline.calls[0][3]["has_audio"] is True
+
+
+def test_media_probe_reads_real_audio_only_mp4_streams(tmp_path):
+    media = tmp_path / "audio-only.mp4"
+    subprocess.run(
+        (
+            "ffmpeg",
+            "-hide_banner",
+            "-loglevel",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=0.1",
+            "-c:a",
+            "aac",
+            str(media),
+        ),
+        check=True,
+    )
+
+    assert MediaService._probe_media(media) == (False, True)
+
+
+def test_media_probe_rejects_disguised_playlist(tmp_path):
+    import wave
+
+    neighbor = tmp_path / "unselected.wav"
+    with wave.open(str(neighbor), "wb") as audio:
+        audio.setnchannels(1)
+        audio.setsampwidth(2)
+        audio.setframerate(8000)
+        audio.writeframes(b"\x00\x00" * 800)
+    playlist = tmp_path / "download.mp4"
+    playlist.write_text(f"ffconcat version 1.0\nfile '{neighbor.name}'\n")
+    with pytest.raises(ValueError, match="not readable media"):
+        MediaService._probe_media(playlist)
+
+
+@pytest.mark.anyio
+async def test_media_service_refuses_unacquired_neighbor_file(tmp_path):
+    sessions = SessionRepository(ControllerConfig(session_root=tmp_path / "sessions"))
+    record = sessions.create(
+        EditRequest("insert reaction", required_operations=("reaction_visible",))
+    )
+    neighbor = tmp_path / "private.mp4"
+    neighbor.write_bytes(b"private")
+    service = MediaService(sessions, timeline=FakeRegistrationTimeline())
+
+    with pytest.raises(PermissionError):
+        await service.dispatch(
+            "register",
+            session_id=record["id"],
+            url=None,
+            purpose=None,
+            asset_path=str(neighbor),
+            name="Private",
+            duration_seconds=1.0,
+            has_audio=False,
         )

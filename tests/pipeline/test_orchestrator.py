@@ -6,15 +6,17 @@ from editor_cli.domain.edl import EDL, Segment
 from editor_cli.domain.style_profile import StyleProfile
 from editor_cli.pipeline.orchestrator import Deps, run_edit
 
-STYLE = StyleProfile.from_dict({
-    "pacing": {"cuts_per_min": 24.0, "avg_shot_len_s": 2.5},
-    "transitions": ["hard cut"],
-    "automations": [],
-    "color": {"description": "warm", "lut": None},
-    "captions": {"style": "bold", "position": "lower", "font": None},
-    "sound": {"name": None, "energy": "high", "genre": "edm", "bpm": 120},
-    "vibe": "punchy",
-})
+STYLE = StyleProfile.from_dict(
+    {
+        "pacing": {"cuts_per_min": 24.0, "avg_shot_len_s": 2.5},
+        "transitions": ["hard cut"],
+        "automations": [],
+        "color": {"description": "warm", "lut": None},
+        "captions": {"style": "bold", "position": "lower", "font": None},
+        "sound": {"name": None, "energy": "high", "genre": "edm", "bpm": 120},
+        "vibe": "punchy",
+    }
+)
 
 
 def _footage(tmp_path):
@@ -27,8 +29,11 @@ def _footage(tmp_path):
 def _deps(counter, scorer):
     def reason(*args):
         counter["n"] += 1
-        return EDL(fps=30.0, resolution=(1080, 1920),
-                   segments=[Segment(src="a.mp4", in_=0.0, out=2.0)])
+        return EDL(
+            fps=30.0,
+            resolution=(1080, 1920),
+            segments=[Segment(src="a.mp4", in_=0.0, out=2.0)],
+        )
 
     def render(edl, out, preview):
         Path(out).write_bytes(b"video")
@@ -65,7 +70,8 @@ def test_titles_are_applied_automatically_after_render(tmp_path):
     deps = _deps(counter, scorer=lambda *a: EvalResult(0.9, []))
     # editor decides on a title
     deps.reason_edl = lambda *a: EDL(
-        fps=30.0, resolution=(1080, 1920),
+        fps=30.0,
+        resolution=(1080, 1920),
         segments=[Segment(src="a.mp4", in_=0.0, out=2.0)],
         titles=[{"text": "Hello", "start": 0.0, "end": 1.0}],
     )
@@ -131,8 +137,9 @@ def test_genre_discovery_adds_refs_and_trend_context(tmp_path):
     deps.discover = lambda q, n: ["https://youtu.be/x", "https://youtu.be/y"]
     deps.sound_meta = lambda u: SimpleNamespace(title="T", track="S", artist="A", url=u)
 
-    run_edit(str(foot), "p", ["local.mp4"], str(out), deps,
-             genre="edm reels", trend_count=2)
+    run_edit(
+        str(foot), "p", ["local.mp4"], str(out), deps, genre="edm reels", trend_count=2
+    )
 
     assert "https://youtu.be/x" in seen["files"]
     assert "local.mp4" in seen["files"]
@@ -153,10 +160,14 @@ def test_refine_shots_runs_between_reason_and_render(tmp_path):
         order.append("refine")
         # durations come from the probe stub (5.0s) and reach the refiner
         assert durations == {str(foot / "a.mp4"): 5.0}
-        return EDL(fps=edl.fps, resolution=edl.resolution,
-                   segments=[Segment("a.mp4", 1.0, 3.0)])
+        return EDL(
+            fps=edl.fps,
+            resolution=edl.resolution,
+            segments=[Segment("a.mp4", 1.0, 3.0)],
+        )
 
     rendered = {}
+
     def render_capture(edl, o, preview):
         order.append("render")
         rendered["seg"] = (edl.segments[0].in_, edl.segments[0].out)

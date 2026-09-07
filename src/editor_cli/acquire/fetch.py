@@ -74,8 +74,15 @@ def download(
     Path(out_dir).mkdir(parents=True, exist_ok=True)
     template = os.path.join(out_dir, "%(id)s.%(ext)s")
     cmd = [
-        "yt-dlp", "--no-progress", "--print", "after_move:filepath",
-        *_cookie_args(opts), *_quality_args(opts), "-o", template, url,
+        "yt-dlp",
+        "--no-progress",
+        "--print",
+        "after_move:filepath",
+        *_cookie_args(opts),
+        *_quality_args(opts),
+        "-o",
+        template,
+        url,
     ]
     last_err: Any = None
     for _ in range(opts.retries + 1):

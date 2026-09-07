@@ -32,17 +32,34 @@ struct FinalCutProbeResult: Equatable {
   let blockingDialogs: [BlockingDialog]
 }
 
-enum FinalCutProbeError: Error, Equatable {
+enum FinalCutProbeError: Error, Equatable, LocalizedError {
   case unexpectedProcessCount
   case wrongBundleIdentifier
   case unsupportedVersion
+
+  var errorDescription: String? {
+    switch self {
+    case .unexpectedProcessCount: "Open Final Cut Pro 12.3 with one running application instance."
+    case .wrongBundleIdentifier: "Final Cut application bundle identity does not match com.apple.FinalCutApp."
+    case .unsupportedVersion: "Final Cut Pro 12.3 is required for native control."
+    }
+  }
 }
 
-enum FinalCutAutomationError: Error, Equatable {
+enum FinalCutAutomationError: Error, Equatable, LocalizedError {
   case notAuthorized
   case invalidTarget
   case eventFailed
   case invalidReply
+
+  var errorDescription: String? {
+    switch self {
+    case .notAuthorized: "Automation permission for Final Cut is missing; run editor-cli permissions request."
+    case .invalidTarget: "Final Cut Automation target is invalid."
+    case .eventFailed: "Final Cut library inspection failed or timed out."
+    case .invalidReply: "Final Cut returned an invalid library inspection response."
+    }
+  }
 }
 
 protocol FinalCutAutomationTransport {

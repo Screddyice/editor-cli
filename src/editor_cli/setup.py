@@ -14,15 +14,16 @@ import sys
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from importlib.resources.abc import Traversable
 from pathlib import Path
 from typing import Protocol
 
 from editor_cli.resources import final_cut_skill, native_source
 
 if sys.version_info >= (3, 11):
+    from importlib.resources.abc import Traversable
     import tomllib
 else:
+    from importlib.abc import Traversable
     import tomli as tomllib
 
 
@@ -1337,13 +1338,15 @@ def run_setup(
     *,
     platform: SetupPlatform | None = None,
     dry_run: bool = False,
-    upgrade_commandpost: bool = False,
+    native_only: bool = False,
 ) -> SetupResult:
     """Build the native helper and configure both local agent hosts."""
-    del upgrade_commandpost  # Retained for CLI compatibility during the migration.
     paths = paths or SetupPaths.defaults()
     platform = platform or LocalPlatform()
     result = SetupResult()
+    if native_only:
+        _build_and_install_native_helper(paths, platform, result, dry_run)
+        return result
     python = paths.repo_root / ".venv/bin/python"
     if not python.is_file():
         python = Path(sys.executable)

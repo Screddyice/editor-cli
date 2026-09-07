@@ -12,8 +12,12 @@ from urllib.parse import unquote, urlsplit
 
 from fcpxml.safe_xml import safe_parse
 
-from editor_cli.session.models import ProjectIdentity
+from editor_cli.session.models import ExternalAction, ProjectIdentity
 from editor_cli.session.paths import SessionPaths
+from editor_cli.session.reconcile import (
+    ReconciliationError,
+    validate_completed_external_action,
+)
 from editor_cli.session.store import SessionStore
 
 
@@ -119,13 +123,13 @@ async def capture_active_project(
             {
                 "path": str(export_path),
                 "sha256": source_sha256,
+                "size_bytes": export_path.stat().st_size,
                 "identity": {
                     "library": identity.library,
                     "event": identity.event,
                     "project": identity.project,
                     "duration_seconds": identity.duration_seconds,
                 },
-                "media_references": [str(path) for path in media_references],
             },
         )
 
@@ -198,24 +202,17 @@ async def recover_active_project_capture(
     if export is None:
         raise CaptureError("Capture recovery has no completed export receipt")
     try:
-        expected = _capture_identity(export["expected"]["identity"])
-        result = export["result"]
-        if not isinstance(result, dict) or result.get("identity") != expected.__dict__:
-            raise ValueError
-        export_path = Path(result["path"]).expanduser().resolve()
+        export_action, export_result = export
+        validated_export = await validate_completed_external_action(
+            export_action, export_result, control, paths.root
+        )
+        expected = _capture_identity(export_action.expected["identity"])
+        export_path = Path(validated_export["path"]).expanduser().resolve()
         expected_path = paths.source / "active-source.fcpxml"
         if export_path != expected_path or not export_path.is_file():
             raise ValueError
-        source_sha256 = file_sha256(export_path)
-        if result.get("sha256") != source_sha256:
-            raise ValueError
-        parsed = await control.inspect_xml(export_path)
-        if (
-            parsed.project != expected.project
-            or parsed.duration_seconds != expected.duration_seconds
-        ):
-            raise ValueError
-    except (KeyError, OSError, TypeError, ValueError) as exc:
+        source_sha256 = validated_export["sha256"]
+    except (KeyError, OSError, ReconciliationError, TypeError, ValueError) as exc:
         raise CaptureError("Completed export receipt is malformed or stale") from exc
 
     media_references = extract_media_references(export_path)
@@ -259,19 +256,13 @@ async def recover_active_project_capture(
         )
     else:
         try:
-            preserved_identity = _capture_identity(duplicate["expected"]["identity"])
-            result = duplicate["result"]
-            if (
-                not isinstance(result, dict)
-                or result.get("identity") != preserved_identity.__dict__
-                or result.get("preserved_name") != preserved_identity.project
-            ):
-                raise ValueError
-            active = tuple(await control.active_projects())
-            if len(active) != 1 or active[0] != preserved_identity:
-                raise ValueError
+            duplicate_action, duplicate_result = duplicate
+            validated_duplicate = await validate_completed_external_action(
+                duplicate_action, duplicate_result, control, paths.root
+            )
+            preserved_identity = _capture_identity(validated_duplicate["identity"])
             preserved = preserved_identity.project
-        except (KeyError, TypeError, ValueError) as exc:
+        except (KeyError, ReconciliationError, TypeError, ValueError) as exc:
             raise CaptureError(
                 "Completed duplicate receipt is malformed or ambiguous"
             ) from exc
@@ -287,8 +278,8 @@ async def recover_active_project_capture(
 
 def _completed_capture_action(
     store: SessionStore, names: set[str]
-) -> dict[str, Any] | None:
-    completed: list[dict[str, Any]] = []
+) -> tuple[ExternalAction, dict[str, Any]] | None:
+    completed: list[tuple[ExternalAction, dict[str, Any]]] = []
     for event in store.events():
         if event.get("kind") != "external_action":
             continue
@@ -306,7 +297,21 @@ def _completed_capture_action(
             }
             if set(data) != required:
                 raise CaptureError("Capture journal contains malformed action data")
-            completed.append(data)
+            result = data.get("result")
+            if not isinstance(result, dict):
+                raise CaptureError("Capture journal contains malformed action data")
+            completed.append(
+                (
+                    ExternalAction(
+                        token=data["token"],
+                        action=data["action"],
+                        arguments=data["arguments"],
+                        expected=data["expected"],
+                        status=data["status"],
+                    ),
+                    result,
+                )
+            )
     if len(completed) > 1:
         raise CaptureError("Capture journal contains ambiguous completed actions")
     return completed[0] if completed else None
