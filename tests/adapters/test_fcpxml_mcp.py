@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 from types import SimpleNamespace
 
 import pytest
+from mcp.types import CallToolResult, TextContent
 
 from editor_cli.adapters.fcpxml_mcp import (
     ALLOWED_TOOLS,
@@ -17,7 +18,8 @@ def anyio_backend():
 
 
 class FakeTransport:
-    def __init__(self):
+    def __init__(self, result=None):
+        self.result = result
         self.initialized = False
         self.params = None
         self.calls = []
@@ -37,6 +39,8 @@ class FakeSession:
 
     async def call_tool(self, tool, arguments):
         self.transport.calls.append((tool, arguments))
+        if self.transport.result is not None:
+            return self.transport.result
         payload = json.dumps({"timeline": {"project": "Demo"}})
         return SimpleNamespace(
             isError=False,
@@ -64,6 +68,22 @@ async def test_fcpxml_client_initializes_and_calls_grouped_tool(tmp_path):
     assert result["timeline"]["project"] == "Demo"
     assert transport.initialized is True
     assert transport.params.env["FCP_MCP_JOURNAL"] == str(tmp_path.resolve())
+
+
+@pytest.mark.anyio
+@pytest.mark.parametrize("is_error", [False, True])
+async def test_fcpxml_client_reads_installed_sdk_result_fields(is_error):
+    result = CallToolResult(
+        content=[TextContent(type="text", text="upstream failure")],
+        structuredContent={"timeline": {"project": "Canary"}},
+        isError=is_error,
+    )
+    client = FCPXMLMCPClient(("unused",), transport=FakeTransport(result))
+    if is_error:
+        with pytest.raises(FCPXMLMCPError, match="upstream failure"):
+            await client.call("inspect", {})
+    else:
+        assert await client.call("inspect", {}) == {"timeline": {"project": "Canary"}}
 
 
 @pytest.mark.anyio

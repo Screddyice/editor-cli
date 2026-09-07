@@ -95,10 +95,14 @@ class FCPXMLMCPClient:
         async with self.transport.open(self._parameters()) as session:
             await session.initialize()
             result = await session.call_tool(tool, arguments=arguments)
-        if result.isError:
+        # MCP 2 uses snake_case Python fields; MCP 1 exposes the wire aliases.
+        if getattr(result, "is_error", getattr(result, "isError", False)):
             raise FCPXMLMCPError(_text_content(result.content))
-        if isinstance(result.structuredContent, dict):
-            return result.structuredContent
+        structured = getattr(
+            result, "structured_content", getattr(result, "structuredContent", None)
+        )
+        if isinstance(structured, dict):
+            return structured
         text = _text_content(result.content)
         try:
             parsed = json.loads(text)

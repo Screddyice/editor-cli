@@ -183,7 +183,7 @@ struct FinalCutProbe<System: FinalCutSystem> {
         processIdentifier: application.processIdentifier
       )
       automationAuthorized = true
-    } catch {
+    } catch FinalCutAutomationError.notAuthorized {
       libraryNames = []
       automationAuthorized = false
     }
@@ -721,7 +721,7 @@ struct NativeFinalCutAutomationTransport: TimedFinalCutAutomationTransport {
       returnID: AEReturnID(kAutoGenerateReturnID),
       transactionID: AETransactionID(kAnyTransactionID)
     )
-    event.setParam(libraryNameSpecifier(), forKeyword: AEKeyword(keyDirectObject))
+    event.setParam(try libraryNameSpecifier(), forKeyword: AEKeyword(keyDirectObject))
 
     let reply: NSAppleEventDescriptor
     do {
@@ -741,11 +741,18 @@ struct NativeFinalCutAutomationTransport: TimedFinalCutAutomationTransport {
     return try strings(from: result)
   }
 
-  private func libraryNameSpecifier() -> NSAppleEventDescriptor {
+  func libraryNameSpecifier() throws -> NSAppleEventDescriptor {
+    // An absolute-position object selector requires typeAbsoluteOrdinal, not
+    // typeEnumerated. Apple Events consume the OSType in host byte order.
+    var all = OSType(kAEAll)
+    guard let ordinal = NSAppleEventDescriptor(
+      descriptorType: DescType(typeAbsoluteOrdinal), bytes: &all,
+      length: MemoryLayout<OSType>.size
+    ) else { throw FinalCutAutomationError.invalidTarget }
     let allLibraries = objectSpecifier(
       desiredClass: fourCharacterCode("fxlb"),
       keyForm: OSType(formAbsolutePosition),
-      keyData: NSAppleEventDescriptor(enumCode: OSType(kAEAll)),
+      keyData: ordinal,
       container: .null()
     )
     return objectSpecifier(

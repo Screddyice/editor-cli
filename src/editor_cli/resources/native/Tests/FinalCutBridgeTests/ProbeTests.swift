@@ -6,6 +6,24 @@ import XCTest
 @testable import FinalCutBridge
 
 final class ProbeTests: XCTestCase {
+  func testProbeDoesNotMislabelInspectionFailureAsPermissionDenial() throws {
+    var app = FakeFinalCut(bundleID: "com.apple.FinalCutApp", version: "12.3")
+    app.inspectionError = .eventFailed
+    XCTAssertThrowsError(try FinalCutProbe(system: app).run()) { error in
+      XCTAssertEqual(error as? FinalCutAutomationError, .eventFailed)
+    }
+  }
+
+  func testLibrarySelectionUsesAbsoluteOrdinalForAllLibraries() throws {
+    let names = try NativeFinalCutAutomationTransport().libraryNameSpecifier()
+    let libraries = try XCTUnwrap(names.forKeyword(AEKeyword(keyAEContainer)))
+    let selection = try XCTUnwrap(libraries.forKeyword(AEKeyword(keyAEKeyData)))
+
+    XCTAssertEqual(selection.descriptorType, DescType(typeAbsoluteOrdinal))
+    // Apple Events store this OSType in host byte order on supported Macs.
+    XCTAssertEqual(selection.data, Data([0x20, 0x6c, 0x6c, 0x61]))
+  }
+
   func testProbeRejectsWrongBundleIdentifier() throws {
     let app = FakeFinalCut(bundleID: "example.fake", version: "12.3")
 
@@ -138,6 +156,7 @@ final class ProbeTests: XCTestCase {
 }
 
 struct FakeFinalCut: FinalCutSystem {
+  var inspectionError: FinalCutAutomationError?
   let applications: [FinalCutApplication]
   let axTrusted: Bool
   let automation: Bool
@@ -172,6 +191,7 @@ struct FakeFinalCut: FinalCutSystem {
   }
 
   func readLibraryNames(processIdentifier: pid_t) throws -> [String] {
+    if let inspectionError { throw inspectionError }
     guard automation else {
       throw FinalCutAutomationError.notAuthorized
     }

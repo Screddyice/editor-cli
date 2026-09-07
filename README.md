@@ -219,15 +219,24 @@ build, and MCP entry-point check on macOS. A separate Python 3.10 job checks
 the minimum supported version. Offline tests include generated-media
 renders and simulated crash recovery. They do not prove live Final Cut control.
 
-Local verification on 2026-09-07: 530 Python tests, 65 Swift tests, and 22
+Local verification on 2026-09-07: 532 Python tests, 67 Swift tests, and 22
 Python 3.10 setup/locking tests passed. Ruff lint/format, wheel/sdist builds,
 and MCP startup checks passed. Code review covered interruption recovery,
 media provenance and probing, and the optional-transcription voice-over path.
 
 On the development Mac, the native helper is installed and direct rendering is
-ready. Final Cut is not running, so native permissions and live acceptance remain
-unverified. Keep PR #18 draft until the disposable native canary and Codex/Claude
-preview-hash comparison pass. No real user footage has been edited.
+ready. Live checks against Final Cut Pro Creator Studio 12.3 confirm Accessibility
+and Automation permission. The library-inspection probe now encodes the Apple
+Event `all` selector as an absolute ordinal in host byte order; malformed
+inspection replies no longer masquerade as permission denial. The MCP adapter
+supports both v1 wire-alias fields and v2 snake-case result fields.
+
+The disposable canary imports its generated project, but native navigation does
+not yet open or recognize that timeline in Creator Studio's current accessibility
+tree. Opening the test project through computer use confirmed the import, not
+native-controller acceptance. No native edit/Share/recovery pass or Codex/Claude
+preview-hash comparison has completed. Keep PR #18 draft. No real user footage
+has been edited.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)
