@@ -271,6 +271,8 @@ protocol FinalCutActionSystem {
   func projectMatchCount(_ identity: ProjectIdentity, timeout: TimeInterval) throws -> Int
   func pressMenu(path: [String], timeout: TimeInterval) throws
   func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws
+  /// Best effort, never throws: close anything a failed run left on screen.
+  func dismissTransientUI()
   func confirmExpectedSheet(_ confirmation: FinalCutConfirmation, timeout: TimeInterval) throws
   func openDocument(_ path: String, timeout: TimeInterval) throws
   func selectProject(_ identity: ProjectIdentity, timeout: TimeInterval) throws
@@ -291,6 +293,19 @@ struct Actions<System: FinalCutActionSystem> {
     self.system = system
   }
 
+  /// An open menu or save panel owns Final Cut's event stream, so a failed run
+  /// that leaves one up blocks every later Apple Event and reads as a dead app.
+  private func dismissingTransientUIOnFailure<Value>(
+    _ body: () throws -> Value
+  ) throws -> Value {
+    do {
+      return try body()
+    } catch {
+      system.dismissTransientUI()
+      throw error
+    }
+  }
+
   func inspectActiveProject(timeout: TimeInterval) throws -> ProjectIdentity? {
     let deadline = try makeDeadline(timeout)
     try rejectBlockingDialogs(deadline: deadline)
@@ -303,6 +318,7 @@ struct Actions<System: FinalCutActionSystem> {
     timeout: TimeInterval
   ) throws -> ProjectIdentity {
     let deadline = try makeDeadline(timeout)
+    return try dismissingTransientUIOnFailure {
     try validate(expected)
     try requireValidName(name)
     guard name != expected.project else {
@@ -329,6 +345,7 @@ struct Actions<System: FinalCutActionSystem> {
     }
 
     return try pollForProject(duplicated, deadline: deadline)
+    }
   }
 
   func exportXML(
@@ -337,12 +354,16 @@ struct Actions<System: FinalCutActionSystem> {
     timeout: TimeInterval
   ) throws -> ExportReceipt {
     let deadline = try makeDeadline(timeout)
+    return try dismissingTransientUIOnFailure {
     try validate(expected)
     try requireActive(expected, deadline: deadline)
-    let destination = try SessionPath(root: system.sessionRoot).output(output)
-    guard URL(fileURLWithPath: destination).pathExtension.lowercased() == "fcpxml" else {
+    let requested = try SessionPath(root: system.sessionRoot).output(output)
+    let requestedExtension = URL(fileURLWithPath: requested).pathExtension.lowercased()
+    guard requestedExtension == "fcpxml" || requestedExtension == "fcpxmld" else {
       throw FinalCutActionError.invalidPath
     }
+    // Creator Studio always writes a bundle, whichever XML version is chosen.
+    let destination = FinalCutExportArtifact.bundlePath(for: requested)
     guard
       try perform(
         deadline: deadline,
@@ -357,7 +378,11 @@ struct Actions<System: FinalCutActionSystem> {
       try system.pressMenu(path: FinalCutMenu.exportXML, timeout: $0)
     }
     try perform(deadline: deadline) {
-      try system.setExpectedSheetValue(destination, timeout: $0)
+      try system.setExpectedSheetValue(
+        URL(fileURLWithPath: destination).deletingLastPathComponent()
+          .appendingPathComponent(FinalCutExportArtifact.panelName(for: destination)).path,
+        timeout: $0
+      )
     }
     try perform(deadline: deadline) {
       try system.confirmExpectedSheet(.exportXML, timeout: $0)
@@ -380,6 +405,7 @@ struct Actions<System: FinalCutActionSystem> {
       return ExportReceipt(kind: "fcpxml_export", project: expected, output: destination)
     }
     return receipt
+    }
   }
 
   func importXML(
@@ -436,6 +462,7 @@ struct Actions<System: FinalCutActionSystem> {
     timeout: TimeInterval
   ) throws -> ShareReceipt {
     let deadline = try makeDeadline(timeout)
+    return try dismissingTransientUIOnFailure {
     try validate(expected)
     try requireActive(expected, deadline: deadline)
     let destination = try SessionPath(root: system.sessionRoot).output(output)
@@ -481,6 +508,7 @@ struct Actions<System: FinalCutActionSystem> {
       }
       try requireActive(expected, deadline: deadline)
       return ShareReceipt(kind: "final_cut_share", project: expected, output: destination)
+    }
     }
   }
 
@@ -795,6 +823,7 @@ protocol FinalCutAXElement: AnyObject {
   func accessibilityChildren() throws -> [any FinalCutAXElement]
   func accessibilityPress() -> Bool
   func accessibilityCancel() -> Bool
+  func accessibilityConfirm() -> Bool
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool
   func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool
@@ -861,6 +890,10 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
     AXUIElementPerformAction(element, kAXCancelAction as CFString) == .success
   }
 
+  func accessibilityConfirm() -> Bool {
+    AXUIElementPerformAction(element, kAXConfirmAction as CFString) == .success
+  }
+
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool {
     AXUIElementSetAttributeValue(element, attribute as CFString, value as CFString) == .success
   }
@@ -910,6 +943,7 @@ final class LiveFinalCutAX {
     "AXCell",
     "AXDisclosureTriangle",
     "AXLayoutArea",
+    "AXPopUpButton",
     "AXList",
     "AXSplitGroup",
     "AXTable",
@@ -917,12 +951,16 @@ final class LiveFinalCutAX {
     "AXDialog",
   ]
 
-  init(processIdentifier: pid_t) {
+  private let keyboard: FinalCutKeyboard
+
+  init(processIdentifier: pid_t, keyboard: FinalCutKeyboard = .live) {
     root = NativeFinalCutAXElement(AXUIElementCreateApplication(processIdentifier))
+    self.keyboard = keyboard
   }
 
-  init(root: any FinalCutAXElement) {
+  init(root: any FinalCutAXElement, keyboard: FinalCutKeyboard = .live) {
     self.root = root
+    self.keyboard = keyboard
   }
 
   func pressMenu(path: [String], timeout: TimeInterval) throws {
@@ -965,6 +1003,80 @@ final class LiveFinalCutAX {
       if let openedMenuBarItem { _ = openedMenuBarItem.accessibilityCancel() }
       throw error
     }
+  }
+
+  /// Point the save panel at an exact folder through its Go to Folder sheet,
+  /// then prove the panel moved before anything is written.
+  func selectSaveDirectory(
+    _ directory: String, stage: FinalCutSheetStage, timeout: TimeInterval
+  ) throws {
+    let deadline = try deadline(after: timeout)
+    let panel = try expectedContainer(stage: stage, deadline: deadline)
+    if FinalCutSavePanel.displays(
+      directory: directory, popupValue: try wherePopupValue(in: panel)
+    ) { return }
+    guard keyboard.goToFolderChord() else {
+      throw AccessibilityDiscoveryError.attributeUnavailable
+    }
+    let field = try pollUntil(deadline: deadline) {
+      let sheets = try allElements(beneath: panel).filter {
+        stringAttribute(kAXIdentifierAttribute as String, of: $0)
+          == FinalCutSavePanel.goToSheetIdentifier && isVisible($0)
+      }
+      guard let sheet = try exactlyOne(sheets) else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      let fields = try allElements(beneath: sheet).filter {
+        stringAttribute(kAXIdentifierAttribute as String, of: $0)
+          == FinalCutSavePanel.goToPathFieldIdentifier && isVisible($0)
+      }
+      guard let field = try exactlyOne(fields) else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      return field
+    }
+    guard field.accessibilitySetString(directory, for: kAXValueAttribute as String),
+      field.accessibilityConfirm()
+    else {
+      throw AccessibilityDiscoveryError.attributeUnavailable
+    }
+    _ = try pollUntil(deadline: deadline) {
+      guard
+        FinalCutSavePanel.displays(
+          directory: directory, popupValue: try wherePopupValue(in: panel)
+        )
+      else { throw AccessibilityDiscoveryError.noMatch }
+      return true
+    }
+  }
+
+  /// Best effort teardown: close a save panel, then any open menu. Never throws,
+  /// because it runs while another failure is already on its way out.
+  func dismissTransientUI() {
+    let windows = (try? directChildren(of: root)) ?? []
+    for window in windows
+    where stringAttribute(kAXSubroleAttribute as String, of: window) == "AXDialog" {
+      let buttons = (try? allElements(beneath: window))?.filter {
+        stringAttribute(kAXIdentifierAttribute as String, of: $0) == "CancelButton"
+      } ?? []
+      for button in buttons { _ = button.accessibilityPress() }
+    }
+    guard let menuBar = try? uniqueElement(titled: nil, role: kAXMenuBarRole as String, beneath: root)
+    else { return }
+    for item in (try? directChildren(of: menuBar)) ?? [] {
+      _ = item.accessibilityCancel()
+    }
+  }
+
+  private func wherePopupValue(in panel: any FinalCutAXElement) throws -> String? {
+    let popups = try allElements(beneath: panel).filter {
+      stringAttribute(kAXIdentifierAttribute as String, of: $0)
+        == FinalCutSavePanel.whereIdentifier && isVisible($0)
+    }
+    guard let popup = try exactlyOne(popups) else {
+      throw AccessibilityDiscoveryError.noMatch
+    }
+    return stringAttribute(kAXValueAttribute as String, of: popup)
   }
 
   func setUniqueVisibleTextField(

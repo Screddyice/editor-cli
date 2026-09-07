@@ -73,10 +73,12 @@ def doctor() -> None:
         f"{helper.get('protocol_version') or 'unknown'}"
     )
     final_cut = report["final_cut"]
-    typer.echo(
-        f"{'✓' if final_cut.get('compatible') else '✗'} Final Cut Pro "
-        f"{final_cut.get('version') or 'not running'}"
+    # A probe that failed says nothing about whether Final Cut is running, and
+    # an open menu is enough to fail it. Do not report that as a dead app.
+    state = final_cut.get("version") or (
+        "unknown" if report.get("error") else "not running"
     )
+    typer.echo(f"{'✓' if final_cut.get('compatible') else '✗'} Final Cut Pro {state}")
     permissions = report["permissions"]
     typer.echo(
         f"{'✓' if permissions['accessibility'] else '✗'} Accessibility permission"

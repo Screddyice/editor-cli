@@ -320,6 +320,13 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     }
   }
 
+  func dismissTransientUI() {
+    expectedSheet = nil
+    guard isAccessibilityTrusted(), let processIdentifier = try? verifiedProcessIdentifier()
+    else { return }
+    LiveFinalCutAX(processIdentifier: processIdentifier).dismissTransientUI()
+  }
+
   func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws {
     guard let stage = expectedSheet else {
       throw AccessibilityDiscoveryError.noMatch
@@ -334,8 +341,19 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     let accessibility = try actionAccessibility(
       requireAutomation: true, timeout: remaining(before: deadline)
     )
+    // A save panel needs its folder chosen before its name, and it only takes
+    // a name. A duplicate sheet takes a bare project name and no folder.
+    var name = value
+    if value.hasPrefix("/") {
+      let url = URL(fileURLWithPath: value)
+      try accessibility.selectSaveDirectory(
+        url.deletingLastPathComponent().path, stage: stage,
+        timeout: remaining(before: deadline)
+      )
+      name = url.lastPathComponent
+    }
     try accessibility.setUniqueVisibleTextField(
-      value, stage: stage, timeout: remaining(before: deadline)
+      name, stage: stage, timeout: remaining(before: deadline)
     )
     _ = try remaining(before: deadline)
   }
@@ -393,7 +411,9 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
 
   func fileSnapshot(_ path: String, timeout: TimeInterval) throws -> ActionFileSnapshot? {
     let deadline = try actionDeadline(timeout)
-    guard let attributes = try? FileManager.default.attributesOfItem(atPath: path),
+    guard let attributes = try? FileManager.default.attributesOfItem(
+      atPath: FinalCutExportArtifact.readablePath(of: path)
+    ),
       let fileType = attributes[.type] as? FileAttributeType,
       fileType == .typeRegular,
       let size = attributes[.size] as? NSNumber,
@@ -410,7 +430,11 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     at path: String, expected: ProjectIdentity, timeout: TimeInterval
   ) throws -> ProjectIdentity? {
     let deadline = try actionDeadline(timeout)
-    guard let exported = try FCPXMLProjectReader().read(path: path) else {
+    guard
+      let exported = try FCPXMLProjectReader().read(
+        path: FinalCutExportArtifact.readablePath(of: path)
+      )
+    else {
       _ = try remaining(before: deadline)
       return nil
     }

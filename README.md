@@ -266,16 +266,32 @@ success and clears nothing, so the reveal still deselects through
 `inspect_active_project` now answers from a background terminal in under three
 seconds with the full identity: library, event, project, and duration.
 
-Export XML reaches its panel and stops there. Creator Studio floats the save
-panel as its own dialog window (`AXWindow` / `AXDialog`, identifier
-`save-panel`) instead of attaching a sheet to the main window, so the controller
-now accepts both shapes. Two things still block the export, and both need a
-decision rather than a patch. A full path written into the panel's name field
-does not choose a directory: `AXConfirm` on the field reports success and
-navigates nowhere, and pressing Save writes the path as a literal colon-mangled
-filename into whatever `Where` shows. The XML version popup offers only 1.14,
-1.13 and 1.12, and every one of them writes a `.fcpxmld` **bundle**, while the
-controller requires a flat `.fcpxml` file.
+Export XML reaches its panel. Creator Studio floats the save panel as its own
+dialog window (`AXWindow` / `AXDialog`, identifier `save-panel`) instead of
+attaching a sheet to the main window, so the controller accepts both shapes.
+
+Two panel behaviors then needed decisions rather than patches, and both are
+settled. A path written into the name field is saved as a literal filename
+(`AXConfirm` on that field reports success and navigates nowhere), so the
+controller opens the panel's Go to Folder sheet with a single `Cmd+Shift+G`
+chord, writes the folder into its `PathTextField` over accessibility, and
+refuses to continue until the `Where` popup shows that folder. That chord is
+the entire keyboard surface; everything else stays accessibility-only. The XML
+version popup offers 1.14, 1.13 and 1.12, and all three write a `.fcpxmld`
+**bundle**, so the bundle is now the export artifact and the controller reads
+`Info.fcpxml` inside it.
+
+An open menu or save panel owns Final Cut's event stream, so a run that failed
+and left one on screen blocked every later Apple Event, and `doctor` reported
+that as `Final Cut Pro not running` with every permission failing. A failed
+mutation now closes what it opened, and `doctor` says `unknown` rather than
+claiming the app is dead when its own probe is what failed.
+
+Export still stops one step short. The reveal that confirms the active project
+reports `File > Reveal Project in Browser` disabled when the timeline is not the
+active responder, which is the state left behind by a click anywhere else in the
+window. The controller needs to focus the timeline before it presses that
+command.
 
 PR #18 stays draft. No real user footage has been edited.
 

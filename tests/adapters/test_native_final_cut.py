@@ -305,7 +305,8 @@ def test_native_probe_hash_is_bound_to_executed_descriptor_during_path_race(tmp_
 def test_native_client_allowlists_typed_actions(tmp_path, invoke, action, payload):
     root = (tmp_path / "session").resolve()
     path = root / (
-        "source.fcpxml"
+        # Creator Studio writes a bundle, so the receipt names the bundle.
+        "source.fcpxmld"
         if action == "export_xml"
         else "candidate.fcpxml"
         if action == "import_xml"

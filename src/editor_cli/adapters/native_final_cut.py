@@ -162,7 +162,7 @@ class NativeFinalCutClient:
         self, identity: ProjectIdentity, destination: Path, session_root: Path
     ) -> ExportReceipt:
         root = _session_root(session_root)
-        output = _contained_path(destination, root)
+        output = _export_artifact(_contained_path(destination, root))
         result = self._invoke(
             "export_xml",
             {
@@ -529,6 +529,13 @@ def _contained_path(path: Path, root: Path) -> Path:
     if resolved == root or not resolved.is_relative_to(root):
         raise NativeFinalCutError("Native Final Cut path is outside the session root")
     return resolved
+
+
+def _export_artifact(destination: Path) -> Path:
+    """Final Cut Pro Creator Studio writes a `.fcpxmld` bundle, never a flat file."""
+    if destination.suffix.lower() == ".fcpxmld":
+        return destination
+    return destination.with_suffix(".fcpxmld")
 
 
 def _receipt_path(value: Any, root: Path, expected: Path) -> Path:

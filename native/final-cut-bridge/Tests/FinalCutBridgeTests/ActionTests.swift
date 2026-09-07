@@ -224,10 +224,28 @@ final class ActionTests: XCTestCase {
 
     XCTAssertEqual(result.kind, "fcpxml_export")
     XCTAssertEqual(result.project, expected)
-    XCTAssertEqual(result.output, "/tmp/session/source.fcpxml")
+    XCTAssertEqual(result.output, "/tmp/session/source.fcpxmld")
     XCTAssertEqual(system.menuPaths, [FinalCutMenu.exportXML])
-    XCTAssertEqual(system.setValues, ["/tmp/session/source.fcpxml"])
+    // Final Cut appends its own bundle extension, so the panel gets the stem.
+    XCTAssertEqual(system.setValues, ["/tmp/session/source"])
     XCTAssertEqual(system.confirmations, [.exportXML])
+  }
+
+  func testFailedExportClosesWhateverItLeftOnScreen() {
+    let expected = ProjectIdentity.canaryCandidate
+    let system = FakeActionSystem(active: expected)
+    system.exportSnapshots = [
+      nil, .init(size: 120, modifiedAt: 1), .init(size: 120, modifiedAt: 1),
+    ]
+    system.exportedIdentity = expected.renamed("Wrong")
+
+    XCTAssertThrowsError(
+      try Actions(system: system).exportXML(
+        expected: expected, output: "/tmp/session/source.fcpxml", timeout: 2
+      )
+    )
+
+    XCTAssertEqual(system.dismissals, 1)
   }
 
   func testExportRejectsXMLForAnotherProject() {
@@ -1050,6 +1068,12 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
     elapsed += menuTimeCost
   }
 
+  var dismissals = 0
+
+  func dismissTransientUI() {
+    dismissals += 1
+  }
+
   func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws {
     setValues.append(value)
   }
@@ -1069,7 +1093,7 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
   }
 
   func fileSnapshot(_ path: String, timeout: TimeInterval) throws -> ActionFileSnapshot? {
-    if path.hasSuffix(".fcpxml") {
+    if path.hasSuffix(".fcpxml") || path.hasSuffix(".fcpxmld") {
       return exportSnapshots.isEmpty ? nil : exportSnapshots.removeFirst()
     }
     return shareSnapshots.isEmpty ? nil : shareSnapshots.removeFirst()
@@ -1118,7 +1142,7 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
   }
 }
 
-private final class FakeFinalCutAXElement: FinalCutAXElement {
+final class FakeFinalCutAXElement: FinalCutAXElement {
   private var attributes: [String: Any]
   private var elementAttributes: [String: FakeFinalCutAXElement] = [:]
   private var arrayAttributes: [String: [FakeFinalCutAXElement]] = [:]
@@ -1128,6 +1152,8 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
   var onPress: (() -> Void)?
   var onSetBool: ((Bool, String) -> Void)?
   var cancelled = false
+  var confirmed = false
+  var onConfirm: (() -> Void)?
 
   func setTestAttribute(_ name: String, _ value: Any) { attributes[name] = value }
   func setTestElement(_ name: String, _ value: FakeFinalCutAXElement) { elementAttributes[name] = value }
@@ -1285,6 +1311,12 @@ private final class FakeFinalCutAXElement: FinalCutAXElement {
 
   func accessibilityCancel() -> Bool {
     cancelled = true
+    return true
+  }
+
+  func accessibilityConfirm() -> Bool {
+    confirmed = true
+    onConfirm?()
     return true
   }
 
