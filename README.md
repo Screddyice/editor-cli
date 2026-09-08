@@ -287,13 +287,16 @@ that as `Final Cut Pro not running` with every permission failing. A failed
 mutation now closes what it opened, and `doctor` says `unknown` rather than
 claiming the app is dead when its own probe is what failed.
 
-Export still stops one step short. The reveal that confirms the active project
-reports `File > Reveal Project in Browser` disabled when the timeline is not the
-active responder, which is the state left behind by a click anywhere else in the
-window. The controller needs to focus the timeline before it presses that
-command.
+`File > Reveal Project in Browser` is disabled whenever no view holds focus,
+which is where Final Cut sits after a click on empty timeline space or after a
+run that never touched the browser. The reveal used to grab focus only on its
+way to clearing a selection, so with an empty browser it pressed a disabled
+command. It now focuses the browser first, every time, and proves the focus
+landed before pressing.
 
-PR #18 stays draft. No real user footage has been edited.
+The live end-to-end export has not run since that fix: the screen was locked,
+and a locked Mac publishes no accessibility windows at all. PR #18 stays draft
+until that run passes. No real user footage has been edited.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)

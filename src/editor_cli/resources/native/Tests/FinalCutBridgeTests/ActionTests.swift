@@ -809,6 +809,61 @@ final class ActionTests: XCTestCase {
     XCTAssertTrue(file.cancelled)
   }
 
+  func testRevealFocusesTheBrowserWhenNothingHoldsFocus() throws {
+    let (root, _, _, _, _) = flatBrowser()
+    guard
+      let events = Self.find(in: root, role: kAXGroupRole as String, title: "events"),
+      let reveal = Self.find(
+        in: root, role: kAXMenuItemRole as String, title: "Reveal Project in Browser"
+      )
+    else { return XCTFail("fixture is missing the browser or the reveal command") }
+    // Final Cut leaves focus on the application itself after a click on empty
+    // timeline space, and the reveal command is disabled in that state.
+    root.setTestElement(kAXFocusedUIElementAttribute as String, root)
+    reveal.setTestAttribute(kAXEnabledAttribute as String, false)
+    // Nothing is selected, so clearing the selection is not what grabs focus.
+    events.setTestElements(kAXSelectedChildrenAttribute as String, [])
+    events.onSetBool = { value, attribute in
+      if value, attribute == kAXFocusedAttribute as String {
+        root.setTestElement(kAXFocusedUIElementAttribute as String, events)
+        reveal.setTestAttribute(kAXEnabledAttribute as String, true)
+      }
+    }
+
+    let location = try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 2)
+
+    XCTAssertEqual(location?.project, "Pass 1")
+    XCTAssertTrue(reveal.pressed)
+  }
+
+  func testRevealFailsWhenTheBrowserRefusesFocus() {
+    let (root, _, _, _, _) = flatBrowser()
+    guard let reveal = Self.find(
+      in: root, role: kAXMenuItemRole as String, title: "Reveal Project in Browser"
+    ) else { return XCTFail("fixture is missing the reveal command") }
+    root.setTestElement(kAXFocusedUIElementAttribute as String, root)
+    reveal.setTestAttribute(kAXEnabledAttribute as String, false)
+
+    XCTAssertThrowsError(
+      try LiveFinalCutAX(root: root).revealActiveProjectLocation(timeout: 0.3)
+    )
+    XCTAssertFalse(reveal.pressed)
+  }
+
+  static func find(
+    in element: FakeFinalCutAXElement, role: String, title: String
+  ) -> FakeFinalCutAXElement? {
+    if element.accessibilityValue(for: kAXRoleAttribute as String) as? String == role,
+      element.accessibilityValue(for: kAXTitleAttribute as String) as? String == title
+    {
+      return element
+    }
+    for child in element.children {
+      if let match = find(in: child, role: role, title: title) { return match }
+    }
+    return nil
+  }
+
   func testActiveProjectRevealRejectsHiddenSelectedEvent() throws {
     let (root, target, _, _, _) = flatBrowser()
     target.setTestAttribute("AXHidden", true)
@@ -1327,7 +1382,9 @@ final class FakeFinalCutAXElement: FinalCutAXElement {
   }
 
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool {
-    ["AXValue", "AXSelected", "AXDisclosing", "AXSelectedChildren"].contains(attribute)
+    ["AXValue", "AXSelected", "AXDisclosing", "AXSelectedChildren", "AXFocused"].contains(
+      attribute
+    )
   }
 
   func isSameElement(as other: any FinalCutAXElement) -> Bool {

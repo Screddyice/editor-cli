@@ -1208,6 +1208,10 @@ final class LiveFinalCutAX {
     let deadline = try deadline(after: timeout)
     guard let name = try activeTimelineName(timeout: timeout) else { return nil }
     let browser = try browserEvents(in: focusedMainWindow())
+    // Reveal Project in Browser is disabled while no view holds focus, which is
+    // the state Final Cut is left in by a click on empty timeline space or by a
+    // run that ended without touching the browser. Focus first, always.
+    try focusBrowser(browser, deadline: deadline)
     try clearBrowserSelection(browser, deadline: deadline)
     try pressMenu(path: ["File", "Reveal Project in Browser"],
       timeout: deadline - ProcessInfo.processInfo.systemUptime)
@@ -1264,18 +1268,28 @@ final class LiveFinalCutAX {
       requiresEnabled: false)
   }
 
+  private func focusBrowser(_ browser: any FinalCutAXElement, deadline: TimeInterval) throws {
+    if isFocused(browser) { return }
+    try requireTime(before: deadline)
+    try setBool(true, attribute: kAXFocusedAttribute as String, on: browser)
+    _ = try pollUntil(deadline: deadline) {
+      guard isFocused(browser) else { throw AccessibilityDiscoveryError.noMatch }
+      return true
+    }
+  }
+
+  private func isFocused(_ element: any FinalCutAXElement) -> Bool {
+    root.accessibilityElement(for: kAXFocusedUIElementAttribute as String)?
+      .isSameElement(as: element) == true
+  }
+
   private func clearBrowserSelection(_ browser: any FinalCutAXElement, deadline: TimeInterval) throws {
     if !browser.accessibilityElements(for: kAXSelectedChildrenAttribute as String).isEmpty {
       try requireTime(before: deadline)
       // Edit > Deselect All is the only route that actually clears the browser.
       // Writing an empty AXSelectedChildren reports success and changes nothing,
       // and the command is disabled until the browser holds focus.
-      if root.accessibilityElement(for: kAXFocusedUIElementAttribute as String)?.isSameElement(as: browser) != true {
-        try setBool(true, attribute: kAXFocusedAttribute as String, on: browser)
-      }
-      guard root.accessibilityElement(for: kAXFocusedUIElementAttribute as String)?.isSameElement(as: browser) == true else {
-        throw AccessibilityDiscoveryError.noMatch
-      }
+      try focusBrowser(browser, deadline: deadline)
       try pressMenu(path: ["Edit", "Deselect All"], timeout: deadline - ProcessInfo.processInfo.systemUptime)
     }
     _ = try pollUntil(deadline: deadline) {
