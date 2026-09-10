@@ -302,6 +302,19 @@ command and spend its whole deadline there. The foreground gate now requires a
 real window count and real activation, and `finalCutNotForeground` asks for Final
 Cut to be brought to the front instead of reporting a bare timeout.
 
+That message only reaches you because the helper now outlives its own deadline.
+The adapter used to kill the subprocess on the same number it put in the
+request, so the helper was cut off in the instant it was answering, and every
+foreground refusal and disabled command arrived as `Native Final Cut action
+timed out`. It now keeps `VERDICT_GRACE_SECONDS` past the action deadline to
+serialize its verdict and exit. The live canary run on 2026-09-10 failed exactly
+this way: focus moved to the terminal mid-run, and the real reason was thrown
+away with the process.
+
+The canary drives Final Cut through its real UI, so **Final Cut must stay the
+frontmost application for the whole run**. Typing into another window takes
+activation away and fails the run.
+
 The live end-to-end export has not run since that fix: the screen was locked,
 and a locked Mac publishes no accessibility windows at all. PR #18 stays draft
 until that run passes. No real user footage has been edited.

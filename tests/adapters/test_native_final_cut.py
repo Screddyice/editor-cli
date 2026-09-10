@@ -105,7 +105,7 @@ def test_native_client_sends_one_strict_request(tmp_path):
     assert kwargs["pass_fds"] == (descriptor,)
     assert kwargs["text"] is True
     assert kwargs["capture_output"] is True
-    assert kwargs["timeout"] == 7
+    assert kwargs["timeout"] == 7 + NativeFinalCutClient.VERDICT_GRACE_SECONDS
     assert kwargs["check"] is False
     request = json.loads(runner.input)
     assert set(request) == {"protocolVersion", "action", "sessionRoot", "payload"}
@@ -359,6 +359,21 @@ def test_native_client_rejects_unbound_share_result(tmp_path):
 
     with pytest.raises(NativeFinalCutError, match="identity"):
         native.share_preview(identity(), destination, root)
+
+
+def test_native_client_outlives_the_deadline_it_gives_the_helper(tmp_path):
+    # Killing the subprocess on the helper's own deadline throws away the named
+    # verdict it was about to answer with, and every foreground or disabled
+    # command failure arrives as a bare timeout instead.
+    runner = FakeRunner(response({"project": identity_json()}))
+    native = client(tmp_path, runner)
+
+    native.open_project(identity(), tmp_path / "session")
+
+    _, kwargs = runner.calls[-1]
+    request = json.loads(runner.input)
+    assert request["payload"]["timeout"] == 7
+    assert kwargs["timeout"] > request["payload"]["timeout"]
 
 
 def test_native_client_rejects_huge_integer_identity_duration(tmp_path):

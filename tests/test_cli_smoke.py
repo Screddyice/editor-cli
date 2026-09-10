@@ -5,6 +5,7 @@ from unittest.mock import Mock
 
 from typer.testing import CliRunner
 
+from editor_cli.adapters.native_final_cut import NativeFinalCutClient
 from editor_cli.cli import app
 from editor_cli.config import ControllerConfig
 from editor_cli.mcp_server import ServiceRegistry
@@ -208,7 +209,7 @@ def test_permission_request_invokes_only_installed_helper_argv_mode(
     assert kwargs["capture_output"] is True
     assert kwargs["check"] is False
     assert kwargs["text"] is True
-    assert kwargs["timeout"] == 120
+    assert kwargs["timeout"] == 120 + NativeFinalCutClient.VERDICT_GRACE_SECONDS
     assert len(kwargs["pass_fds"]) == 1
     assert "input" not in kwargs
     assert "Permissions requested." in result.output

@@ -63,6 +63,19 @@ Runner = Callable[..., subprocess.CompletedProcess[str]]
 
 
 class NativeFinalCutClient:
+    """Drive the native helper, and let the helper explain its own failures.
+
+    The helper receives the action deadline in its request and answers a named
+    error when it expires: `finalCutNotForeground` when Final Cut never became
+    active, `disabledControl` when a menu command does not apply. Killing the
+    subprocess on the same deadline throws all of that away and reports a bare
+    timeout, so the subprocess gets a grace margin to serialize its verdict and
+    exit.
+    """
+
+    #: Seconds the helper keeps after its own deadline to answer and exit.
+    VERDICT_GRACE_SECONDS = 15
+
     def __init__(
         self,
         executable: Path,
@@ -358,7 +371,7 @@ class NativeFinalCutClient:
                 runner_kwargs: dict[str, Any] = {
                     "text": True,
                     "capture_output": True,
-                    "timeout": self._action_timeout,
+                    "timeout": self._action_timeout + self.VERDICT_GRACE_SECONDS,
                     "check": False,
                     "pass_fds": (execution_descriptor,),
                 }
