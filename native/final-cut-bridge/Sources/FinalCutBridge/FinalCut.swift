@@ -469,6 +469,19 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     return dialogs
   }
 
+  func openLibraryNames(timeout: TimeInterval) throws -> [String] {
+    let deadline = try actionDeadline(timeout)
+    let processIdentifier = try verifiedActionProcessIdentifier(
+      timeout: remaining(before: deadline)
+    )
+    let names = try FinalCutAutomationReader(transport: NativeFinalCutAutomationTransport())
+      .readLibraryNames(
+        processIdentifier: processIdentifier, timeout: remaining(before: deadline)
+      )
+    _ = try remaining(before: deadline)
+    return names
+  }
+
   func monotonicTime() -> TimeInterval {
     ProcessInfo.processInfo.systemUptime
   }

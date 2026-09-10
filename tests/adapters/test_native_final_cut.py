@@ -361,6 +361,32 @@ def test_native_client_rejects_unbound_share_result(tmp_path):
         native.share_preview(identity(), destination, root)
 
 
+def test_close_library_sends_the_exact_name_and_reports_who_closed_it(tmp_path):
+    runner = FakeRunner(response({"closed": True}))
+    native = client(tmp_path, runner)
+
+    assert native.close_library("Editor CLI Canary abc", tmp_path / "session") is True
+
+    request = json.loads(runner.input)
+    assert request["action"] == "close_library"
+    assert request["payload"]["library"] == "Editor CLI Canary abc"
+
+
+def test_close_library_reports_an_already_closed_library_without_failing(tmp_path):
+    # Cleanup runs after failures too; a library that is already gone is the
+    # state the caller wanted, not an error.
+    native = client(tmp_path, FakeRunner(response({"closed": False})))
+
+    assert native.close_library("Gone", tmp_path / "session") is False
+
+
+def test_close_library_rejects_a_non_boolean_result(tmp_path):
+    native = client(tmp_path, FakeRunner(response({"closed": "yes"})))
+
+    with pytest.raises(NativeFinalCutError, match="non-boolean"):
+        native.close_library("Canary", tmp_path / "session")
+
+
 def test_native_client_outlives_the_deadline_it_gives_the_helper(tmp_path):
     # Killing the subprocess on the helper's own deadline throws away the named
     # verdict it was about to answer with, and every foreground or disabled

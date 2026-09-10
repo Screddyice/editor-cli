@@ -9,6 +9,7 @@ enum Action: String, Codable, CaseIterable {
     case openProject = "open_project"
     case sharePreview = "share_preview"
     case inspectDialogs = "inspect_dialogs"
+    case closeLibrary = "close_library"
 }
 
 struct Request {

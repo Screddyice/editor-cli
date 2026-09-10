@@ -140,6 +140,12 @@ class FinalCutControl:
             self.native.open_project, identity, self.session_root
         )
 
+    async def close_library(self, name: str) -> bool:
+        """Close a library this session opened. False means it was already gone."""
+        return await self._call_native(
+            self.native.close_library, name, self.session_root
+        )
+
     def _session_path(self, path: Path) -> Path:
         resolved = path.expanduser().resolve()
         if resolved == self.session_root or not resolved.is_relative_to(

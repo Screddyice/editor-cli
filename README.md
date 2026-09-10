@@ -315,6 +315,14 @@ The canary drives Final Cut through its real UI, so **Final Cut must stay the
 frontmost application for the whole run**. Typing into another window takes
 activation away and fails the run.
 
+The canary also closes the library it opened. It used to create a disposable
+library per run and never close it, so four `Editor CLI Canary *` libraries had
+piled up in Final Cut next to real ones. `close_library` closes one library by
+exact name, matched against the whole `Close Library “…”` menu title
+so it cannot close a library nobody asked about, and the canary calls it in a
+`finally` block. A library that is already gone counts as success, because that
+path runs after failures too.
+
 The live end-to-end export has not run since that fix: the screen was locked,
 and a locked Mac publishes no accessibility windows at all. PR #18 stays draft
 until that run passes. No real user footage has been edited.

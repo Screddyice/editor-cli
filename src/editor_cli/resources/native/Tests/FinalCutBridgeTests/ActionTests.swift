@@ -1056,6 +1056,62 @@ final class ActionTests: XCTestCase {
   }
 }
 
+final class CloseLibraryTests: XCTestCase {
+  private func system(open: [String], closable: [String]) -> FakeActionSystem {
+    let system = FakeActionSystem(active: nil)
+    system.openLibraries = open
+    system.closableLibraries = closable
+    return system
+  }
+
+  func testClosesTheNamedLibraryAndWaitsForItToLeaveTheList() throws {
+    let system = system(open: ["Canary", "R2H"], closable: ["Canary"])
+
+    let closed = try Actions(system: system).closeLibrary(name: "Canary", timeout: 5)
+
+    XCTAssertTrue(closed)
+    XCTAssertEqual(system.menuPaths, [["File", "Close Library \u{201C}Canary\u{201D}"]])
+    XCTAssertEqual(system.openLibraries, ["R2H"])
+  }
+
+  func testAlreadyClosedLibraryIsSuccessAndPressesNothing() throws {
+    // Cleanup runs after failures too, so the state the caller asked for is
+    // the state that matters, not whether this call is what produced it.
+    let system = system(open: ["R2H"], closable: [])
+
+    let closed = try Actions(system: system).closeLibrary(name: "Canary", timeout: 5)
+
+    XCTAssertFalse(closed)
+    XCTAssertTrue(system.menuPaths.isEmpty)
+    XCTAssertEqual(system.openLibraries, ["R2H"])
+  }
+
+  func testRefusesWhenFinalCutDoesNotOfferThatLibrary() {
+    // Open but not active: Final Cut names only the active library in the item,
+    // so pressing anything here would be pressing something else.
+    let system = system(open: ["Canary", "R2H"], closable: ["R2H"])
+
+    XCTAssertThrowsError(
+      try Actions(system: system).closeLibrary(name: "Canary", timeout: 5)
+    ) { error in
+      XCTAssertEqual(error as? FinalCutActionError, .libraryNotOpen)
+    }
+    XCTAssertEqual(system.openLibraries, ["Canary", "R2H"])
+  }
+
+  func testNeverPressesACloseItemForALibraryItWasNotAsked() throws {
+    let system = system(open: ["Canary", "R2H"], closable: ["Canary", "R2H"])
+
+    _ = try Actions(system: system).closeLibrary(name: "Canary", timeout: 5)
+
+    XCTAssertEqual(system.menuPaths.count, 1)
+    XCTAssertFalse(
+      system.menuPaths.contains(["File", "Close Library \u{201C}R2H\u{201D}"])
+    )
+    XCTAssertTrue(system.openLibraries.contains("R2H"))
+  }
+}
+
 private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
   let sessionRoot = "/tmp/session"
   var active: ProjectIdentity?
@@ -1121,6 +1177,25 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
   func pressMenu(path: [String], timeout: TimeInterval) throws {
     menuPaths.append(path)
     elapsed += menuTimeCost
+    if let name = closableLibraries.first(where: { path == FinalCutMenu.closeLibrary($0) }) {
+      openLibraries.removeAll { $0 == name }
+      return
+    }
+    if path.count == 2, path[0] == "File", path[1].hasPrefix("Close Library") {
+      throw AccessibilityDiscoveryError.unexpectedFinalRole
+    }
+  }
+
+  /// Libraries Final Cut currently lists as open.
+  var openLibraries: [String] = []
+  /// Libraries whose close item the File menu actually offers. Final Cut only
+  /// offers the active one, so these are deliberately separate.
+  var closableLibraries: [String] = []
+  var libraryReads = 0
+
+  func openLibraryNames(timeout: TimeInterval) throws -> [String] {
+    libraryReads += 1
+    return openLibraries
   }
 
   var dismissals = 0

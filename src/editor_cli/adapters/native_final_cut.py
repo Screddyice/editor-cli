@@ -243,6 +243,26 @@ class NativeFinalCutClient:
         receipt_output = _receipt_path(result["output"], root, output)
         return ShareReceipt("final_cut_share", project, receipt_output)
 
+    def close_library(self, name: str, session_root: Path) -> bool:
+        """Close one open library by exact name.
+
+        Returns whether this call is what closed it: a library that was already
+        gone is the state the caller asked for, not an error, because cleanup
+        runs after failures too.
+        """
+        result = self._invoke(
+            "close_library",
+            {"library": name, "timeout": self._action_timeout},
+            session_root,
+        )
+        _require_keys(result, {"protocolVersion", "closed"}, "close library result")
+        closed = result["closed"]
+        if not isinstance(closed, bool):
+            raise NativeFinalCutError(
+                "Native Final Cut helper returned a non-boolean close result"
+            )
+        return closed
+
     def inspect_dialogs(self, session_root: Path) -> tuple[BlockingDialog, ...]:
         result = self._invoke("inspect_dialogs", {}, session_root)
         _require_keys(result, {"protocolVersion", "dialogs"}, "dialog result")

@@ -73,7 +73,11 @@ request schema uses `additionalProperties: false`. Supported actions are:
 - `share_preview`: invoke `Share > Export File`, write to the active session,
   wait for Final Cut's background task to finish, and return the completed file
   identity; and
-- `inspect_dialogs`: report only dialogs that can block the current operation.
+- `inspect_dialogs`: report only dialogs that can block the current operation; and
+- `close_library`: close one open library by exact name, matching the whole
+  `Close Library “…”` menu title so it can never close a library the
+  caller did not name. Idempotent: a library that is already closed is success,
+  because cleanup runs after failures too.
 
 The Python adapter validates the same enum before starting the helper. Unknown
 actions fail before any Apple API call.
@@ -254,8 +258,9 @@ unit tests, FCPXML import, an Accessibility action, or an FFmpeg proxy.
 - No paid controller application or LateNite license is required.
 - Doctor verifies the signed native helper, Final Cut 12.3, both macOS
   permissions, and live accessibility postconditions.
-- The helper exposes only the seven documented actions and opens no network
-  listener.
+- The helper exposes only the documented actions and opens no network listener.
+- A disposable library the canary opens is closed again on every path, pass or
+  fail, and no run leaves Final Cut holding another one.
 - Every edit preserves a verified Final Cut source project.
 - Every candidate import and open action proves exact identity.
 - Every accepted candidate uses a preview rendered by Final Cut and watched by

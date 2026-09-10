@@ -112,6 +112,8 @@ private func dispatch(_ request: Request) throws -> [String: Any] {
     return result(try encodedDictionary(receipt))
   case .inspectDialogs:
     return result(["dialogs": try encodedObject(actions.inspectDialogs())])
+  case .closeLibrary(let name, let timeout):
+    return result(["closed": try actions.closeLibrary(name: name, timeout: timeout)])
   }
 }
 

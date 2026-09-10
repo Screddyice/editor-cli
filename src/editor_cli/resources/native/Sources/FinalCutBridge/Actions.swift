@@ -63,6 +63,13 @@ enum FinalCutMenu {
   static let duplicate = ["Edit", "Duplicate Project As\u{2026}"]
   static let exportXML = ["File", "Export XML\u{2026}"]
   static let share = ["File", "Share", "Export File (default)\u{2026}"]
+
+  /// Final Cut names the library in the item itself, in typographic quotes, and
+  /// offers only the library that is currently active. Matching the whole title
+  /// is what keeps this from ever closing a library nobody asked about.
+  static func closeLibrary(_ name: String) -> [String] {
+    ["File", "Close Library \u{201C}\(name)\u{201D}"]
+  }
 }
 
 enum FinalCutConfirmation: Equatable {
@@ -84,6 +91,7 @@ enum FinalCutActionError: Error, Equatable, LocalizedError {
   case ambiguousProject
   case blockingDialog
   case finalCutNotForeground
+  case libraryNotOpen
   case timedOut
 
   var errorDescription: String? {
@@ -104,6 +112,11 @@ enum FinalCutActionError: Error, Equatable, LocalizedError {
       background helper raise it, and every menu command is disabled until \
       its window is key. Bring Final Cut to the front and run this again.
       """
+    case .libraryNotOpen:
+      """
+      Final Cut does not offer to close that library: it is either already \
+      closed or not the active one. Only the active library can be closed.
+      """
     case .timedOut: "Final Cut action timed out before its postcondition completed."
     }
   }
@@ -118,6 +131,7 @@ enum ActionPayload {
   case openProject(ProjectIdentity, TimeInterval)
   case sharePreview(ProjectIdentity, String, TimeInterval)
   case inspectDialogs
+  case closeLibrary(String, TimeInterval)
 
   static func decode(_ request: Request) throws -> ActionPayload {
     switch request.action {
@@ -167,6 +181,12 @@ enum ActionPayload {
     case .inspectDialogs:
       try requireKeys(request.payload, expected: [])
       return .inspectDialogs
+    case .closeLibrary:
+      try requireKeys(request.payload, expected: ["library", "timeout"])
+      guard let library = request.payload["library"] as? String else {
+        throw ProtocolError.invalidPayload
+      }
+      return .closeLibrary(library, try timeout(request.payload["timeout"]))
     }
   }
 
@@ -286,6 +306,7 @@ protocol FinalCutActionSystem {
   ) throws -> ProjectIdentity?
   func backgroundTasksComplete(timeout: TimeInterval) throws -> Bool
   func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog]
+  func openLibraryNames(timeout: TimeInterval) throws -> [String]
   func monotonicTime() -> TimeInterval
   func waitForPoll(maximum: TimeInterval)
 }
@@ -513,6 +534,33 @@ struct Actions<System: FinalCutActionSystem> {
       try requireActive(expected, deadline: deadline)
       return ShareReceipt(kind: "final_cut_share", project: expected, output: destination)
     }
+    }
+  }
+
+  /// Close one library by exact name. Idempotent on purpose: a cleanup path
+  /// runs after failures too, and a library that is already gone is the state
+  /// the caller asked for.
+  func closeLibrary(name: String, timeout: TimeInterval) throws -> Bool {
+    let deadline = try makeDeadline(timeout)
+    try requireValidName(name)
+    let open = try perform(deadline: deadline) { try system.openLibraryNames(timeout: $0) }
+    guard open.contains(name) else { return false }
+
+    return try dismissingTransientUIOnFailure {
+      try rejectBlockingDialogs(deadline: deadline)
+      do {
+        try perform(deadline: deadline) {
+          try system.pressMenu(path: FinalCutMenu.closeLibrary(name), timeout: $0)
+        }
+      } catch {
+        throw FinalCutActionError.libraryNotOpen
+      }
+      _ = try poll(deadline: deadline) {
+        try perform(deadline: deadline) {
+          try system.openLibraryNames(timeout: $0)
+        }.contains(name) ? nil : true
+      }
+      return true
     }
   }
 

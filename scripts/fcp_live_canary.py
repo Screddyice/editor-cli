@@ -11,6 +11,7 @@ import subprocess
 import sys
 import uuid
 import xml.etree.ElementTree as ET
+from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -541,6 +542,25 @@ async def run_canary(
     )
     await _wait_for_project(controller.deps.fcp, workspace.library)
 
+    try:
+        return await _run_canary_body(
+            workspace, report, program, source_hashes, config, controller
+        )
+    finally:
+        # The canary library is disposable, and a run that fails leaves it open
+        # in Final Cut exactly like one that passes. Close it either way.
+        with suppress(Exception):
+            await controller.deps.fcp.close_library(workspace.library.stem)
+
+
+async def _run_canary_body(
+    workspace: CanaryWorkspace,
+    report: dict,
+    program: EditProgram,
+    source_hashes: str,
+    config: ControllerConfig,
+    controller,
+) -> dict:
     session = await controller.start(
         EditRequest(
             "Remove the one-second gap, add the canary title, cross-dissolve, "

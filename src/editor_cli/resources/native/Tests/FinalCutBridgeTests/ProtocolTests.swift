@@ -8,6 +8,7 @@ final class ProtocolTests: XCTestCase {
             Set([
                 "probe", "duplicate_project", "export_xml", "import_xml",
                 "open_project", "share_preview", "inspect_dialogs", "inspect_active_project",
+                "close_library",
             ])
         )
     }
