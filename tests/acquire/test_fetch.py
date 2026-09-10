@@ -47,8 +47,12 @@ def test_cookies_file_added_to_command(tmp_path):
         captured["cmd"] = cmd
         return _Res(str(tmp_path / "ID.mp4"))
 
-    download("https://www.tiktok.com/@u/video/1", str(tmp_path), runner=runner,
-             opts=FetchOptions(cookies_file="/tmp/c.txt"))
+    download(
+        "https://www.tiktok.com/@u/video/1",
+        str(tmp_path),
+        runner=runner,
+        opts=FetchOptions(cookies_file="/tmp/c.txt"),
+    )
     assert "--cookies" in captured["cmd"]
     assert "/tmp/c.txt" in captured["cmd"]
 
@@ -60,8 +64,12 @@ def test_quality_and_section_args(tmp_path):
         captured["cmd"] = cmd
         return _Res(str(tmp_path / "ID.mp4"))
 
-    download("https://youtu.be/ID", str(tmp_path), runner=runner,
-             opts=FetchOptions(max_height=720, section="*0:00-180"))
+    download(
+        "https://youtu.be/ID",
+        str(tmp_path),
+        runner=runner,
+        opts=FetchOptions(max_height=720, section="*0:00-180"),
+    )
     assert "-S" in captured["cmd"] and "res:720" in captured["cmd"]
     assert "--download-sections" in captured["cmd"]
     assert "*0:00-180" in captured["cmd"]
@@ -76,8 +84,12 @@ def test_retries_then_succeeds(tmp_path):
             raise subprocess.CalledProcessError(1, cmd)
         return _Res(str(tmp_path / "ID.mp4"))
 
-    out = download("https://youtu.be/ID", str(tmp_path), runner=runner,
-                   opts=FetchOptions(retries=2))
+    out = download(
+        "https://youtu.be/ID",
+        str(tmp_path),
+        runner=runner,
+        opts=FetchOptions(retries=2),
+    )
     assert out == str(tmp_path / "ID.mp4")
     assert calls["n"] == 3
 
@@ -87,6 +99,13 @@ def test_instagram_failure_gives_cookie_hint(tmp_path):
         raise subprocess.CalledProcessError(1, cmd)
 
     with pytest.raises(FetchError) as exc:
-        download("https://www.instagram.com/reel/ID/", str(tmp_path), runner=runner,
-                 opts=FetchOptions(retries=0))
-    assert "cookies-from-browser" in str(exc.value).lower() or "cookies" in str(exc.value).lower()
+        download(
+            "https://www.instagram.com/reel/ID/",
+            str(tmp_path),
+            runner=runner,
+            opts=FetchOptions(retries=0),
+        )
+    assert (
+        "cookies-from-browser" in str(exc.value).lower()
+        or "cookies" in str(exc.value).lower()
+    )

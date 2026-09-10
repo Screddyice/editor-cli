@@ -24,10 +24,14 @@ class SoundMeta:
     url: str
 
 
-def discover_genre(query: str, n: int = 5, runner: RunnerFn = subprocess.run) -> list[str]:
+def discover_genre(
+    query: str, n: int = 5, runner: RunnerFn = subprocess.run
+) -> list[str]:
     res = runner(
         ["yt-dlp", f"ytsearch{n}:{query}", "--print", "webpage_url", "--no-download"],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     out = (getattr(res, "stdout", "") or "").strip()
     return [line.strip() for line in out.splitlines() if line.strip()]
@@ -36,7 +40,9 @@ def discover_genre(query: str, n: int = 5, runner: RunnerFn = subprocess.run) ->
 def fetch_sound_meta(url: str, runner: RunnerFn = subprocess.run) -> SoundMeta:
     res = runner(
         ["yt-dlp", "--dump-json", "--no-download", url],
-        check=True, capture_output=True, text=True,
+        check=True,
+        capture_output=True,
+        text=True,
     )
     data = json.loads(getattr(res, "stdout", "") or "{}")
     return SoundMeta(

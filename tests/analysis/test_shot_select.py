@@ -52,8 +52,8 @@ def test_recenter_centers_window_on_moment():
 
 
 def test_recenter_clamps_to_clip_bounds():
-    assert ss.recenter(2.0, 0.1, 20.0) == (0.0, 2.0)       # near start
-    assert ss.recenter(2.0, 19.9, 20.0) == (18.0, 20.0)    # near end
+    assert ss.recenter(2.0, 0.1, 20.0) == (0.0, 2.0)  # near start
+    assert ss.recenter(2.0, 19.9, 20.0) == (18.0, 20.0)  # near end
 
 
 def _edl():
@@ -71,7 +71,9 @@ def _edl():
 
 def test_refine_windows_recenters_each_segment_and_preserves_metadata():
     def sample(src, n):
-        return _frames([0.0, 4.0, 8.0]) if src == "a.mp4" else _frames([0.0, 10.0, 20.0])
+        return (
+            _frames([0.0, 4.0, 8.0]) if src == "a.mp4" else _frames([0.0, 10.0, 20.0])
+        )
 
     # always pick the middle frame (4.0s for a, 10.0s for b)
     analyze = lambda p, f: '{"index": 1}'
@@ -79,9 +81,9 @@ def test_refine_windows_recenters_each_segment_and_preserves_metadata():
 
     out = ss.refine_windows(_edl(), sample, analyze, durations)
     a, b = out.segments
-    assert (a.in_, a.out) == (3.5, 4.5)        # centered on 4.0, dur 1.0
+    assert (a.in_, a.out) == (3.5, 4.5)  # centered on 4.0, dur 1.0
     assert a.grade == "warm" and a.overlays == [{"text": "hi"}]
-    assert (b.in_, b.out) == (9.5, 10.5)       # centered on 10.0
+    assert (b.in_, b.out) == (9.5, 10.5)  # centered on 10.0
     assert out.titles == [{"text": "T"}] and out.music == {"src": "m.mp3"}
 
 
@@ -94,7 +96,10 @@ def test_refine_windows_falls_back_and_reports_on_failure():
     analyze = lambda p, f: '{"index": 1}'
     skipped = []
     out = ss.refine_windows(
-        _edl(), sample, analyze, {"a.mp4": 9.0, "b.mp4": 21.0},
+        _edl(),
+        sample,
+        analyze,
+        {"a.mp4": 9.0, "b.mp4": 21.0},
         on_skip=lambda src, exc: skipped.append((src, str(exc))),
     )
     # a refined, b kept its original window, failure surfaced (not silent)
