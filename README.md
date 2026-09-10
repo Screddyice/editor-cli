@@ -315,6 +315,16 @@ The canary drives Final Cut through its real UI, so **Final Cut must stay the
 frontmost application for the whole run**. Typing into another window takes
 activation away and fails the run.
 
+Selecting a project in the browser is a write, not a press. `AXPress` on a
+project tile returns success and selects nothing, exactly as the empty
+`AXSelectedChildren` write returns success and clears nothing, so
+`open_project` was selecting no project at all: measured on 2026-09-10 the
+browser held focus with `selected_count=0`, no timeline opened, and every
+command that needs a selection stayed disabled, which surfaced as a reveal
+`disabledControl` and read like a menu fault. Writing `AXSelectedChildren`
+non-empty is honoured, so the controller now writes the selection and polls
+until Final Cut confirms it.
+
 The canary also closes the library it opened. It used to create a disposable
 library per run and never close it, so four `Editor CLI Canary *` libraries had
 piled up in Final Cut next to real ones. `close_library` closes one library by

@@ -707,7 +707,13 @@ final class ActionTests: XCTestCase {
     try LiveFinalCutAX(root: root).pressProjectRow(.canaryCandidate, timeout: 0.1)
     XCTAssertEqual(target.accessibilityValue(for: "AXSelected") as? Bool, true)
     XCTAssertNil(decoy.accessibilityValue(for: "AXSelected"))
-    XCTAssertTrue(tile.pressed)
+    // Pressing the tile is what Final Cut ignores; the selection write is what
+    // it honours, so the tile must end up selected and never pressed.
+    let events = try XCTUnwrap(root.accessibilityElement(for: "AXFocusedUIElement"))
+    let selected = events.accessibilityElements(for: "AXSelectedChildren")
+    XCTAssertEqual(selected.count, 1)
+    XCTAssertTrue(selected.first?.isSameElement(as: tile) ?? false)
+    XCTAssertFalse(tile.pressed)
     XCTAssertFalse(open.pressed)
   }
 
@@ -1293,6 +1299,20 @@ final class FakeFinalCutAXElement: FinalCutAXElement {
   func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool {
     attributes[attribute] = value
     onSetBool?(value, attribute)
+    return true
+  }
+
+  /// Final Cut honours a non-empty element write, so the fake stores it and
+  /// serves it straight back through accessibilityElements.
+  var elementWrites: [String: [any FinalCutAXElement]] = [:]
+  var refusesElementWrites = false
+
+  func accessibilitySetElements(
+    _ value: [any FinalCutAXElement], for attribute: String
+  ) -> Bool {
+    if refusesElementWrites { return false }
+    elementWrites[attribute] = value
+    arrayAttributes[attribute] = value.compactMap { $0 as? FakeFinalCutAXElement }
     return true
   }
 

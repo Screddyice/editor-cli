@@ -878,6 +878,11 @@ protocol FinalCutAXElement: AnyObject {
   func accessibilityConfirm() -> Bool
   func accessibilitySetString(_ value: String, for attribute: String) -> Bool
   func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool
+  /// Write an element list, e.g. AXSelectedChildren. Pressing a browser tile
+  /// reports success and selects nothing; this is what actually selects.
+  func accessibilitySetElements(
+    _ value: [any FinalCutAXElement], for attribute: String
+  ) -> Bool
   func accessibilityAttributeIsSettable(_ attribute: String) -> Bool
   func isSameElement(as other: any FinalCutAXElement) -> Bool
 }
@@ -952,6 +957,15 @@ private final class NativeFinalCutAXElement: FinalCutAXElement {
 
   func accessibilitySetBool(_ value: Bool, for attribute: String) -> Bool {
     AXUIElementSetAttributeValue(element, attribute as CFString, value as CFBoolean) == .success
+  }
+
+  func accessibilitySetElements(
+    _ value: [any FinalCutAXElement], for attribute: String
+  ) -> Bool {
+    let raw = value.compactMap { ($0 as? NativeFinalCutAXElement)?.element }
+    guard raw.count == value.count else { return false }
+    return AXUIElementSetAttributeValue(element, attribute as CFString, raw as CFArray)
+      == .success
   }
 
 
@@ -1231,8 +1245,33 @@ final class LiveFinalCutAX {
       guard let match = try exactlyOne(matches) else { throw AccessibilityDiscoveryError.noMatch }
       return match
     }
-    try press(tile)
+    // AXPress on a browser tile reports success and selects nothing, the same
+    // way the empty AXSelectedChildren write reported success and cleared
+    // nothing. Writing the list non-empty is what Final Cut honours, measured
+    // on macOS 26 against Creator Studio 12.3, so select and prove it landed.
+    try selectBrowserTile(
+      tile, in: try browserEvents(in: try focusedMainWindow()), deadline: deadline
+    )
     try requireTime(before: deadline)
+  }
+
+  private func selectBrowserTile(
+    _ tile: any FinalCutAXElement,
+    in events: any FinalCutAXElement,
+    deadline: TimeInterval
+  ) throws {
+    guard events.accessibilityAttributeIsSettable(kAXSelectedChildrenAttribute as String),
+      events.accessibilitySetElements([tile], for: kAXSelectedChildrenAttribute as String)
+    else { throw AccessibilityDiscoveryError.attributeUnavailable }
+    _ = try pollUntil(deadline: deadline) { () -> Bool in
+      let selected = events.accessibilityElements(
+        for: kAXSelectedChildrenAttribute as String
+      )
+      guard selected.count == 1, let only = selected.first,
+        only.isSameElement(as: tile)
+      else { throw AccessibilityDiscoveryError.noMatch }
+      return true
+    }
   }
 
   private func setBool(_ value: Bool, attribute: String, on element: any FinalCutAXElement) throws {
