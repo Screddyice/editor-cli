@@ -540,9 +540,11 @@ async def run_canary(
             },
         },
     )
-    await _wait_for_project(controller.deps.fcp, workspace.library)
-
+    # The library exists in Final Cut from the push above, so cleanup has to
+    # cover everything after it — waiting for the project included. Scoping the
+    # finally to the body alone leaks a library whenever the wait is what fails.
     try:
+        await _wait_for_project(controller.deps.fcp, workspace.library)
         return await _run_canary_body(
             workspace, report, program, source_hashes, config, controller
         )
