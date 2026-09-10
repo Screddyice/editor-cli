@@ -292,6 +292,23 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     return count
   }
 
+  func selectedProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool {
+    let deadline = try actionDeadline(timeout)
+    // Reading the browser needs the window tree, and the window tree needs the
+    // foreground raise that only the automation path performs. Same as
+    // selectProject, which made the selection this is checking.
+    let accessibility = try actionAccessibility(
+      requireAutomation: true, timeout: remaining(before: deadline)
+    )
+    let matches = try accessibility.selectedProjectMatches(
+      expected.project, timeout: remaining(before: deadline)
+    )
+    _ = try remaining(before: deadline)
+    return matches
+  }
+
   func activeProjectMatches(
     _ expected: ProjectIdentity, timeout: TimeInterval
   ) throws -> Bool {

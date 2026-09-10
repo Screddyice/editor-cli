@@ -315,6 +315,25 @@ The canary drives Final Cut through its real UI, so **Final Cut must stay the
 frontmost application for the whole run**. Typing into another window takes
 activation away and fails the run.
 
+`open_project` proves its own selection instead of revealing. Final Cut disables
+`Reveal Project in Browser` once the project is already showing, which is the
+state that action creates for itself, so its postcondition now checks that the
+tile it selected is the selected one and that the timeline holds that project.
+The action navigated to the library row and the event row by exact name before
+selecting, so the location is already proven. `inspect_active_project` cannot
+take the same shortcut: the timeline it reports on was opened by someone else,
+and the project name alone does not say which library it came from, which is
+exactly what several identically named projects would get wrong.
+
+**Still open.** Selecting a tile does not open the project into the timeline,
+measured on 2026-09-10 across separate runs, so that postcondition is not
+satisfiable yet for a project that is not already open. The tile publishes
+`AXPress` and nothing else, `AXPress` selects nothing, `Reveal Project in
+Browser` stays disabled, and `Open Clip` does not move the timeline. Opening a
+selected project looks like it needs Return on the focused browser, which would
+widen the keyboard surface from one chord to two; that is not implemented and
+not decided.
+
 Selecting a project in the browser is a write, not a press. `AXPress` on a
 project tile returns success and selects nothing, exactly as the empty
 `AXSelectedChildren` write returns success and clears nothing, so

@@ -319,6 +319,38 @@ final class ActionTests: XCTestCase {
     XCTAssertEqual(system.selectedProjects, [expected])
   }
 
+  func testOpenVerifiesTheSelectionItMadeRatherThanRevealing() throws {
+    // Final Cut disables Reveal Project in Browser once the project is already
+    // showing, which is the state open_project itself creates. It navigated to
+    // the library and event rows by exact name, so the selection landing is the
+    // whole proof it needs.
+    let expected = ProjectIdentity.canaryCandidate
+    let system = FakeActionSystem(active: nil)
+    system.importMatchCount = 1
+    system.selectionMatches = true
+
+    let result = try Actions(system: system).openProject(expected: expected, timeout: 2)
+
+    XCTAssertEqual(result, expected)
+    XCTAssertEqual(system.selectedProjects, [expected])
+    XCTAssertGreaterThan(system.selectionChecks, 0)
+    // No active-project read, so no reveal, so nothing to be disabled.
+    XCTAssertEqual(system.activeProjectReads, 0)
+  }
+
+  func testOpenRefusesWhenTheSelectionNeverLands() {
+    let expected = ProjectIdentity.canaryCandidate
+    let system = FakeActionSystem(active: nil)
+    system.importMatchCount = 1
+    system.selectionMatches = false
+
+    XCTAssertThrowsError(
+      try Actions(system: system).openProject(expected: expected, timeout: 0.3)
+    ) { error in
+      XCTAssertEqual(error as? FinalCutActionError, .timedOut)
+    }
+  }
+
   func testShareWaitsForStableMovieAndBackgroundCompletion() throws {
     let expected = ProjectIdentity.canaryCandidate
     let system = FakeActionSystem(active: expected)
@@ -1154,6 +1186,19 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
       active = openedProject
     }
     return active
+  }
+
+  /// Stands in for the browser selection the real system reads back. Defaults
+  /// to agreeing with the active project so existing fixtures keep their shape.
+  var selectionMatches: Bool?
+  var selectionChecks = 0
+
+  func selectedProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool {
+    selectionChecks += 1
+    if let selectionMatches { return selectionMatches }
+    return try activeProjectMatches(expected, timeout: timeout)
   }
 
   func activeProjectMatches(

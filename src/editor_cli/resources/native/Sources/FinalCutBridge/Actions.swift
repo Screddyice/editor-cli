@@ -293,6 +293,13 @@ protocol FinalCutActionSystem {
     _ expected: ProjectIdentity, timeout: TimeInterval
   ) throws -> Bool
   func projectMatchCount(_ identity: ProjectIdentity, timeout: TimeInterval) throws -> Int
+  /// Whether the browser is showing exactly the project the caller just
+  /// selected, and that project is the open timeline. Only safe when this
+  /// process made the selection: it proves the selection landed, not where an
+  /// unknown timeline came from.
+  func selectedProjectMatches(
+    _ expected: ProjectIdentity, timeout: TimeInterval
+  ) throws -> Bool
   func pressMenu(path: [String], timeout: TimeInterval) throws
   func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws
   /// Best effort, never throws: close anything a failed run left on screen.
@@ -471,12 +478,20 @@ struct Actions<System: FinalCutActionSystem> {
     try perform(deadline: deadline) {
       try system.selectProject(expected, timeout: $0)
     }
+    // This action navigated to the library row and the event row by exact name
+    // before selecting, so the location is already proven and there is nothing
+    // left for a reveal to tell us. Confirming the selection landed is both
+    // sufficient and available: Final Cut disables Reveal Project in Browser
+    // once the project is already showing, which is the state this very action
+    // creates. inspect_active_project cannot take this shortcut, because the
+    // timeline it reports on was opened by someone else and its name alone does
+    // not say which library it came from.
     return try poll(deadline: deadline) {
       try rejectBlockingDialogs(deadline: deadline)
       return try perform(
         deadline: deadline,
         {
-          try system.activeProjectMatches(expected, timeout: $0)
+          try system.selectedProjectMatches(expected, timeout: $0)
         }) ? expected : nil
     }
   }
@@ -1278,6 +1293,27 @@ final class LiveFinalCutAX {
     guard isVisible(element), element.accessibilityAttributeIsSettable(attribute),
       element.accessibilitySetBool(value, for: attribute)
     else { throw AccessibilityDiscoveryError.attributeUnavailable }
+  }
+
+  /// Prove the tile the caller selected is the one selected now, and that it is
+  /// the open timeline. Reads only; presses nothing.
+  func selectedProjectMatches(_ name: String, timeout: TimeInterval) throws -> Bool {
+    let deadline = try deadline(after: timeout)
+    guard try activeTimelineName(
+      timeout: deadline - ProcessInfo.processInfo.systemUptime
+    ) == name else { return false }
+    let events = try browserEvents(in: try focusedMainWindow())
+    let selected = events.accessibilityElements(
+      for: kAXSelectedChildrenAttribute as String
+    )
+    guard selected.count == 1, let tile = selected.first,
+      try role(of: tile) == kAXGroupRole as String,
+      stringAttribute(kAXDescriptionAttribute as String, of: tile) == name,
+      try directChildren(of: events).contains(where: { $0.isSameElement(as: tile) }),
+      isVisible(tile), isEnabled(tile)
+    else { return false }
+    try requireTime(before: deadline)
+    return true
   }
 
   func activeTimelineName(timeout: TimeInterval) throws -> String? {
