@@ -9,14 +9,18 @@ private final class ForegroundStub {
   private var windowCounts: [Int]
   private let activates: Bool
   private let raisesFrontmost: Bool
+  /// macOS refuses activation to a background process, so a fixture can publish
+  /// windows and still never become active.
+  var becomesActive: Bool
 
   init(
     windowCounts: [Int], activates: Bool = true, raisesFrontmost: Bool = true,
-    now: TimeInterval = 0
+    becomesActive: Bool = true, now: TimeInterval = 0
   ) {
     self.windowCounts = windowCounts
     self.activates = activates
     self.raisesFrontmost = raisesFrontmost
+    self.becomesActive = becomesActive
     self.now = now
   }
 
@@ -31,6 +35,7 @@ private final class ForegroundStub {
         return raisesFrontmost
       },
       windowCount: { [self] _ in windowCounts.isEmpty ? 0 : windowCounts.removeFirst() },
+      isActive: { [self] _ in becomesActive },
       clock: { [self] in now },
       sleep: { [self] in now += $0 }
     )
@@ -79,6 +84,19 @@ final class ForegroundTests: XCTestCase {
     }
     XCTAssertEqual(stub.activations, 1)
     XCTAssertEqual(stub.frontmostRaises, 1)
+  }
+
+  func testRefusesToActWhenFinalCutPublishesWindowsButNeverBecomesActive() {
+    // The exact state macOS leaves a background helper in: the window tree is
+    // readable, and every menu command is disabled because no window is key.
+    let stub = ForegroundStub(
+      windowCounts: Array(repeating: 4, count: 200), becomesActive: false
+    )
+
+    XCTAssertThrowsError(try stub.foreground.raise(processIdentifier: 42, deadline: 0.3)) {
+      error in
+      XCTAssertEqual(error as? FinalCutActionError, .finalCutNotForeground)
+    }
   }
 
   func testReportsMissingForegroundRatherThanADeadlineTimeout() {

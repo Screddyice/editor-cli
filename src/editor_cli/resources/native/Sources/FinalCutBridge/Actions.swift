@@ -99,7 +99,11 @@ enum FinalCutActionError: Error, Equatable, LocalizedError {
     case .ambiguousProject: "More than one Final Cut project matched the exact identity."
     case .blockingDialog: "Final Cut displayed a blocking dialog."
     case .finalCutNotForeground:
-      "Final Cut published no accessibility windows; it must be the active application."
+      """
+      Final Cut must be the frontmost application: macOS does not let a \
+      background helper raise it, and every menu command is disabled until \
+      its window is key. Bring Final Cut to the front and run this again.
+      """
     case .timedOut: "Final Cut action timed out before its postcondition completed."
     }
   }

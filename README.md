@@ -254,9 +254,8 @@ checks passing.
 Three faults kept native navigation dark, and a live run on 2026-09-08 found all
 three. Final Cut publishes its accessibility window tree only while it is the
 active application, so a helper launched from a background terminal read an empty
-`AXWindows` list and timed out on every traversal; each action now raises Final
-Cut and waits for a window, taking the accessibility route when cooperative
-activation is refused. A menu command that does not apply to the open timeline
+`AXWindows` list and timed out on every traversal; each action now asks Final
+Cut to activate and waits for it to become the active application. A menu command that does not apply to the open timeline
 reads as disabled rather than missing, which surfaced as a role mismatch or a
 bare timeout, so `disabledControl` now names it and a failed traversal closes the
 menu it opened. Writing an empty `AXSelectedChildren` to the browser reports
@@ -293,6 +292,15 @@ run that never touched the browser. The reveal used to grab focus only on its
 way to clearing a selection, so with an empty browser it pressed a disabled
 command. It now focuses the browser first, every time, and proves the focus
 landed before pressing.
+
+Activation cannot be taken, only given. A run on 2026-09-10 measured every route
+on macOS 26 against Creator Studio 12.3: `activate()`, `AXFrontmost`, `AXRaise`,
+`AXMain` and `AXFocused` each report success and publish the window tree, and
+Final Cut still reports `isActive` false with every File menu command disabled.
+Gating on the window count alone therefore let an action walk into a disabled
+command and spend its whole deadline there. The foreground gate now requires a
+real window count and real activation, and `finalCutNotForeground` asks for Final
+Cut to be brought to the front instead of reporting a bare timeout.
 
 The live end-to-end export has not run since that fix: the screen was locked,
 and a locked Mac publishes no accessibility windows at all. PR #18 stays draft
