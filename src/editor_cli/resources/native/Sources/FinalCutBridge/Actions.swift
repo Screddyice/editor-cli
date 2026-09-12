@@ -376,7 +376,7 @@ struct Actions<System: FinalCutActionSystem> {
       try system.confirmExpectedSheet(.duplicate, timeout: $0)
     }
 
-    return try pollForProject(duplicated, deadline: deadline)
+    return try openProject(expected: duplicated, timeout: remaining(before: deadline))
     }
   }
 
@@ -465,14 +465,19 @@ struct Actions<System: FinalCutActionSystem> {
   ) throws -> ProjectIdentity {
     let deadline = try makeDeadline(timeout)
     try validate(expected)
-    let count = try perform(deadline: deadline) {
-      try system.projectMatchCount(expected, timeout: $0)
-    }
-    guard count > 0 else {
-      throw FinalCutActionError.projectNotFound
-    }
-    guard count == 1 else {
-      throw FinalCutActionError.ambiguousProject
+    // Import returns before Final Cut finishes loading the project metadata.
+    // Retry only these read-only preconditions; selection is issued once.
+    _ = try poll(deadline: deadline) { () -> Bool? in
+      try rejectBlockingDialogs(deadline: deadline)
+      do {
+        let count = try perform(deadline: deadline) {
+          try system.projectMatchCount(expected, timeout: $0)
+        }
+        guard count <= 1 else { throw FinalCutActionError.ambiguousProject }
+        return count == 1 ? true : nil
+      } catch FinalCutAutomationError.eventFailed {
+        return nil
+      }
     }
 
     try perform(deadline: deadline) {
@@ -1093,9 +1098,8 @@ final class LiveFinalCutAX {
   ) throws {
     let deadline = try deadline(after: timeout)
     let panel = try expectedContainer(stage: stage, deadline: deadline)
-    if FinalCutSavePanel.displays(
-      directory: directory, popupValue: try wherePopupValue(in: panel)
-    ) { return }
+    // A basename such as "source" is shared by many sessions. Navigate the
+    // full path even when the Where popup already displays that basename.
     guard keyboard.goToFolderChord() else {
       throw AccessibilityDiscoveryError.attributeUnavailable
     }
@@ -1122,9 +1126,30 @@ final class LiveFinalCutAX {
       throw AccessibilityDiscoveryError.attributeUnavailable
     }
     _ = try pollUntil(deadline: deadline) {
+      let suggestions = try allElements(beneath: panel).filter {
+        stringAttribute(kAXIdentifierAttribute as String, of: $0) == directory
+          && isVisible($0)
+      }
+      guard let _ = try exactlyOne(suggestions) else { throw AccessibilityDiscoveryError.noMatch }
+      return true
+    }
+    guard field.accessibilitySetBool(true, for: kAXFocusedAttribute as String) else {
+      throw AccessibilityDiscoveryError.attributeUnavailable
+    }
+    guard keyboard.confirmGoToFolder() else {
+      throw AccessibilityDiscoveryError.attributeUnavailable
+    }
+    _ = try pollUntil(deadline: deadline) {
+      // The hosted panel rebuilds its accessibility tree after navigation.
+      let currentPanel = try expectedContainer(stage: stage, deadline: deadline)
+      let openSheets = try allElements(beneath: currentPanel).filter {
+        stringAttribute(kAXIdentifierAttribute as String, of: $0)
+          == FinalCutSavePanel.goToSheetIdentifier && isVisible($0)
+      }
       guard
+        openSheets.isEmpty,
         FinalCutSavePanel.displays(
-          directory: directory, popupValue: try wherePopupValue(in: panel)
+          directory: directory, popupValue: try wherePopupValue(in: currentPanel)
         )
       else { throw AccessibilityDiscoveryError.noMatch }
       return true
@@ -1133,12 +1158,19 @@ final class LiveFinalCutAX {
 
   /// Best effort teardown: close a save panel, then any open menu. Never throws,
   /// because it runs while another failure is already on its way out.
-  func dismissTransientUI() {
-    let windows = (try? directChildren(of: root)) ?? []
-    for window in windows
-    where stringAttribute(kAXSubroleAttribute as String, of: window) == "AXDialog" {
-      let buttons = (try? allElements(beneath: window))?.filter {
-        stringAttribute(kAXIdentifierAttribute as String, of: $0) == "CancelButton"
+  func dismissTransientUI(expectedStage: FinalCutSheetStage? = nil) {
+    let panels: [any FinalCutAXElement]
+    switch expectedStage {
+    case .duplicate: panels = (try? duplicatePanels()) ?? []
+    case .exportXML: panels = (try? savePanels(titled: "Export XML")) ?? []
+    case .shareSettings, .shareSave:
+      panels = (try? shareSettingsWindow()).map { [$0] } ?? []
+    case nil: panels = []
+    }
+    for panel in panels {
+      let buttons = (try? allElements(beneath: panel))?.filter {
+        (stringAttribute(kAXIdentifierAttribute as String, of: $0) == "CancelButton"
+          || title(of: $0) == "Cancel") && isVisible($0)
       } ?? []
       for button in buttons { _ = button.accessibilityPress() }
     }
@@ -1165,8 +1197,12 @@ final class LiveFinalCutAX {
   ) throws {
     let deadline = try deadline(after: timeout)
     let container = try expectedContainer(stage: stage, deadline: deadline)
-    let fields = try allElements(beneath: container).filter {
+    var fields = try allElements(beneath: container).filter {
       try role(of: $0) == kAXTextFieldRole as String && isVisible($0) && isEnabled($0)
+    }
+    if case .duplicate = stage {
+      let names = fields.filter { stringAttribute(kAXDescriptionAttribute as String, of: $0) == "name" }
+      if !names.isEmpty { fields = names }
     }
     guard let field = try exactlyOne(fields) else {
       throw AccessibilityDiscoveryError.noMatch
@@ -1621,17 +1657,27 @@ final class LiveFinalCutAX {
 
   func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog] {
     let deadline = try deadline(after: timeout)
-    let dialogs = try allElements(beneath: root).compactMap { element -> BlockingDialog? in
-      let elementRole = try role(of: element)
-      guard elementRole == kAXSheetRole as String || elementRole == "AXDialog",
-        isVisible(element)
-      else {
-        return nil
+    return try pollUntil(deadline: deadline) {
+      try allElements(beneath: root).compactMap { element -> BlockingDialog? in
+        let elementRole = try role(of: element)
+        let floatingDialog = elementRole == kAXWindowRole as String
+          && stringAttribute(kAXSubroleAttribute as String, of: element) == "AXDialog"
+        guard (elementRole == kAXSheetRole as String || elementRole == "AXDialog" || floatingDialog),
+          isVisible(element)
+        else { return nil }
+        return BlockingDialog(role: floatingDialog ? "AXDialog" : elementRole, title: title(of: element) ?? "")
       }
-      return BlockingDialog(role: elementRole, title: title(of: element) ?? "")
     }
-    try requireTime(before: deadline)
-    return dialogs
+  }
+
+  func waitForExportPanelDismissed(timeout: TimeInterval) throws {
+    let deadline = try deadline(after: timeout)
+    _ = try pollUntil(deadline: deadline) {
+      guard try savePanels(titled: "Export XML").isEmpty else {
+        throw AccessibilityDiscoveryError.noMatch
+      }
+      return true
+    }
   }
 
   private func expectedContainer(
@@ -1650,10 +1696,10 @@ final class LiveFinalCutAX {
 
       let candidates: [any FinalCutAXElement]
       switch stage {
-      case .duplicate, .exportXML:
-        candidates = try savePanels(
-          titled: stage == .duplicate ? "Duplicate Project As" : "Export XML"
-        )
+      case .duplicate:
+        candidates = try duplicatePanels()
+      case .exportXML:
+        candidates = try savePanels(titled: "Export XML")
       case .shareSettings:
         candidates = [try shareSettingsWindow()]
       case .shareSave:
@@ -1672,6 +1718,17 @@ final class LiveFinalCutAX {
         throw AccessibilityDiscoveryError.noMatch
       }
       return container
+    }
+  }
+
+  private func duplicatePanels() throws -> [any FinalCutAXElement] {
+    try allElements(beneath: root).filter { element in
+      guard try role(of: element) == kAXSheetRole as String, isVisible(element) else { return false }
+      if stringAttribute(kAXTitleAttribute as String, of: element) == "Duplicate Project As" { return true }
+      let controls = try allElements(beneath: element)
+      return controls.contains { stringAttribute(kAXDescriptionAttribute as String, of: $0) == "name" }
+        && controls.contains { stringAttribute(kAXDescriptionAttribute as String, of: $0) == "video format" }
+        && controls.contains { title(of: $0) == "Project Name:" }
     }
   }
 
@@ -1840,7 +1897,9 @@ final class LiveFinalCutAX {
 
   private func role(of element: any FinalCutAXElement) throws -> String {
     guard let value = stringAttribute(kAXRoleAttribute as String, of: element) else {
-      throw AccessibilityDiscoveryError.attributeUnavailable
+      // Detached accessibility elements disappear while a hosted panel closes.
+      // Read-only polling reacquires the tree; mutation failures are not retried.
+      throw AccessibilityDiscoveryError.noMatch
     }
     return value
   }

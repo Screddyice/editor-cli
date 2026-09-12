@@ -108,6 +108,16 @@ final class ActionTests: XCTestCase {
     XCTAssertTrue(system.menuPaths.isEmpty)
   }
 
+  func testDuplicateOpensTheNewTimelineAfterMetadataAppears() throws {
+    let source = ProjectIdentity.canaryCandidate
+    let system = FakeActionSystem(active: source)
+    system.metadataSelectsProject = false
+    system.selectionOpensProject = true
+    let result = try Actions(system: system).duplicateProject(expected: source, name: "Source - copy", timeout: 2)
+    XCTAssertEqual(system.selectedProjects, [result])
+    XCTAssertEqual(system.confirmations, [.duplicate])
+  }
+
   func testDuplicateRejectsAmbiguousPostcondition() {
     let source = ProjectIdentity.canaryCandidate
     let system = FakeActionSystem(active: source)
@@ -319,6 +329,27 @@ final class ActionTests: XCTestCase {
     XCTAssertEqual(system.selectedProjects, [expected])
   }
 
+  func testOpenWaitsForImportMetadataBeforeSelectingOnce() throws {
+    let expected = ProjectIdentity.canaryCandidate
+    let system = FakeActionSystem(active: nil)
+    system.projectReadErrors = [.eventFailed]
+    system.importMatchCount = 1
+    system.selectionMatches = true
+    XCTAssertEqual(try Actions(system: system).openProject(expected: expected, timeout: 2), expected)
+    XCTAssertEqual(system.selectedProjects, [expected])
+    XCTAssertGreaterThan(system.elapsed, 0)
+  }
+
+  func testOpenDoesNotRetryDeniedMetadataOrSelectAProject() {
+    let system = FakeActionSystem(active: nil)
+    system.projectReadErrors = [.notAuthorized]
+    XCTAssertThrowsError(try Actions(system: system).openProject(expected: .canaryCandidate, timeout: 2)) { error in
+      XCTAssertEqual(error as? FinalCutAutomationError, .notAuthorized)
+    }
+    XCTAssertTrue(system.selectedProjects.isEmpty)
+    XCTAssertEqual(system.elapsed, 0)
+  }
+
   func testOpenVerifiesTheSelectionItMadeRatherThanRevealing() throws {
     // Final Cut disables Reveal Project in Browser once the project is already
     // showing, which is the state open_project itself creates. It navigated to
@@ -436,6 +467,21 @@ final class ActionTests: XCTestCase {
         .init(role: "AXDialog", title: "Relink Files"),
       ]
     )
+  }
+
+  func testDialogInspectionRetriesAChangingAccessibilityTree() throws {
+    let root = FakeFinalCutAXElement.application(children: [])
+    root.unavailableRoleReads = 1
+    XCTAssertEqual(try LiveFinalCutAX(root: root).blockingDialogs(timeout: 1), [])
+  }
+
+  func testDialogInspectionRecognizesFloatingModalWindows() throws {
+    let root = FakeFinalCutAXElement.application(children: [
+      FakeFinalCutAXElement(role: "AXWindow", title: "Relink Files", subrole: "AXDialog", modal: true)
+    ])
+    XCTAssertEqual(try LiveFinalCutAX(root: root).blockingDialogs(timeout: 1), [
+      BlockingDialog(role: "AXDialog", title: "Relink Files")
+    ])
   }
 
   func testTimelineDurationUsesReportedProjectTimebase() throws {
@@ -1001,6 +1047,28 @@ final class ActionTests: XCTestCase {
     return (root, target, decoy, tile, open)
   }
 
+  func testDuplicateUntitledSheetTargetsNameAndPreservesTimecode() throws {
+    let name = FakeFinalCutAXElement(role: "AXTextField", description: "name")
+    let timecode = FakeFinalCutAXElement.textField()
+    let cancel = FakeFinalCutAXElement.button("Cancel")
+    let duplicate = FakeFinalCutAXElement.sheet(title: "", children: [
+      FakeFinalCutAXElement(role: "AXStaticText", title: "Project Name:", description: "name label"),
+      name, timecode,
+      FakeFinalCutAXElement(role: "AXPopUpButton", description: "video format"),
+      cancel, .button("OK")
+    ])
+    let root = FakeFinalCutAXElement.application(children: [
+      .window(title: "Final Cut Pro", children: [duplicate])
+    ])
+    try LiveFinalCutAX(root: root).setUniqueVisibleTextField("Canary - AI Pass 1", stage: .duplicate, timeout: 0.3)
+    XCTAssertEqual(name.writtenValue, "Canary - AI Pass 1")
+    XCTAssertNil(timecode.writtenValue)
+    LiveFinalCutAX(root: root).dismissTransientUI()
+    XCTAssertFalse(cancel.pressed)
+    LiveFinalCutAX(root: root).dismissTransientUI(expectedStage: .duplicate)
+    XCTAssertTrue(cancel.pressed)
+  }
+
   func testExportPanelIsFoundWhenCreatorStudioFloatsItAsItsOwnDialog() throws {
     let field = FakeFinalCutAXElement.textField()
     let panel = FakeFinalCutAXElement(
@@ -1198,7 +1266,10 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
   let sessionRoot = "/tmp/session"
   var active: ProjectIdentity?
   var duplicateMatchCounts = [0, 1]
+  var metadataSelectsProject = true
+  var selectionOpensProject = false
   var importMatchCount = 0
+  var projectReadErrors: [FinalCutAutomationError] = []
   var menuPaths: [[String]] = []
   var setValues: [String] = []
   var confirmations: [FinalCutConfirmation] = []
@@ -1256,9 +1327,10 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
   }
 
   func projectMatchCount(_ identity: ProjectIdentity, timeout: TimeInterval) throws -> Int {
+    if !projectReadErrors.isEmpty { throw projectReadErrors.removeFirst() }
     if identity.project.contains("copy") || identity.project.contains("Before AI") {
       let count = duplicateMatchCounts.isEmpty ? 0 : duplicateMatchCounts.removeFirst()
-      if count == 1 {
+      if count == 1, metadataSelectsProject {
         active = identity
       }
       return count
@@ -1315,6 +1387,7 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
 
   func selectProject(_ identity: ProjectIdentity, timeout: TimeInterval) throws {
     selectedProjects.append(identity)
+    if selectionOpensProject { active = identity }
   }
 
   func fileSnapshot(_ path: String, timeout: TimeInterval) throws -> ActionFileSnapshot? {
@@ -1530,8 +1603,13 @@ final class FakeFinalCutAXElement: FinalCutAXElement {
     FakeFinalCutAXElement(role: kAXMenuItemRole as String, title: title, children: children)
   }
 
+  var unavailableRoleReads = 0
   func accessibilityValue(for attribute: String) -> Any? {
-    attributes[attribute]
+    if attribute == kAXRoleAttribute as String, unavailableRoleReads > 0 {
+      unavailableRoleReads -= 1
+      return nil
+    }
+    return attributes[attribute]
   }
 
   func accessibilityElement(for attribute: String) -> (any FinalCutAXElement)? {

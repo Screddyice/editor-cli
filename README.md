@@ -278,7 +278,10 @@ The save panel requires folder navigation before a filename is entered. The
 bridge opens Go to Folder with `Cmd+Shift+G`, sets the full directory, and
 confirms the exact suggestion before checking the panel location. A matching
 folder basename alone is insufficient: every session has a `source` folder.
-Live export acceptance remains pending while folder confirmation is tested.
+The path field must hold focus before Return can confirm the folder. The
+bridge reacquires the panel after navigation and waits for Save to dismiss it
+before checking the bundle. A live generated-project XML export passed on
+2026-09-13; full edit and preview acceptance remains pending.
 
 An open menu or save panel owns Final Cut's event stream, so a run that failed
 and left one on screen blocked every later Apple Event, and `doctor` reported
@@ -355,6 +358,11 @@ now fail an otherwise successful canary; after an earlier failure, the canary
 reports the cleanup error as well. The bootstrap importer receives a copy under
 `bootstrap-journal/`, so its generated import-options XML cannot change the
 source tree used for preservation checks.
+
+Creator Studio's duplicate dialog is an untitled sheet with separate name and
+timecode fields. The bridge identifies its controls, writes only the project
+name, then opens the exact new project once metadata appears. Failed operations
+cancel only the dialog opened by that operation.
 
 Fresh imports can appear in the browser before library metadata is readable.
 Project opening now waits for the exact metadata match before selecting the

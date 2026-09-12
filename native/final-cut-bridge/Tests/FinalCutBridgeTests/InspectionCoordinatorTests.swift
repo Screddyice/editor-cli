@@ -49,6 +49,31 @@ final class InspectionCoordinatorTests: XCTestCase {
     XCTAssertEqual(fixture.calls, ["verify", "reveal"])
   }
 
+  func testTransientMetadataFailureRetriesOnlyTheSameReadScope() throws {
+    let fixture = try InspectionFixture()
+    fixture.metadataErrors = [.eventFailed]
+    XCTAssertNotNil(try fixture.coordinator().inspect(timeout: 2))
+    XCTAssertEqual(fixture.calls, ["verify", "reveal", "metadata", "metadata", "reveal", "status"])
+    XCTAssertEqual(fixture.scopesQueried, [fixture.original, fixture.original])
+  }
+
+  func testMetadataPermissionFailureDoesNotRetry() throws {
+    let fixture = try InspectionFixture()
+    fixture.metadataErrors = [.notAuthorized]
+    XCTAssertThrowsError(try fixture.coordinator().inspect(timeout: 2))
+    XCTAssertEqual(fixture.calls, ["verify", "reveal", "metadata"])
+  }
+
+  func testMetadataRetriesStayWithinTheOriginalDeadline() throws {
+    let fixture = try InspectionFixture()
+    fixture.metadataErrors = [.eventFailed, .eventFailed]
+    fixture.metadataElapsed = 1.1
+    XCTAssertThrowsError(try fixture.coordinator().inspect(timeout: 2)) { error in
+      XCTAssertEqual((error as? FinalCutInspectionError)?.underlying as? FinalCutActionError, .timedOut)
+    }
+    XCTAssertEqual(fixture.calls, ["verify", "reveal", "metadata", "metadata"])
+  }
+
   func testInitialVerificationFailureKeepsStageAndUnderlyingError() throws {
     let fixture = try InspectionFixture()
     fixture.verificationError = FinalCutAutomationError.notAuthorized
@@ -109,6 +134,7 @@ private final class InspectionFixture {
   var revealTimeouts: [TimeInterval] = []
   var now: TimeInterval = 100
   var metadataElapsed: TimeInterval = 0
+  var metadataErrors: [FinalCutAutomationError] = []
   var verificationError: Error?
   var records = [InspectionFixture.record]
   let status: LiveTimelineStatus
@@ -138,6 +164,7 @@ private final class InspectionFixture {
         self.calls.append("metadata")
         self.scopesQueried.append(location)
         self.now += self.metadataElapsed
+        if !self.metadataErrors.isEmpty { throw self.metadataErrors.removeFirst() }
         if self.changeScope { self.current = self.afterMetadata }
         return self.records
       },

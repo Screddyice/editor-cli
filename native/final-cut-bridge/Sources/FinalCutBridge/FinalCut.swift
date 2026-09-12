@@ -345,10 +345,11 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
   }
 
   func dismissTransientUI() {
+    let ownedStage = expectedSheet
     expectedSheet = nil
     guard isAccessibilityTrusted(), let processIdentifier = try? verifiedProcessIdentifier()
     else { return }
-    LiveFinalCutAX(processIdentifier: processIdentifier).dismissTransientUI()
+    LiveFinalCutAX(processIdentifier: processIdentifier).dismissTransientUI(expectedStage: ownedStage)
   }
 
   func setExpectedSheetValue(_ value: String, timeout: TimeInterval) throws {
@@ -386,19 +387,20 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     _ confirmation: FinalCutConfirmation, timeout: TimeInterval
   ) throws {
     let stage: FinalCutSheetStage
+    let nextStage: FinalCutSheetStage?
     switch (expectedSheet, confirmation) {
     case (.duplicate, .duplicate):
       stage = .duplicate
-      expectedSheet = nil
+      nextStage = nil
     case (.exportXML, .exportXML):
       stage = .exportXML
-      expectedSheet = nil
+      nextStage = nil
     case (.shareSettings, .shareNext):
       stage = .shareSettings
-      expectedSheet = .shareSave
+      nextStage = .shareSave
     case (.shareSave, .shareSave):
       stage = .shareSave
-      expectedSheet = nil
+      nextStage = nil
     default:
       throw AccessibilityDiscoveryError.noMatch
     }
@@ -409,7 +411,11 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     try accessibility.pressUniqueEnabledButton(
       stage: stage, timeout: remaining(before: deadline)
     )
+    if case .exportXML = stage {
+      try accessibility.waitForExportPanelDismissed(timeout: remaining(before: deadline))
+    }
     _ = try remaining(before: deadline)
+    expectedSheet = nextStage
   }
 
   func openDocument(_ path: String, timeout: TimeInterval) throws {
@@ -624,8 +630,18 @@ struct FinalCutInspectionCoordinator {
       stage = "active-project reveal"
       guard let location = try timed({ try reveal(processIdentifier, $0) }) else { return nil }
       stage = "scoped project metadata"
-      let records = try timed({ try readRecords(processIdentifier, location, $0) })
-        .filter { $0.project == location.project }
+      func readScopedRecords() throws -> [NativeProjectRecord] {
+        while true {
+          do {
+            return try timed({ try readRecords(processIdentifier, location, $0) })
+          } catch FinalCutAutomationError.eventFailed {
+            // Loading libraries can temporarily reject this read. Preserve the
+            // original scope and deadline, then revalidate scope after success.
+            Thread.sleep(forTimeInterval: min(0.05, try remaining()))
+          }
+        }
+      }
+      let records = try readScopedRecords().filter { $0.project == location.project }
       guard records.count == 1, let record = records.first else {
         throw FinalCutActionError.ambiguousProject
       }

@@ -17,6 +17,9 @@ final class SavePanelTests: XCTestCase {
     XCTAssertFalse(
       FinalCutSavePanel.displays(directory: "/tmp/fcp-session", popupValue: nil)
     )
+    XCTAssertFalse(
+      FinalCutSavePanel.displays(directory: "/tmp/fcp-session", popupValue: "fcp-session-old")
+    )
   }
 
   func testExportArtifactIsTheBundleFinalCutActuallyWrites() {
@@ -52,19 +55,18 @@ final class SavePanelTests: XCTestCase {
     )
   }
 
-  func testDirectorySelectionSkipsTheChordWhenThePanelIsAlreadyThere() throws {
+  func testDirectorySelectionDoesNotTrustAnUnprovenMatchingBasename() throws {
     var chords = 0
     let panel = Self.exportPanel(where: "\u{2066}fcp-session\u{2069}")
     let root = FakeFinalCutAXElement.application(children: [
       .window(title: "Final Cut Pro", children: []), panel,
     ])
     let controller = LiveFinalCutAX(
-      root: root, keyboard: FinalCutKeyboard(goToFolderChord: { chords += 1; return true })
+      root: root, keyboard: FinalCutKeyboard(goToFolderChord: { chords += 1; return false })
     )
 
-    try controller.selectSaveDirectory("/tmp/fcp-session", stage: .exportXML, timeout: 1)
-
-    XCTAssertEqual(chords, 0)
+    XCTAssertThrowsError(try controller.selectSaveDirectory("/tmp/fcp-session", stage: .exportXML, timeout: 1))
+    XCTAssertEqual(chords, 1)
   }
 
   func testDirectorySelectionWritesThePathAndProvesThePanelMoved() throws {
@@ -74,7 +76,8 @@ final class SavePanelTests: XCTestCase {
     )
     let goToSheet = FakeFinalCutAXElement(
       role: kAXSheetRole as String, identifier: FinalCutSavePanel.goToSheetIdentifier,
-      hidden: true, children: [pathField]
+      hidden: true, children: [pathField,
+        .init(role: "AXList", identifier: "/tmp/fcp-session")]
     )
     let wherePopup = FakeFinalCutAXElement(
       role: "AXPopUpButton", identifier: FinalCutSavePanel.whereIdentifier
@@ -87,15 +90,20 @@ final class SavePanelTests: XCTestCase {
     let root = FakeFinalCutAXElement.application(children: [
       .window(title: "Final Cut Pro", children: []), panel,
     ])
-    // The chord reveals the sheet; confirming the path moves the panel.
+    // AXConfirm exposes the suggestion; Return commits that exact path.
     let keyboard = FinalCutKeyboard(goToFolderChord: {
       chords += 1
       goToSheet.setTestAttribute(kAXHiddenAttribute as String, false)
       return true
-    })
-    pathField.onConfirm = {
+    }, confirmGoToFolder: {
+      XCTAssertEqual(pathField.writtenValue, "/tmp/fcp-session")
+      XCTAssertEqual(pathField.accessibilityValue(for: kAXFocusedAttribute as String) as? Bool, true)
       wherePopup.setTestAttribute(kAXValueAttribute as String, "\u{2066}fcp-session\u{2069}")
-    }
+      // The hosted save panel replaces its accessibility tree on navigation.
+      let moved = Self.exportPanel(where: "\u{2066}fcp-session\u{2069}")
+      root.children = [.window(title: "Final Cut Pro", children: []), moved]
+      return true
+    })
 
     try LiveFinalCutAX(root: root, keyboard: keyboard)
       .selectSaveDirectory("/tmp/fcp-session", stage: .exportXML, timeout: 2)

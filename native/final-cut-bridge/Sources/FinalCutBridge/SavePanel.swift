@@ -1,13 +1,15 @@
+import AppKit
 import ApplicationServices
 import Foundation
 
 /// Creator Studio's save panel gives accessibility no way to choose a folder.
 /// A path written into the name field is saved as a literal filename, and
 /// confirming that field navigates nowhere. The panel's Go to Folder sheet does
-/// accept a path, and one chord is the only way to open it, so the keyboard
-/// surface is exactly that chord and nothing else.
+/// accept a path. The keyboard surface opens that sheet and confirms its exact
+/// folder suggestion; all project navigation uses accessibility menu actions.
 struct FinalCutKeyboard {
   let goToFolderChord: () -> Bool
+  var confirmGoToFolder: () -> Bool = { false }
 
   static let live = FinalCutKeyboard(goToFolderChord: {
     guard let source = CGEventSource(stateID: .hidSystemState) else { return false }
@@ -32,6 +34,18 @@ struct FinalCutKeyboard {
       Thread.sleep(forTimeInterval: 0.02)
     }
     return true
+  }, confirmGoToFolder: {
+    guard NSWorkspace.shared.frontmostApplication?.bundleIdentifier == "com.apple.FinalCutApp",
+      let source = CGEventSource(stateID: .hidSystemState),
+      let down = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: true),
+      let up = CGEvent(keyboardEventSource: source, virtualKey: 36, keyDown: false)
+    else { return false }
+    down.flags = []
+    up.flags = []
+    down.post(tap: .cghidEventTap)
+    Thread.sleep(forTimeInterval: 0.02)
+    up.post(tap: .cghidEventTap)
+    return true
   })
 }
 
@@ -51,7 +65,7 @@ enum FinalCutSavePanel {
       !(0x2066...0x2069).contains($0.value) && $0.value != 0x200E && $0.value != 0x200F
     }
     return String(String.UnicodeScalarView(cleaned))
-      .localizedCaseInsensitiveContains(expected)
+      .trimmingCharacters(in: .whitespacesAndNewlines) == expected
   }
 }
 
