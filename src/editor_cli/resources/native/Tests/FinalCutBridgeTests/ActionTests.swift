@@ -1120,6 +1120,25 @@ final class ActionTests: XCTestCase {
 }
 
 final class CloseLibraryTests: XCTestCase {
+  func testLiveMenuBoundaryAcceptsExactLibraryCloseBeforeCheckingDeadline() {
+    // A zero deadline stops before any real app access. The old live allowlist
+    // rejected this route before it could ever reach its deadline check.
+    XCTAssertThrowsError(
+      try LiveFinalCutSystem().pressMenu(path: FinalCutMenu.closeLibrary("Canary"), timeout: 0)
+    ) { error in
+      XCTAssertEqual(error as? FinalCutActionError, .invalidTimeout)
+    }
+  }
+
+  func testLiveMenuBoundaryRejectsUnscopedAndMalformedCloseCommands() {
+    for path in [["File", "Close Library"], ["File", "Close Library “”“"],
+      ["File", "Close Library “Canary”", "Move to Trash"], ["Edit", "Close Library “Canary”"]] {
+      XCTAssertThrowsError(try LiveFinalCutSystem().pressMenu(path: path, timeout: 0)) { error in
+        XCTAssertEqual(error as? AccessibilityDiscoveryError, .invalidPath)
+      }
+    }
+  }
+
   private func system(open: [String], closable: [String]) -> FakeActionSystem {
     let system = FakeActionSystem(active: nil)
     system.openLibraries = open

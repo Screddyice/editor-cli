@@ -341,6 +341,9 @@ class _FakeFinalCut:
         self.opened_project = project_name.project
         return project_name
 
+    async def close_library(self, _name):
+        return True
+
 
 class _FakeTimeline:
     def __init__(self, candidate_xml: str, source: Path, mutate_source: bool):
@@ -456,6 +459,38 @@ async def test_run_canary_records_all_checks_before_opening_candidate(
     assert result["required_checks"]["restart_reconciled"] is True
     assert result["source_before_sha256"] == result["source_after_sha256"]
     assert len(builds) == 2
+
+
+@pytest.mark.anyio
+async def test_canary_import_copy_does_not_change_the_preserved_source(
+    monkeypatch, tmp_path
+):
+    from fcpxml.live import inject_import_options
+
+    async def import_copy(_self, _tool, arguments):
+        source = Path(arguments["args"]["filepath"])
+        inject_import_options(
+            str(source),
+            str(source.with_stem(source.stem + "_import")),
+            library_location=arguments["args"]["library_location"],
+        )
+        return {}
+
+    monkeypatch.setattr(_FakeBootstrap, "call", import_copy)
+    result, _, _ = await _run_controller_backed_canary(monkeypatch, tmp_path)
+    assert result["required_checks"]["source_unchanged"] is True
+
+
+@pytest.mark.anyio
+async def test_canary_cannot_report_success_when_library_cleanup_fails(
+    monkeypatch, tmp_path
+):
+    async def fail_close(_self, _name):
+        raise RuntimeError("Test library still open")
+
+    monkeypatch.setattr(_FakeFinalCut, "close_library", fail_close)
+    with pytest.raises(RuntimeError, match="Test library still open"):
+        await _run_controller_backed_canary(monkeypatch, tmp_path)
 
 
 @pytest.mark.anyio

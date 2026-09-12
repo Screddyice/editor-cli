@@ -7,11 +7,11 @@ import argparse
 import asyncio
 import hashlib
 import json
+import shutil
 import subprocess
 import sys
 import uuid
 import xml.etree.ElementTree as ET
-from contextlib import suppress
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
@@ -527,12 +527,17 @@ async def run_canary(
         journal_root=workspace.root / "bootstrap-journal",
         allowed_roots=(workspace.root,),
     )
+    # The upstream importer writes an options-injected sibling. Keep that
+    # derived file outside the source tree whose preservation we verify.
+    bootstrap_source = workspace.root / "bootstrap-journal" / source_xml.name
+    bootstrap_source.parent.mkdir(mode=0o700, exist_ok=True)
+    shutil.copyfile(source_xml, bootstrap_source)
     await bootstrap.call(
         "deliver",
         {
             "action": "push_to_fcp",
             "args": {
-                "filepath": str(source_xml),
+                "filepath": str(bootstrap_source),
                 "library_location": str(workspace.library),
                 "suppress_warnings": True,
                 "copy_assets": False,
@@ -551,8 +556,13 @@ async def run_canary(
     finally:
         # The canary library is disposable, and a run that fails leaves it open
         # in Final Cut exactly like one that passes. Close it either way.
-        with suppress(Exception):
+        primary_failure = sys.exc_info()[0] is not None
+        try:
             await controller.deps.fcp.close_library(workspace.library.stem)
+        except Exception as exc:
+            if not primary_failure:
+                raise
+            print(f"Canary library cleanup also failed: {exc}", file=sys.stderr)
 
 
 async def _run_canary_body(

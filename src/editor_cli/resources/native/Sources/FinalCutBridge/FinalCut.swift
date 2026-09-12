@@ -319,7 +319,12 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
 
   func pressMenu(path: [String], timeout: TimeInterval) throws {
     let allowed = [FinalCutMenu.duplicate, FinalCutMenu.exportXML, FinalCutMenu.share]
-    guard allowed.contains(path) else {
+    let closePrefix = "Close Library \u{201C}"
+    let closesNamedLibrary = path.count == 2 && path[0] == "File"
+      && path[1].hasPrefix(closePrefix) && path[1].hasSuffix("\u{201D}")
+      && path[1].count > closePrefix.count + 1
+      && !path[1].unicodeScalars.contains(where: CharacterSet.controlCharacters.contains)
+    guard allowed.contains(path) || closesNamedLibrary else {
       throw AccessibilityDiscoveryError.invalidPath
     }
     let deadline = try actionDeadline(timeout)
@@ -332,8 +337,10 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
       expectedSheet = .duplicate
     } else if path == FinalCutMenu.exportXML {
       expectedSheet = .exportXML
-    } else {
+    } else if path == FinalCutMenu.share {
       expectedSheet = .shareSettings
+    } else {
+      expectedSheet = nil
     }
   }
 

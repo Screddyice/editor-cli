@@ -350,6 +350,12 @@ so it cannot close a library nobody asked about, and the canary calls it in a
 `finally` block. A library that is already gone counts as success, because that
 path runs after failures too.
 
+The live menu allowlist includes the exact named close command. Cleanup failures
+now fail an otherwise successful canary; after an earlier failure, the canary
+reports the cleanup error as well. The bootstrap importer receives a copy under
+`bootstrap-journal/`, so its generated import-options XML cannot change the
+source tree used for preservation checks.
+
 PR #18 stays draft until the complete native edit, preview, and recovery canary
 passes. A successful project-open check does not establish those outcomes.
 No real user footage has been edited.
