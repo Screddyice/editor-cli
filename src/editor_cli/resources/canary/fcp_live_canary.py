@@ -213,7 +213,7 @@ def create_source(workspace: CanaryWorkspace) -> Path:
     _render_card(red, color="red", label="SOURCE A", duration=4, tone=440)
     _render_card(blue, color="blue", label="SOURCE B", duration=6, tone=660)
     _render_card(
-        title, color="0x111111", label="EDITOR CLI CANARY", duration=2, tone=None
+        title, color="0x303030", label="EDITOR CLI CANARY", duration=2, tone=None
     )
     _render_card(reaction, color="purple", label="REACTION!", duration=1, tone=None)
 
@@ -407,10 +407,25 @@ def _file_sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def source_content_hash(path: Path) -> str:
+    """Compare exported content while excluding regenerated access bookmarks."""
+    tree = ET.parse(path)
+    for parent in tree.findall(".//media-rep"):
+        for bookmark in parent.findall("bookmark"):
+            parent.remove(bookmark)
+    canonical = ET.canonicalize(ET.tostring(tree.getroot(), encoding="unicode"))
+    return hashlib.sha256(canonical.encode()).hexdigest()
+
+
 def _frame_matches(path: Path, kind: str) -> bool:
     try:
         with Image.open(path) as image:
-            pixels = list(image.convert("RGB").resize((64, 36)).get_flattened_data())
+            rgb = image.convert("RGB")
+            pixels = list(rgb.resize((64, 36)).get_flattened_data())
+            # Downsampling a small title to 64px erases its white letter stems.
+            bright_title_pixels = any(
+                min(pixel) >= 200 for pixel in rgb.get_flattened_data()
+            )
     except (OSError, ValueError):
         return False
     total = len(pixels)
@@ -418,8 +433,7 @@ def _frame_matches(path: Path, kind: str) -> bool:
         return False
     if kind == "title":
         dark = sum(max(red, green, blue) <= 64 for red, green, blue in pixels)
-        bright = sum(min(red, green, blue) >= 200 for red, green, blue in pixels)
-        return dark / total >= 0.8 and bright > 0
+        return dark / total >= 0.8 and bright_title_pixels
     if kind == "transition":
         blended = sum(
             red >= 50 and blue >= 50 and green <= 80 for red, green, blue in pixels
@@ -658,7 +672,8 @@ async def _run_canary_body(
         )
     )
     source_capture = controller.deps.sessions.load(session.id)["capture"]
-    source_before = _file_sha256(Path(source_capture["source_xml"]))
+    source_before_raw = _file_sha256(Path(source_capture["source_xml"]))
+    source_before = source_content_hash(Path(source_capture["source_xml"]))
     program = canary_program(Path(source_capture["source_xml"]))
 
     # Lose the first controller after Final Cut completes Share, before the
@@ -722,7 +737,8 @@ async def _run_canary_body(
     await second_control.open_project(original)
     recapture = controller.deps.sessions.paths(session.id).source / "recaptured.fcpxml"
     await second_control.export_xml(original, recapture)
-    source_after = _file_sha256(recapture)
+    source_after_raw = _file_sha256(recapture)
+    source_after = source_content_hash(recapture)
     await second_control.open_project(candidate_identity)
     structure = candidate_structure_checks(candidate.fcpxml_path)
     technical = inspect_preview(
@@ -772,6 +788,9 @@ async def _run_canary_body(
         "evidence_manifest": str(candidate.evidence_manifest),
         "required_checks": required,
         "render_kind": (share_result or {}).get("kind"),
+        "source_comparison": "canonical XML excluding media-rep/bookmark only",
+        "source_before_raw_sha256": source_before_raw,
+        "source_after_raw_sha256": source_after_raw,
         "source_before_sha256": source_before,
         "source_after_sha256": source_after,
         "final_export": "user",

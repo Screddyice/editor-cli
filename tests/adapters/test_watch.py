@@ -63,3 +63,41 @@ def test_watch_manifest_includes_preview_hash_and_transcript(tmp_path):
     assert len(bundle.preview_sha256) == 64
     assert "hello" in bundle.transcript
     assert bundle.frames[0].timestamp_seconds == 5.0
+
+
+def test_watch_wrapper_preserves_fractional_timestamps(tmp_path):
+    import sys
+
+    script = tmp_path / "watch.py"
+    script.write_text(
+        "def format_time(value): return str(round(value))\n"
+        "def main(): print(format_time(3.333333))\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-m", "editor_cli.adapters.watch_runner", str(script)],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert result.stdout.strip() == "3.333333"
+    assert "str(round(value))" in script.read_text()
+
+
+def test_changed_ranges_pin_boundaries_and_interior_cues(tmp_path):
+    preview = tmp_path / "preview.mov"
+    preview.write_bytes(b"video")
+    script = tmp_path / "watch.py"
+    script.write_text("# fixture")
+    runner = FakeRunner()
+    WatchAdapter(script, runner).analyze(preview, tmp_path / "evidence", [(1, 3)])
+    call = runner.calls[1]
+    assert call[call.index("--timestamps") + 1] == "1.0,1.5,2.0,2.5,3.0"
+
+
+def test_fractional_report_timestamp_survives_manifest_parsing(tmp_path):
+    frame = tmp_path / "frame.jpg"
+    frame.write_bytes(b"jpeg")
+    parsed = WatchAdapter._parse_frames(
+        f"- `{frame}` (t=3.333333, reason=uniform)", tmp_path, "full"
+    )
+    assert parsed[0]["timestamp_seconds"] == 3.333333

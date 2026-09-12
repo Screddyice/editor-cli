@@ -158,6 +158,11 @@ class WatchAdapter:
                     str(cap),
                     "--fps",
                     "2",
+                    "--timestamps",
+                    ",".join(
+                        str(start + (end - start) * fraction / 4)
+                        for fraction in range(5)
+                    ),
                     "--start",
                     str(focus_start),
                     "--end",
@@ -190,6 +195,8 @@ class WatchAdapter:
         out.mkdir(mode=0o700, parents=True, exist_ok=True)
         args = [
             sys.executable,
+            "-m",
+            "editor_cli.adapters.watch_runner",
             str(self.script),
             str(preview),
             *options,

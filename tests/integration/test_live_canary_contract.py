@@ -624,3 +624,34 @@ def test_connected_reaction_uses_parent_time_coordinates(tmp_path):
     assert not fcp_live_canary.candidate_structure_checks(path)[
         "reaction_insert_visible"
     ]
+
+
+def test_source_comparison_ignores_only_media_bookmark_payload(tmp_path):
+    first = tmp_path / "first.fcpxml"
+    second = tmp_path / "second.fcpxml"
+    xml = '<fcpxml><resources><asset><media-rep src="file:///source.mov"><bookmark>opaque-one</bookmark></media-rep></asset></resources><library><event><project><sequence duration="8s"/></project></event></library></fcpxml>'
+    first.write_text(xml)
+    second.write_text(xml.replace("opaque-one", "opaque-two"))
+    assert fcp_live_canary.source_content_hash(
+        first
+    ) == fcp_live_canary.source_content_hash(second)
+    second.write_text(xml.replace('duration="8s"', 'duration="7s"'))
+    assert fcp_live_canary.source_content_hash(
+        first
+    ) != fcp_live_canary.source_content_hash(second)
+    second.write_text(xml.replace("file:///source.mov", "file:///other.mov"))
+    assert fcp_live_canary.source_content_hash(
+        first
+    ) != fcp_live_canary.source_content_hash(second)
+
+
+def test_title_check_keeps_small_white_glyphs_and_rejects_blank(tmp_path):
+    from PIL import Image, ImageDraw
+
+    frame = tmp_path / "title.png"
+    im = Image.new("RGB", (512, 288), (48, 48, 48))
+    im.save(frame)
+    assert not fcp_live_canary._frame_matches(frame, "title")
+    ImageDraw.Draw(im).text((220, 140), "CANARY", fill="white")
+    im.save(frame)
+    assert fcp_live_canary._frame_matches(frame, "title")

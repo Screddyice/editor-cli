@@ -390,6 +390,17 @@ recognizes the `Next…` button and reads the explicit Idle states in Creator
 Studio's Background Tasks window before accepting a stable output. It closes
 only the status window it opened; missing or busy status blocks completion.
 Task names and status values must belong to the same accessibility row.
+
+Rendered evidence retains fractional timestamps from watch and pins the
+boundaries and interior points of each changed range. This keeps short
+transitions visible when scene sampling would skip them. The installed watch
+skill stays unchanged.
+
+Source preservation compares canonical XML after removing only opaque
+`media-rep/bookmark` payloads, which Final Cut regenerates on export. It still
+compares media paths, project identifiers, timing, effects, and metadata. The
+canary records both raw export hashes and content hashes, and hashes the source
+media files separately.
 Existing sessions retain their recorded preview paths during recovery.
 
 The generated-media direct acceptance run on 2026-09-13 completed preview,
