@@ -441,6 +441,7 @@ async def test_controller_uses_candidate_duration_for_native_identity(tmp_path):
 
     assert candidate.duration_seconds == 7.0
     assert deps.fcp.imported[-1][1] == candidate.project_name
+    assert candidate.preview_path.suffix == ".mov"
     assert deps.fcp.rendered[-1].duration_seconds == 7.0
 
 
@@ -1000,3 +1001,19 @@ async def test_undo_resumes_completed_receipt_without_replay(
         assert deps.fcp.opened_project == opened_after_crash
     assert "undo_inflight" not in saved
     assert saved["undo_versions"][-1]["source_version"] == 0
+
+
+def test_new_candidates_do_not_reuse_the_source_project_uid(tmp_path):
+    import xml.etree.ElementTree as ET
+
+    source = tmp_path / "source.fcpxml"
+    original = b'<fcpxml version="1.14"><library><event><project name="Source" uid="original-project" modDate="old"><sequence duration="8s"/></project></event></library></fcpxml>'
+    source.write_bytes(original)
+    candidate = tmp_path / "candidate.fcpxml"
+    candidate.write_bytes(original)
+    EditSessionController._rename_candidate_project(candidate, "AI Pass")
+    assert ET.parse(candidate).find(".//project").get("uid") is None
+    undo = tmp_path / "undo.fcpxml"
+    EditSessionController._write_undo_candidate(source, undo, "Undo Pass")
+    assert ET.parse(undo).find(".//project").get("uid") is None
+    assert source.read_bytes() == original

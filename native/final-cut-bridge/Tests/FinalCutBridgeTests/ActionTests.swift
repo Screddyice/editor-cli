@@ -108,6 +108,15 @@ final class ActionTests: XCTestCase {
     XCTAssertTrue(system.menuPaths.isEmpty)
   }
 
+  func testDuplicateRetriesUnavailableMetadataBeforeOneMutation() throws {
+    let source = ProjectIdentity.canaryCandidate
+    let system = FakeActionSystem(active: source)
+    system.projectReadErrors = [.eventFailed]
+    _ = try Actions(system: system).duplicateProject(expected: source, name: "Source - copy", timeout: 2)
+    XCTAssertEqual(system.menuPaths, [FinalCutMenu.duplicate])
+    XCTAssertEqual(system.confirmations, [.duplicate])
+  }
+
   func testDuplicateOpensTheNewTimelineAfterMetadataAppears() throws {
     let source = ProjectIdentity.canaryCandidate
     let system = FakeActionSystem(active: source)
@@ -301,6 +310,7 @@ final class ActionTests: XCTestCase {
 
     XCTAssertEqual(result, expected)
     XCTAssertEqual(system.openedDocuments, ["/tmp/session/pass-01.fcpxml"])
+    XCTAssertEqual(system.selectedProjects, [expected])
   }
 
   func testImportFailsClosedOnMissingMediaDialog() {
@@ -1110,11 +1120,11 @@ final class ActionTests: XCTestCase {
   }
 
   func testShareSettingsRequiresKnownModalMarker() throws {
-    let next = FakeFinalCutAXElement.button("Next...")
+    let next = FakeFinalCutAXElement.button("Next…")
     let shareWindow = FakeFinalCutAXElement.dialog(children: [
       .staticText(description: FinalCutAXIdentifier.shareWindowBackground), next,
     ])
-    let decoy = FakeFinalCutAXElement.dialog(children: [.button("Next...")])
+    let decoy = FakeFinalCutAXElement.dialog(children: [.button("Next…")])
     let root = FakeFinalCutAXElement.application(children: [shareWindow, decoy])
 
     try LiveFinalCutAX(root: root).pressUniqueEnabledButton(stage: .shareSettings, timeout: 2)
@@ -1166,6 +1176,54 @@ final class ActionTests: XCTestCase {
     let root = FakeFinalCutAXElement.application(children: [indicator])
 
     XCTAssertFalse(try LiveFinalCutAX(root: root).backgroundTasksComplete(timeout: 2))
+  }
+
+  private func backgroundWindow(sharing: String = "Idle") -> FakeFinalCutAXElement {
+    let categories = ["Transcoding and Analysis", "Importing Media", "Media Management",
+      "Rendering", "Thumbnails and Waveforms", "Sharing", "Backup", "Validation", "Downloads"]
+    let labels = categories.map { category in
+      let text = FakeFinalCutAXElement(role: "AXStaticText")
+      text.setTestAttribute("AXValue", category + " " + (category == "Sharing" ? sharing : "Idle"))
+      return text
+    }
+    return FakeFinalCutAXElement(role: "AXWindow", title: "Background Tasks", subrole: "AXDialog",
+      modal: false, children: [FakeFinalCutAXElement(role: "AXScrollArea", description: "Background Task Module", children: labels),
+        FakeFinalCutAXElement(role: "AXButton", subrole: "AXCloseButton")])
+  }
+
+  func testCreatorStudioIdleCategoriesProveCompletion() throws {
+    let window = backgroundWindow()
+    let ax = LiveFinalCutAX(root: FakeFinalCutAXElement.application(children: [window]))
+    XCTAssertTrue(try ax.backgroundTasksComplete(timeout: 2))
+    XCTAssertTrue(try ax.blockingDialogs(timeout: 2).isEmpty)
+  }
+
+  func testCreatorStudioBusySharingDoesNotProveCompletion() throws {
+    let window = backgroundWindow(sharing: "50%")
+    let ax = LiveFinalCutAX(root: FakeFinalCutAXElement.application(children: [window]))
+    XCTAssertFalse(try ax.backgroundTasksComplete(timeout: 2))
+  }
+
+  func testIdleLabelsInUnrelatedWindowDoNotProveCompletion() throws {
+    let window = backgroundWindow()
+    window.setTestAttribute("AXTitle", "Other")
+    let ax = LiveFinalCutAX(root: FakeFinalCutAXElement.application(children: [window]))
+    XCTAssertFalse(try ax.backgroundTasksComplete(timeout: 2))
+    XCTAssertEqual(try ax.blockingDialogs(timeout: 2).count, 1)
+  }
+
+  func testBackgroundInspectionClosesOnlyWindowItOpens() throws {
+    let window = backgroundWindow()
+    let item = FakeFinalCutAXElement.menuItem("Background Tasks")
+    let menu = FakeFinalCutAXElement.menuBar(children: [.menuBarItem("Window", children: [.menu(children: [item])])])
+    let root = FakeFinalCutAXElement.application(children: [menu])
+    item.onPress = { root.children.append(window) }
+    let ax = LiveFinalCutAX(root: root)
+    XCTAssertTrue(try ax.inspectBackgroundTaskCompletion(timeout: 2))
+    XCTAssertTrue(window.children[1].pressed)
+    window.children[1].pressed = false
+    XCTAssertTrue(try ax.inspectBackgroundTaskCompletion(timeout: 2))
+    XCTAssertFalse(window.children[1].pressed)
   }
 
   func testMenuTraversalRejectsWrongRoleAtIntermediateHop() {
@@ -1381,7 +1439,7 @@ private final class FakeActionSystem: FinalCutActionSystem, FinalCutSystem {
     confirmations.append(confirmation)
   }
 
-  func openDocument(_ path: String, timeout: TimeInterval) throws {
+  func openDocument(_ path: String, expected: ProjectIdentity, timeout: TimeInterval) throws {
     openedDocuments.append(path)
   }
 

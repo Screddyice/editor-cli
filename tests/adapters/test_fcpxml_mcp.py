@@ -101,3 +101,19 @@ async def test_real_pinned_server_lists_only_grouped_tools(tmp_path):
         allowed_roots=(tmp_path,),
     )
     assert set(await client.list_tools()) == ALLOWED_TOOLS
+
+
+@pytest.mark.anyio
+async def test_pinned_server_validation_text_is_an_error():
+    result = SimpleNamespace(
+        isError=False,
+        content=[
+            SimpleNamespace(
+                text="Validation error: Output path escapes allowed directory"
+            )
+        ],
+        structuredContent=None,
+    )
+    client = FCPXMLMCPClient(("unused",), transport=FakeTransport(result))
+    with pytest.raises(FCPXMLMCPError, match="Output path escapes"):
+        await client.call("edit", {})

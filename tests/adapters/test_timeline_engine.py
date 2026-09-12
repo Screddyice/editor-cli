@@ -161,3 +161,71 @@ async def test_timeline_engine_rejects_invalid_registration_duration(
             has_video=False,
             has_audio=True,
         )
+
+
+@pytest.mark.anyio
+async def test_pinned_server_edits_from_preserved_source_into_candidates(tmp_path):
+    import sys
+    from editor_cli.adapters.fcpxml_mcp import FCPXMLMCPClient
+
+    source = tmp_path / "source" / "original.fcpxml"
+    source.parent.mkdir()
+    source.write_text(FCPXML)
+    destination = tmp_path / "candidates" / "pass.fcpxml"
+    destination.parent.mkdir()
+    client = FCPXMLMCPClient(
+        (sys.executable, "-m", "server"), allowed_roots=(tmp_path,)
+    )
+    program = EditProgram(
+        operations=(
+            EditOperation("edit", "fill_gaps", {"mode": "extend_previous"}),
+            EditOperation(
+                "edit",
+                "add_transition",
+                {
+                    "clip_id": "Clip",
+                    "position": "end",
+                    "transition_type": "cross-dissolve",
+                    "duration": "15/30s",
+                },
+            ),
+        )
+    )
+    await FCPXMLTimelineEngine(client).apply(source, program, destination)
+    assert destination.is_file()
+    assert source.read_text() == FCPXML
+    assert list(source.parent.iterdir()) == [source]
+    assert list(destination.parent.iterdir()) == [destination]
+
+    import xml.etree.ElementTree as ET
+
+    assert (
+        ET.parse(destination)
+        .find('./resources/effect[@name="Cross Dissolve"]')
+        .get("uid")
+        == "FxPlug:4731E73A-8DAC-4113-9A30-AE85B1761265"
+    )
+
+
+@pytest.mark.anyio
+async def test_failed_edit_cleans_only_its_staged_intermediates(tmp_path):
+    class FailedWrite(FakeFCPXML):
+        async def call(self, tool, arguments):
+            await super().call(tool, arguments)
+            raise RuntimeError("upstream stopped after writing")
+
+    source = tmp_path / "source" / "original.fcpxml"
+    source.parent.mkdir()
+    source.write_text(FCPXML)
+    destination = tmp_path / "candidates" / "pass.fcpxml"
+    destination.parent.mkdir()
+    program = EditProgram(
+        operations=(
+            EditOperation("edit", "fill_gaps", {}),
+            EditOperation("edit", "fill_gaps", {}),
+        )
+    )
+    with pytest.raises(RuntimeError, match="upstream stopped"):
+        await FCPXMLTimelineEngine(FailedWrite()).apply(source, program, destination)
+    assert list(destination.parent.iterdir()) == []
+    assert source.read_text() == FCPXML

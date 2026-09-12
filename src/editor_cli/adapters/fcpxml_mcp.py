@@ -104,6 +104,9 @@ class FCPXMLMCPClient:
         if isinstance(structured, dict):
             return structured
         text = _text_content(result.content)
+        # The pinned server reports validation failures as ordinary MCP text.
+        if text.startswith("Validation error:"):
+            raise FCPXMLMCPError(text)
         try:
             parsed = json.loads(text)
         except json.JSONDecodeError:

@@ -15,6 +15,7 @@ import xml.etree.ElementTree as ET
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
+from fractions import Fraction
 
 from fcpxml.parser import FCPXMLParser
 from PIL import Image, ImageDraw, ImageFont
@@ -209,8 +210,8 @@ def create_source(workspace: CanaryWorkspace) -> Path:
     blue = workspace.source / "blue.mp4"
     title = workspace.source / "title.mp4"
     reaction = workspace.source / "reaction.mp4"
-    _render_card(red, color="red", label="SOURCE A", duration=3, tone=440)
-    _render_card(blue, color="blue", label="SOURCE B", duration=5, tone=660)
+    _render_card(red, color="red", label="SOURCE A", duration=4, tone=440)
+    _render_card(blue, color="blue", label="SOURCE B", duration=6, tone=660)
     _render_card(
         title, color="0x111111", label="EDITOR CLI CANARY", duration=2, tone=None
     )
@@ -227,8 +228,8 @@ def create_source(workspace: CanaryWorkspace) -> Path:
         width="1920",
         height="1080",
     )
-    _asset(resources, "r2", "Red", red, "3s", audio=True)
-    _asset(resources, "r3", "Blue", blue, "5s", audio=True)
+    _asset(resources, "r2", "Red", red, "4s", audio=True)
+    _asset(resources, "r3", "Blue", blue, "6s", audio=True)
     _asset(resources, "r4", "Canary Title", title, "2s", audio=False)
     _asset(resources, "r5", "Canary Reaction", reaction, "1s", audio=False)
     library = ET.SubElement(root, "library")
@@ -236,7 +237,7 @@ def create_source(workspace: CanaryWorkspace) -> Path:
     project = ET.SubElement(event, "project", name="Editor CLI Canary Source")
     sequence = ET.SubElement(project, "sequence", format="r1", duration="8s")
     spine = ET.SubElement(sequence, "spine")
-    ET.SubElement(
+    red_clip = ET.SubElement(
         spine,
         "asset-clip",
         name="Red",
@@ -258,9 +259,23 @@ def create_source(workspace: CanaryWorkspace) -> Path:
         name="Blue",
         ref="r3",
         offset="3s",
-        start="0s",
+        start="15/30s",
         duration="5s",
     )
+    # Keep generated cards in the active project's media scope. Final Cut drops
+    # resource entries that no timeline element references during export.
+    for ref, name in (("r4", "Canary Title"), ("r5", "Canary Reaction")):
+        ET.SubElement(
+            red_clip,
+            "asset-clip",
+            name=f"{name} source",
+            ref=ref,
+            offset="0s",
+            start="0s",
+            duration="1s",
+            lane="3" if ref == "r4" else "4",
+            enabled="0",
+        )
     source_xml = workspace.source / "canary-source.fcpxml"
     ET.ElementTree(root).write(source_xml, encoding="utf-8", xml_declaration=True)
     validate_fcpxml(source_xml)
@@ -298,11 +313,29 @@ def _has_exact_clip(
     duration_seconds: float,
     lane: int,
 ) -> bool:
+    parents = {child: parent for parent in tree.iter() for child in parent}
     for clip in tree.getroot().findall(".//asset-clip"):
-        if clip.get("ref") != ref or clip.get("lane") != str(lane):
+        timeline_offset = _fcpxml_seconds(clip.get("offset"))
+        enabled = clip.get("enabled") != "0"
+        parent = parents.get(clip)
+        while parent is not None:
+            enabled = enabled and parent.get("enabled") != "0"
+            if parent.tag in {"asset-clip", "clip", "gap"}:
+                parent_offset = _fcpxml_seconds(parent.get("offset", "0s"))
+                parent_start = _fcpxml_seconds(parent.get("start", "0s"))
+                if (
+                    timeline_offset is None
+                    or parent_offset is None
+                    or parent_start is None
+                ):
+                    timeline_offset = None
+                else:
+                    timeline_offset += parent_offset - parent_start
+            parent = parents.get(parent)
+        if not enabled or clip.get("ref") != ref or clip.get("lane") != str(lane):
             continue
         if (
-            _fcpxml_seconds(clip.get("offset")) == offset_seconds
+            timeline_offset == offset_seconds
             and _fcpxml_seconds(clip.get("duration")) == duration_seconds
         ):
             return True
@@ -322,6 +355,17 @@ def _matches_frame_quantized_time(actual: float | None, expected: float) -> bool
     )
 
 
+def _canary_asset_id(tree: ET.ElementTree, name: str) -> str:
+    matches = [
+        asset.get("id")
+        for asset in tree.findall("./resources/asset")
+        if asset.get("name") == name
+    ]
+    if len(matches) != 1 or not matches[0]:
+        raise RuntimeError(f"Canary source must contain one asset named {name}")
+    return matches[0]
+
+
 def candidate_structure_checks(path: Path) -> dict[str, bool]:
     """Verify the candidate carries the exact canary edits in its FCPXML."""
     validate_fcpxml(path)
@@ -330,7 +374,11 @@ def candidate_structure_checks(path: Path) -> dict[str, bool]:
     return {
         "gap_removed": not tree.getroot().findall(".//gap"),
         "title_visible": _has_exact_clip(
-            tree, ref="r4", offset_seconds=1.0, duration_seconds=2.0, lane=1
+            tree,
+            ref=_canary_asset_id(tree, "Canary Title"),
+            offset_seconds=1.0,
+            duration_seconds=2.0,
+            lane=1,
         ),
         "transition_visible": any(
             _is_cross_dissolve(transition)
@@ -342,7 +390,11 @@ def candidate_structure_checks(path: Path) -> dict[str, bool]:
             for transition in transitions
         ),
         "reaction_insert_visible": _has_exact_clip(
-            tree, ref="r5", offset_seconds=5.0, duration_seconds=1.0, lane=2
+            tree,
+            ref=_canary_asset_id(tree, "Canary Reaction"),
+            offset_seconds=5.0,
+            duration_seconds=1.0,
+            lane=2,
         ),
     }
 
@@ -445,7 +497,27 @@ def rendered_watch_checks(
     return checks
 
 
-def canary_program() -> EditProgram:
+def canary_program(source: Path | None = None) -> EditProgram:
+    tree = ET.parse(source) if source is not None else None
+    title_id = _canary_asset_id(tree, "Canary Title") if tree is not None else "r4"
+    reaction_id = (
+        _canary_asset_id(tree, "Canary Reaction") if tree is not None else "r5"
+    )
+    reaction_offset = Fraction(5, 2)
+    if tree is not None:
+        blue = tree.find('.//spine/asset-clip[@name="Blue"]')
+        if blue is None:
+            raise RuntimeError("Canary source must contain the Blue primary clip")
+        reaction_offset = (
+            Fraction(5)
+            + Fraction(blue.get("start", "0s").removesuffix("s"))
+            - Fraction(blue.get("offset", "0s").removesuffix("s"))
+        )
+    reaction_frames = reaction_offset * 30
+    if reaction_frames.denominator != 1:
+        raise RuntimeError("Canary reaction position must align to a 30fps frame")
+    reaction_time = f"{reaction_frames.numerator}/30s"
+
     return EditProgram(
         operations=(
             EditOperation("edit", "fill_gaps", {"mode": "extend_previous"}),
@@ -464,7 +536,7 @@ def canary_program() -> EditProgram:
                 "add_connected_clip",
                 {
                     "parent_clip_id": "Red",
-                    "asset_id": "r4",
+                    "asset_id": title_id,
                     "offset": "1s",
                     "duration": "2s",
                     "lane": 1,
@@ -475,8 +547,8 @@ def canary_program() -> EditProgram:
                 "add_connected_clip",
                 {
                     "parent_clip_id": "Blue",
-                    "asset_id": "r5",
-                    "offset": "5s",
+                    "asset_id": reaction_id,
+                    "offset": reaction_time,
                     "duration": "1s",
                     "lane": 2,
                 },
@@ -587,6 +659,7 @@ async def _run_canary_body(
     )
     source_capture = controller.deps.sessions.load(session.id)["capture"]
     source_before = _file_sha256(Path(source_capture["source_xml"]))
+    program = canary_program(Path(source_capture["source_xml"]))
 
     # Lose the first controller after Final Cut completes Share, before the
     # completion receipt. A new controller must reconcile, never share again.

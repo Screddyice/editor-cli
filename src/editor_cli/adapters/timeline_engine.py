@@ -2,11 +2,14 @@
 
 from __future__ import annotations
 
+import shutil
+import tempfile
 from pathlib import Path
 from dataclasses import dataclass
 from fractions import Fraction
 from hashlib import sha256
 from urllib.parse import unquote, urlparse
+from uuid import UUID
 import xml.etree.ElementTree as ET
 
 from fcpxml.parser import FCPXMLParser
@@ -216,62 +219,116 @@ class FCPXMLTimelineEngine:
     ) -> Path:
         source = source.expanduser().resolve()
         destination = destination.expanduser().resolve()
+        if destination.exists():
+            raise TimelineEngineError("Refusing to replace an existing candidate")
         current = source
         intermediates: list[Path] = []
-        for index, operation in enumerate(program.operations, 1):
-            output = (
-                destination
-                if index == len(program.operations)
-                else destination.with_name(
-                    f".{destination.stem}.step-{index:02d}.fcpxml"
-                )
-            )
-            if (
-                "filepath" in operation.arguments
-                or "output_path" in operation.arguments
-            ):
-                raise TimelineEngineError(
-                    "Edit operation arguments cannot override controller paths"
-                )
-            args = dict(operation.arguments)
-            if operation.group == "generate" and operation.action == "apply_template":
-                tree = ET.parse(current)
-                resolved_clips = {}
-                for slot, clip in args["clips"].items():
-                    node = tree.find(f'.//asset[@id="{clip["asset_id"]}"]')
-                    media_rep = node.find("media-rep") if node is not None else None
-                    src = media_rep.get("src") if media_rep is not None else None
-                    if not src:
-                        raise TimelineEngineError(
-                            f"Unknown or non-media asset_id: {clip['asset_id']}"
-                        )
-                    parsed = urlparse(src)
-                    canonical = (
-                        Path(unquote(parsed.path)).resolve()
-                        if parsed.scheme == "file"
-                        else None
+        try:
+            if source.parent != destination.parent:
+                # The upstream server confines output beside its input. Stage a
+                # copy in candidates so the preserved capture remains read-only.
+                with tempfile.NamedTemporaryFile(
+                    dir=destination.parent,
+                    prefix=f".{destination.stem}.input-",
+                    suffix=".fcpxml",
+                    delete=False,
+                ) as staged:
+                    current = Path(staged.name)
+                    intermediates.append(current)
+                    with source.open("rb") as original:
+                        shutil.copyfileobj(original, staged)
+            for index, operation in enumerate(program.operations, 1):
+                output = (
+                    destination
+                    if index == len(program.operations)
+                    else destination.with_name(
+                        f".{destination.stem}.step-{index:02d}.fcpxml"
                     )
-                    if canonical is None or not canonical.is_file():
-                        raise TimelineEngineError(
-                            f"Asset is not an available local file: {clip['asset_id']}"
-                        )
-                    resolved_clips[slot] = {**clip, "src": str(canonical)}
-                    resolved_clips[slot].pop("asset_id")
-                args["clips"] = resolved_clips
-            if operation.group == "generate" and operation.action == "apply_template":
-                args["output_path"] = str(output)
-            else:
-                args.update({"filepath": str(current), "output_path": str(output)})
-            await self.client.call(
-                operation.group, {"action": operation.action, "args": args}
-            )
-            if not output.is_file():
-                raise TimelineEngineError(
-                    f"FCPXML operation did not create {output.name}"
                 )
-            if current in intermediates:
-                current.unlink(missing_ok=True)
-            if output != destination:
-                intermediates.append(output)
-            current = output
-        return destination
+                if (
+                    "filepath" in operation.arguments
+                    or "output_path" in operation.arguments
+                ):
+                    raise TimelineEngineError(
+                        "Edit operation arguments cannot override controller paths"
+                    )
+                args = dict(operation.arguments)
+                if (
+                    operation.group == "generate"
+                    and operation.action == "apply_template"
+                ):
+                    tree = ET.parse(current)
+                    resolved_clips = {}
+                    for slot, clip in args["clips"].items():
+                        node = tree.find(f'.//asset[@id="{clip["asset_id"]}"]')
+                        media_rep = node.find("media-rep") if node is not None else None
+                        src = media_rep.get("src") if media_rep is not None else None
+                        if not src:
+                            raise TimelineEngineError(
+                                f"Unknown or non-media asset_id: {clip['asset_id']}"
+                            )
+                        parsed = urlparse(src)
+                        canonical = (
+                            Path(unquote(parsed.path)).resolve()
+                            if parsed.scheme == "file"
+                            else None
+                        )
+                        if canonical is None or not canonical.is_file():
+                            raise TimelineEngineError(
+                                f"Asset is not an available local file: {clip['asset_id']}"
+                            )
+                        resolved_clips[slot] = {**clip, "src": str(canonical)}
+                        resolved_clips[slot].pop("asset_id")
+                    args["clips"] = resolved_clips
+                if (
+                    operation.group == "generate"
+                    and operation.action == "apply_template"
+                ):
+                    args["output_path"] = str(output)
+                else:
+                    args.update({"filepath": str(current), "output_path": str(output)})
+                if output.exists():
+                    raise TimelineEngineError(
+                        "Refusing to replace an existing edit output"
+                    )
+                if output != destination:
+                    intermediates.append(output)
+                await self.client.call(
+                    operation.group, {"action": operation.action, "args": args}
+                )
+                if not output.is_file():
+                    raise TimelineEngineError(
+                        f"FCPXML operation did not create {output.name}"
+                    )
+                if operation.group == "edit" and operation.action == "add_transition":
+                    self._normalize_transition_effect_ids(output)
+                if current in intermediates:
+                    current.unlink(missing_ok=True)
+                current = output
+            return destination
+        finally:
+            for intermediate in intermediates:
+                intermediate.unlink(missing_ok=True)
+
+    @staticmethod
+    def _normalize_transition_effect_ids(path: Path) -> None:
+        # Final Cut exports UUID-based transition plugins with an FxPlug prefix.
+        # The pinned writer omits it, which makes Final Cut discard the effect.
+        tree = safe_parse(str(path))
+        references = {
+            node.get("ref") for node in tree.findall(".//transition/filter-video")
+        }
+        changed = False
+        for effect in tree.findall("./resources/effect"):
+            uid = effect.get("uid", "")
+            if effect.get("id") not in references:
+                continue
+            try:
+                canonical = str(UUID(uid))
+            except ValueError:
+                continue
+            if canonical == uid.lower():
+                effect.set("uid", f"FxPlug:{uid}")
+                changed = True
+        if changed:
+            tree.write(path, encoding="utf-8", xml_declaration=True)

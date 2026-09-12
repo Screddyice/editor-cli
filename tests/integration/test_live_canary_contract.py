@@ -91,7 +91,7 @@ def test_canary_program_is_valid_offline_and_covers_required_edits():
     }
     assert connected["r4"]["offset"] == "1s"
     assert connected["r4"]["duration"] == "2s"
-    assert connected["r5"]["offset"] == "5s"
+    assert connected["r5"]["offset"] == "75/30s"
     assert program.changed_ranges == ((1.0, 3.0), (5.0, 6.0))
 
 
@@ -135,8 +135,8 @@ def _candidate_xml(
     <format id="r1" frameDuration="1/30s" width="1920" height="1080"/>
     <asset id="r2" name="Red" start="0s" duration="3s" hasVideo="1" hasAudio="1" format="r1"/>
     <asset id="r3" name="Blue" start="0s" duration="5s" hasVideo="1" hasAudio="1" format="r1"/>
-    <asset id="r4" name="Title" start="0s" duration="2s" hasVideo="1" hasAudio="0" format="r1"/>
-    <asset id="r5" name="Reaction" start="0s" duration="1s" hasVideo="1" hasAudio="0" format="r1"/>
+    <asset id="r4" name="Canary Title" start="0s" duration="2s" hasVideo="1" hasAudio="0" format="r1"/>
+    <asset id="r5" name="Canary Reaction" start="0s" duration="1s" hasVideo="1" hasAudio="0" format="r1"/>
   </resources>
   <library><event name="Canary Event"><project name="Editor CLI Canary Source">
     <sequence format="r1" duration="8s"><spine>
@@ -573,3 +573,54 @@ def test_main_returns_failure_when_run_does_not_reach_ready(monkeypatch, tmp_pat
     assert fcp_live_canary.main(["--workspace", str(workspace)]) == 1
     saved = json.loads((workspace / "result.json").read_text(encoding="utf-8"))
     assert saved["required_checks"]["source_unchanged"] is True
+
+
+def test_canary_source_keeps_generated_cards_referenced(monkeypatch, tmp_path):
+    workspace = fcp_live_canary.create_canary_workspace(tmp_path / "canary")
+    monkeypatch.setattr(
+        fcp_live_canary,
+        "_render_card",
+        lambda path, **kwargs: path.write_bytes(b"media"),
+    )
+    source = fcp_live_canary.create_source(workspace)
+    tree = fcp_live_canary.ET.parse(source)
+    for ref in ("r4", "r5"):
+        clips = tree.findall(f'.//asset-clip[@ref="{ref}"]')
+        assert len(clips) == 1
+        assert clips[0].get("enabled") == "0"
+
+
+def test_canary_uses_asset_ids_from_final_cut_export(tmp_path):
+    source = tmp_path / "export.fcpxml"
+    source.write_text(_candidate_xml().replace("r4", "r40").replace("r5", "r50"))
+    program = fcp_live_canary.canary_program(source)
+    ids = {
+        op.arguments["asset_id"]
+        for op in program.operations
+        if op.action == "add_connected_clip"
+    }
+    assert ids == {"r40", "r50"}
+    assert all(fcp_live_canary.candidate_structure_checks(source).values())
+
+
+def test_connected_reaction_uses_parent_time_coordinates(tmp_path):
+    program = fcp_live_canary.canary_program()
+    reaction_op = program.operations[-1]
+    assert reaction_op.arguments["offset"] == "75/30s"
+    tree = fcp_live_canary.ET.ElementTree(
+        fcp_live_canary.ET.fromstring(_candidate_xml())
+    )
+    spine = tree.find(".//spine")
+    blue = spine.find('./asset-clip[@ref="r3"]')
+    reaction = spine.find('./asset-clip[@ref="r5"]')
+    spine.remove(reaction)
+    blue.append(reaction)
+    reaction.set("offset", "2s")
+    path = tmp_path / "connected.fcpxml"
+    tree.write(path)
+    assert fcp_live_canary.candidate_structure_checks(path)["reaction_insert_visible"]
+    reaction.set("offset", "5s")
+    tree.write(path)
+    assert not fcp_live_canary.candidate_structure_checks(path)[
+        "reaction_insert_visible"
+    ]

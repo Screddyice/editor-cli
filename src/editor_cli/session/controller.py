@@ -293,7 +293,7 @@ class EditSessionController:
             project=project_name,
             duration_seconds=candidate_qc.duration_seconds,
         )
-        preview = paths.previews / f"pass-{number:02d}.mp4"
+        preview = paths.previews / f"pass-{number:02d}.mov"
         record["candidate_inflight"] = {
             "kind": "candidate",
             "version": 1,
@@ -854,10 +854,12 @@ class EditSessionController:
             paths = self.deps.sessions.paths(record["id"])
             xml = Path(value["fcpxml_path"]).expanduser().resolve()
             preview = Path(value["preview_path"]).expanduser().resolve()
-            if (
-                xml != (paths.candidates / f"pass-{number:02d}.fcpxml").resolve()
-                or preview != (paths.previews / f"pass-{number:02d}.mp4").resolve()
-            ):
+            if xml != (
+                paths.candidates / f"pass-{number:02d}.fcpxml"
+            ).resolve() or preview not in {
+                (paths.previews / f"pass-{number:02d}{suffix}").resolve()
+                for suffix in (".mov", ".mp4")
+            }:
                 raise ValueError
             identity = ProjectIdentity(**value["identity"])
             if (
@@ -1246,6 +1248,9 @@ class EditSessionController:
             if len(projects) != 1:
                 raise SessionError("Undo source must contain one Final Cut project")
             projects[0].set("name", name)
+            # A new name alone does not make a new Final Cut project.
+            projects[0].attrib.pop("uid", None)
+            projects[0].attrib.pop("modDate", None)
             output = io.BytesIO()
             tree.write(output, encoding="utf-8", xml_declaration=True)
             expected = output.getvalue()
@@ -1290,6 +1295,9 @@ class EditSessionController:
             if len(projects) != 1:
                 raise SessionError("Candidate must contain one Final Cut project")
             projects[0].set("name", name)
+            # A new name alone does not make a new Final Cut project.
+            projects[0].attrib.pop("uid", None)
+            projects[0].attrib.pop("modDate", None)
             output = io.BytesIO()
             tree.write(output, encoding="utf-8", xml_declaration=True)
             fd, raw = tempfile.mkstemp(

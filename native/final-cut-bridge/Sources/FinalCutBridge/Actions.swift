@@ -305,7 +305,7 @@ protocol FinalCutActionSystem {
   /// Best effort, never throws: close anything a failed run left on screen.
   func dismissTransientUI()
   func confirmExpectedSheet(_ confirmation: FinalCutConfirmation, timeout: TimeInterval) throws
-  func openDocument(_ path: String, timeout: TimeInterval) throws
+  func openDocument(_ path: String, expected: ProjectIdentity, timeout: TimeInterval) throws
   func selectProject(_ identity: ProjectIdentity, timeout: TimeInterval) throws
   func fileSnapshot(_ path: String, timeout: TimeInterval) throws -> ActionFileSnapshot?
   func identityOfExport(
@@ -359,9 +359,7 @@ struct Actions<System: FinalCutActionSystem> {
     try requireActive(expected, deadline: deadline)
 
     let duplicated = expected.withProject(name)
-    let existing = try perform(deadline: deadline) {
-      try system.projectMatchCount(duplicated, timeout: $0)
-    }
+    let existing = try readProjectMatchCount(duplicated, deadline: deadline)
     guard existing == 0 else {
       throw FinalCutActionError.ambiguousProject
     }
@@ -454,9 +452,9 @@ struct Actions<System: FinalCutActionSystem> {
     }
 
     try perform(deadline: deadline) {
-      try system.openDocument(candidate, timeout: $0)
+      try system.openDocument(candidate, expected: expected, timeout: $0)
     }
-    return try pollForProject(expected, deadline: deadline, rejectMissingMedia: true)
+    return try openProject(expected: expected, timeout: remaining(before: deadline))
   }
 
   func openProject(
@@ -470,9 +468,7 @@ struct Actions<System: FinalCutActionSystem> {
     _ = try poll(deadline: deadline) { () -> Bool? in
       try rejectBlockingDialogs(deadline: deadline)
       do {
-        let count = try perform(deadline: deadline) {
-          try system.projectMatchCount(expected, timeout: $0)
-        }
+        let count = try readProjectMatchCount(expected, deadline: deadline)
         guard count <= 1 else { throw FinalCutActionError.ambiguousProject }
         return count == 1 ? true : nil
       } catch FinalCutAutomationError.eventFailed {
@@ -588,33 +584,13 @@ struct Actions<System: FinalCutActionSystem> {
     try system.blockingDialogs(timeout: 5).map(sanitizedDialog)
   }
 
-  private func pollForProject(
-    _ expected: ProjectIdentity,
-    deadline: TimeInterval,
-    rejectMissingMedia: Bool = false
-  ) throws -> ProjectIdentity {
+  private func readProjectMatchCount(_ expected: ProjectIdentity, deadline: TimeInterval) throws -> Int {
     try poll(deadline: deadline) {
-      let dialogs = try perform(deadline: deadline) {
-        try system.blockingDialogs(timeout: $0).map(sanitizedDialog)
+      do {
+        return try perform(deadline: deadline) { try system.projectMatchCount(expected, timeout: $0) }
+      } catch FinalCutAutomationError.eventFailed {
+        return nil
       }
-      if rejectMissingMedia, dialogs.contains(where: isMissingMediaDialog) {
-        throw FinalCutActionError.blockingDialog
-      }
-      guard dialogs.isEmpty else {
-        throw FinalCutActionError.blockingDialog
-      }
-      let count = try perform(deadline: deadline) {
-        try system.projectMatchCount(expected, timeout: $0)
-      }
-      guard count < 2 else {
-        throw FinalCutActionError.ambiguousProject
-      }
-      guard count == 1 else { return nil }
-      return try perform(
-        deadline: deadline,
-        {
-          try system.activeProjectMatches(expected, timeout: $0)
-        }) ? expected : nil
     }
   }
 
@@ -730,11 +706,7 @@ struct Actions<System: FinalCutActionSystem> {
     }
   }
 
-  private func isMissingMediaDialog(_ dialog: BlockingDialog) -> Bool {
-    let title = dialog.title.lowercased()
-    return (title.contains("missing") && title.contains("media"))
-      || title.contains("relink files")
-  }
+
 
 }
 
@@ -883,7 +855,7 @@ enum FinalCutSheetStage {
     switch self {
     case .duplicate: "OK"
     case .exportXML, .shareSave: "Save"
-    case .shareSettings: "Next..."
+    case .shareSettings: "Next…"
     }
   }
 }
@@ -1645,14 +1617,61 @@ final class LiveFinalCutAX {
         && isVisible($0)
     }
     try requireTime(before: deadline)
-    guard indicators.count == 1, let indicator = indicators.first,
-      let value = numberAttribute(kAXValueAttribute as String, of: indicator),
-      let maximum = numberAttribute(kAXMaxValueAttribute as String, of: indicator),
-      value.isFinite, maximum.isFinite, maximum > 0
-    else {
-      return false
+    if !indicators.isEmpty {
+      guard indicators.count == 1, let indicator = indicators.first,
+        let value = numberAttribute(kAXValueAttribute as String, of: indicator),
+        let maximum = numberAttribute(kAXMaxValueAttribute as String, of: indicator),
+        value.isFinite, maximum.isFinite, maximum > 0
+      else { return false }
+      return value == maximum
     }
-    return value == maximum
+    guard let window = try backgroundTasksWindow() else { return false }
+    let labels = try allElements(beneath: window).filter {
+      try role(of: $0) == kAXStaticTextRole as String && isVisible($0)
+    }.compactMap { stringAttribute(kAXValueAttribute as String, of: $0) }
+    let categories = ["Transcoding and Analysis", "Importing Media", "Media Management",
+      "Rendering", "Thumbnails and Waveforms", "Sharing", "Backup", "Validation", "Downloads"]
+    return categories.allSatisfy { category in
+      let matches = labels.filter { $0.hasPrefix(category + " ") }
+      return matches == [category + " Idle"]
+    }
+  }
+
+  /// Creator Studio exposes completion as explicit Idle labels in this window.
+  /// Open it only for the read, and close only the window this call opened.
+  func inspectBackgroundTaskCompletion(timeout: TimeInterval) throws -> Bool {
+    let deadline = try deadline(after: timeout)
+    if try backgroundTasksWindow() != nil {
+      return try backgroundTasksComplete(timeout: deadline - ProcessInfo.processInfo.systemUptime)
+    }
+    try pressMenu(path: ["Window", "Background Tasks"], timeout: deadline - ProcessInfo.processInfo.systemUptime)
+    let window = try pollUntil(deadline: deadline) {
+      guard let window = try self.backgroundTasksWindow() else { throw AccessibilityDiscoveryError.noMatch }
+      return window
+    }
+    let closes = try allElements(beneath: window).filter {
+      try role(of: $0) == kAXButtonRole as String
+        && stringAttribute(kAXSubroleAttribute as String, of: $0) == kAXCloseButtonSubrole as String
+        && isVisible($0) && isEnabled($0)
+    }
+    guard let close = try exactlyOne(closes) else { throw AccessibilityDiscoveryError.noMatch }
+    defer { _ = close.accessibilityPress() }
+    return try backgroundTasksComplete(timeout: deadline - ProcessInfo.processInfo.systemUptime)
+  }
+
+  private func backgroundTasksWindow() throws -> (any FinalCutAXElement)? {
+    let windows = try directChildren(of: root).filter { element in
+      guard try role(of: element) == kAXWindowRole as String,
+        stringAttribute(kAXSubroleAttribute as String, of: element) == "AXDialog",
+        title(of: element) == "Background Tasks",
+        boolAttribute(kAXModalAttribute as String, of: element) == false, isVisible(element)
+      else { return false }
+      return try allElements(beneath: element).contains {
+        try role(of: $0) == kAXScrollAreaRole as String
+          && stringAttribute(kAXDescriptionAttribute as String, of: $0) == "Background Task Module"
+      }
+    }
+    return try exactlyOne(windows)
   }
 
   func blockingDialogs(timeout: TimeInterval) throws -> [BlockingDialog] {
@@ -1665,6 +1684,7 @@ final class LiveFinalCutAX {
         guard (elementRole == kAXSheetRole as String || elementRole == "AXDialog" || floatingDialog),
           isVisible(element)
         else { return nil }
+        if let background = try backgroundTasksWindow(), element.isSameElement(as: background) { return nil }
         return BlockingDialog(role: floatingDialog ? "AXDialog" : elementRole, title: title(of: element) ?? "")
       }
     }
@@ -1718,6 +1738,30 @@ final class LiveFinalCutAX {
         throw AccessibilityDiscoveryError.noMatch
       }
       return container
+    }
+  }
+
+  func libraryLocation(named name: String, timeout: TimeInterval) throws -> URL {
+    let deadline = try deadline(after: timeout)
+    return try pollUntil(deadline: deadline) {
+      let sidebar = try uniqueElement(titled: "Event media sidebar", role: "AXOutline", beneath: root)
+      let rows = try directChildren(of: sidebar).filter {
+        try role(of: $0) == "AXRow" && numberAttribute("AXDisclosureLevel", of: $0) == 0
+      }
+      let fields = try rows.flatMap { try allElements(beneath: $0) }.filter {
+        try role(of: $0) == "AXTextField" && title(of: $0) == name && isVisible($0)
+      }
+      guard let field = try exactlyOne(fields),
+        let help = stringAttribute(kAXHelpAttribute as String, of: field)
+      else { throw AccessibilityDiscoveryError.noMatch }
+      let paths = help.components(separatedBy: "\n").filter { $0.hasPrefix("/") }
+      guard paths.count == 1, let path = paths.first else { throw FinalCutActionError.invalidPath }
+      let location = URL(fileURLWithPath: path).standardizedFileURL
+      guard location.pathExtension == "fcpbundle",
+        location.deletingPathExtension().lastPathComponent == name,
+        FileManager.default.fileExists(atPath: location.path)
+      else { throw FinalCutActionError.invalidPath }
+      return location
     }
   }
 

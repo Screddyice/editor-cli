@@ -418,12 +418,21 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     expectedSheet = nextStage
   }
 
-  func openDocument(_ path: String, timeout: TimeInterval) throws {
+  func openDocument(_ path: String, expected: ProjectIdentity, timeout: TimeInterval) throws {
     let deadline = try actionDeadline(timeout)
-    _ = try verifiedActionProcessIdentifier(timeout: remaining(before: deadline))
-    guard NSWorkspace.shared.open(URL(fileURLWithPath: path)) else {
-      throw FinalCutActionError.projectNotFound
-    }
+    let accessibility = try actionAccessibility(requireAutomation: true, timeout: remaining(before: deadline))
+    let library = try accessibility.libraryLocation(named: expected.library, timeout: remaining(before: deadline))
+    let candidate = URL(fileURLWithPath: path)
+    let documentPath = try SessionPath(root: sessionRoot).input(FinalCutExportArtifact.readablePath(of: path))
+    let source = URL(fileURLWithPath: documentPath)
+    guard let snapshot = try FCPXMLProjectReader().read(path: documentPath),
+      snapshot.project == expected.project,
+      abs(snapshot.duration - expected.duration) < 0.000_001
+    else { throw FinalCutActionError.identityMismatch }
+    let imported = candidate.deletingLastPathComponent().appendingPathComponent(".\(candidate.deletingPathExtension().lastPathComponent).import-\(UUID().uuidString).fcpxml")
+    let safeOutput = try SessionPath(root: sessionRoot).output(imported.path)
+    try FCPXMLImportDocument.prepare(source: source, library: library, destination: URL(fileURLWithPath: safeOutput))
+    guard NSWorkspace.shared.open(imported) else { throw FinalCutActionError.projectNotFound }
     _ = try remaining(before: deadline)
   }
 
@@ -482,7 +491,7 @@ final class LiveFinalCutSystem: FinalCutSystem, FinalCutActionSystem {
     let accessibility = try actionAccessibility(
       requireAutomation: true, timeout: remaining(before: deadline)
     )
-    let complete = try accessibility.backgroundTasksComplete(
+    let complete = try accessibility.inspectBackgroundTaskCompletion(
       timeout: remaining(before: deadline)
     )
     _ = try remaining(before: deadline)

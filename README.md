@@ -368,6 +368,29 @@ Fresh imports can appear in the browser before library metadata is readable.
 Project opening now waits for the exact metadata match before selecting the
 project once; permission errors still fail immediately.
 
+The XML edit pipeline stages a copy of the captured document in `candidates/`
+before invoking the pinned server, whose output sandbox is relative to its
+input directory. Temporary inputs are removed after editing, and validation
+errors propagate to the caller. The source capture stays unchanged.
+
+Import copies bind to the library path read from the exact Final Cut sidebar
+row. A conflicting XML library location is rejected before import. Edit and
+undo candidates drop the source project UID so they create new projects;
+original captures remain unchanged. The bridge opens the exact imported
+project after its metadata becomes available.
+
+The native canary keeps its generated title and reaction media referenced by
+disabled source clips so Final Cut retains them on export. It resolves their
+exported resource IDs and verifies connected-clip timing in timeline coordinates.
+Generated source clips include transition handles. The edit adapter restores
+the `FxPlug:` prefix that Final Cut requires for built-in transition UUIDs.
+
+Native session previews use `.mov`, matching Final Cut Export File. The bridge
+recognizes the `Next…` button and reads the explicit Idle states in Creator
+Studio's Background Tasks window before accepting a stable output. It closes
+only the status window it opened; missing or busy status blocks completion.
+Existing sessions retain their recorded preview paths during recovery.
+
 The generated-media direct acceptance run on 2026-09-13 completed preview,
 render-bound review, final rendering, and delivery after reloading the session.
 All ten preview and final frame windows were inspected. Decoded tone audio
