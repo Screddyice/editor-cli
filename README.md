@@ -325,14 +325,12 @@ take the same shortcut: the timeline it reports on was opened by someone else,
 and the project name alone does not say which library it came from, which is
 exactly what several identically named projects would get wrong.
 
-**Still open.** Selecting a tile does not open the project into the timeline,
-measured on 2026-09-10 across separate runs, so that postcondition is not
-satisfiable yet for a project that is not already open. The tile publishes
-`AXPress` and nothing else, `AXPress` selects nothing, `Reveal Project in
-Browser` stays disabled, and `Open Clip` does not move the timeline. Opening a
-selected project looks like it needs Return on the focused browser, which would
-widen the keyboard surface from one chord to two; that is not implemented and
-not decided.
+After selecting the exact project, the bridge focuses the browser and presses
+`Clip > Open Clip`. A live check on 2026-09-13 confirmed that this opens the
+eight-second canary timeline. The bridge waits for focus to leave the browser
+and for the timeline name to match, then restores the exact browser selection
+for its identity check. This also rejects an ignored menu action when another
+open timeline has the same name. No additional keyboard shortcut is needed.
 
 Selecting a project in the browser is a write, not a press. `AXPress` on a
 project tile returns success and selects nothing, exactly as the empty
@@ -352,9 +350,9 @@ so it cannot close a library nobody asked about, and the canary calls it in a
 `finally` block. A library that is already gone counts as success, because that
 path runs after failures too.
 
-The live end-to-end export has not run since that fix: the screen was locked,
-and a locked Mac publishes no accessibility windows at all. PR #18 stays draft
-until that run passes. No real user footage has been edited.
+PR #18 stays draft until the complete native edit, preview, and recovery canary
+passes. A successful project-open check does not establish those outcomes.
+No real user footage has been edited.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)

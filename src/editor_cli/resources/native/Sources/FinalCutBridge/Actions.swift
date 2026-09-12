@@ -1267,6 +1267,24 @@ final class LiveFinalCutAX {
     try selectBrowserTile(
       tile, in: try browserEvents(in: try focusedMainWindow()), deadline: deadline
     )
+    let events = try browserEvents(in: try focusedMainWindow())
+    try focusBrowser(events, deadline: deadline)
+    try requireTime(before: deadline)
+    try pressMenu(path: ["Clip", "Open Clip"], timeout: deadline - ProcessInfo.processInfo.systemUptime)
+    // Open Clip transfers focus into the selected project's timeline. Selection
+    // alone only loads the browser viewer, even when the title already matches.
+    _ = try pollUntil(deadline: deadline) {
+      guard !isFocused(events),
+        try activeTimelineName(timeout: deadline - ProcessInfo.processInfo.systemUptime)
+          == identity.project
+      else { throw AccessibilityDiscoveryError.noMatch }
+      return true
+    }
+    // Opening can clear the browser selection. Restore the exact tile so the
+    // caller can verify the library/event selection and timeline together.
+    try selectBrowserTile(
+      tile, in: try browserEvents(in: try focusedMainWindow()), deadline: deadline
+    )
     try requireTime(before: deadline)
   }
 

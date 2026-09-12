@@ -736,17 +736,42 @@ final class ActionTests: XCTestCase {
 
   func testProjectSelectionScopesFlatEventRowsToTheirLibrary() throws {
     let (root, target, decoy, tile, open) = flatBrowser()
+    let events = try XCTUnwrap(root.accessibilityElement(for: "AXFocusedUIElement") as? FakeFinalCutAXElement)
+    let timeline = try XCTUnwrap(root.children[0].children.last)
+    timeline.setTestAttribute("AXTitle", "Other Timeline")
+    open.onPress = {
+      XCTAssertTrue(root.accessibilityElement(for: "AXFocusedUIElement")?.isSameElement(as: events) ?? false)
+      XCTAssertTrue(events.accessibilityElements(for: "AXSelectedChildren").first?.isSameElement(as: tile) ?? false)
+      timeline.setTestAttribute("AXTitle", "Pass 1")
+      root.setTestElement("AXFocusedUIElement", timeline)
+      events.setTestElements("AXSelectedChildren", [])
+    }
     try LiveFinalCutAX(root: root).pressProjectRow(.canaryCandidate, timeout: 0.1)
     XCTAssertEqual(target.accessibilityValue(for: "AXSelected") as? Bool, true)
     XCTAssertNil(decoy.accessibilityValue(for: "AXSelected"))
     // Pressing the tile is what Final Cut ignores; the selection write is what
     // it honours, so the tile must end up selected and never pressed.
-    let events = try XCTUnwrap(root.accessibilityElement(for: "AXFocusedUIElement"))
     let selected = events.accessibilityElements(for: "AXSelectedChildren")
     XCTAssertEqual(selected.count, 1)
     XCTAssertTrue(selected.first?.isSameElement(as: tile) ?? false)
     XCTAssertFalse(tile.pressed)
-    XCTAssertFalse(open.pressed)
+    XCTAssertTrue(open.pressed)
+    XCTAssertTrue(try LiveFinalCutAX(root: root).selectedProjectMatches("Pass 1", timeout: 0.1))
+  }
+
+  func testProjectSelectionCannotSucceedWithAnUnopenedTimeline() throws {
+    let (root, _, _, _, _) = flatBrowser()
+    root.children[0].children.last?.setTestAttribute("AXTitle", "Other Timeline")
+    XCTAssertThrowsError(
+      try LiveFinalCutAX(root: root).pressProjectRow(.canaryCandidate, timeout: 0.1)
+    )
+  }
+
+  func testProjectOpenRejectsAnIgnoredMenuEvenWhenTimelineNameMatches() throws {
+    let (root, _, _, _, _) = flatBrowser()
+    XCTAssertThrowsError(
+      try LiveFinalCutAX(root: root).pressProjectRow(.canaryCandidate, timeout: 0.1)
+    )
   }
 
   func testProjectSelectionRejectsMissingLibraryWithoutSelectingAnotherEvent() throws {
