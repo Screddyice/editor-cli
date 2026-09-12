@@ -269,16 +269,16 @@ Export XML reaches its panel. Creator Studio floats the save panel as its own
 dialog window (`AXWindow` / `AXDialog`, identifier `save-panel`) instead of
 attaching a sheet to the main window, so the controller accepts both shapes.
 
-Two panel behaviors then needed decisions rather than patches, and both are
-settled. A path written into the name field is saved as a literal filename
-(`AXConfirm` on that field reports success and navigates nowhere), so the
-controller opens the panel's Go to Folder sheet with a single `Cmd+Shift+G`
-chord, writes the folder into its `PathTextField` over accessibility, and
-refuses to continue until the `Where` popup shows that folder. That chord is
-the entire keyboard surface; everything else stays accessibility-only. The XML
-version popup offers 1.14, 1.13 and 1.12, and all three write a `.fcpxmld`
-**bundle**, so the bundle is now the export artifact and the controller reads
-`Info.fcpxml` inside it.
+Creator Studio exports a `.fcpxmld` bundle containing `Info.fcpxml`. The
+adapter preserves that bundle and materializes the exact document for the
+controller. It rejects mismatched receipt paths and symlinks, and publishes the
+copy without replacing an existing or concurrently created output.
+
+The save panel requires folder navigation before a filename is entered. The
+bridge opens Go to Folder with `Cmd+Shift+G`, sets the full directory, and
+confirms the exact suggestion before checking the panel location. A matching
+folder basename alone is insufficient: every session has a `source` folder.
+Live export acceptance remains pending while folder confirmation is tested.
 
 An open menu or save panel owns Final Cut's event stream, so a run that failed
 and left one on screen blocked every later Apple Event, and `doctor` reported
@@ -355,6 +355,16 @@ now fail an otherwise successful canary; after an earlier failure, the canary
 reports the cleanup error as well. The bootstrap importer receives a copy under
 `bootstrap-journal/`, so its generated import-options XML cannot change the
 source tree used for preservation checks.
+
+Fresh imports can appear in the browser before library metadata is readable.
+Project opening now waits for the exact metadata match before selecting the
+project once; permission errors still fail immediately.
+
+The generated-media direct acceptance run on 2026-09-13 completed preview,
+render-bound review, final rendering, and delivery after reloading the session.
+All ten preview and final frame windows were inspected. Decoded tone audio
+contained no clipped samples; this does not establish speech transcription or
+listening quality. The run used only generated test media.
 
 PR #18 stays draft until the complete native edit, preview, and recovery canary
 passes. A successful project-open check does not establish those outcomes.

@@ -331,3 +331,19 @@ async def test_open_project_requires_and_returns_exact_identity(tmp_path):
 
     assert opened == expected
     assert native.calls[-1] == ("open_project", expected, tmp_path.resolve())
+
+
+@pytest.mark.anyio
+async def test_native_bundle_is_materialized_for_controller(tmp_path):
+    class BundleNative(FakeNative):
+        def export_xml(self, identity, destination, session_root):
+            bundle = destination.with_suffix(".fcpxmld")
+            bundle.mkdir()
+            (bundle / "Info.fcpxml").write_bytes(b'<fcpxml version="1.11"/>\n')
+            return ExportReceipt("fcpxml_export", identity, bundle)
+
+    adapter, _, _ = control(tmp_path, BundleNative())
+    destination = tmp_path / "source.fcpxml"
+    await adapter.export_xml(project(), destination)
+    assert destination.read_bytes() == b'<fcpxml version="1.11"/>\n'
+    assert (tmp_path / "source.fcpxmld" / "Info.fcpxml").is_file()

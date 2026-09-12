@@ -11,6 +11,7 @@ from typing import Any, Literal, TypeVar
 
 from fcpxml.parser import FCPXMLParser
 
+from editor_cli.adapters.export_bundle import materialize_export
 from editor_cli.adapters.fcpxml_mcp import FCPXMLMCPClient
 from editor_cli.adapters.native_final_cut import (
     NativeFinalCutClient,
@@ -61,9 +62,14 @@ class FinalCutControl:
 
     async def export_xml(self, identity: ProjectIdentity, destination: Path) -> None:
         output = destination.expanduser().resolve()
-        await self._call_native(
+        receipt = await self._call_native(
             self.native.export_xml, identity, output, self.session_root
         )
+        if receipt.output != output:
+            try:
+                materialize_export(receipt.output, output, self.session_root)
+            except (OSError, ValueError) as exc:
+                raise FinalCutControlError(f"Invalid native XML export: {exc}") from exc
 
     async def inspect_xml(self, path: Path):
         parsed = FCPXMLParser().parse_file(str(path))
