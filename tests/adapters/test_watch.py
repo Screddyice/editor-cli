@@ -71,6 +71,8 @@ def test_watch_wrapper_preserves_fractional_timestamps(tmp_path):
     script = tmp_path / "watch.py"
     script.write_text(
         "def format_time(value): return str(round(value))\n"
+        "def extract_scene_or_uniform(*args, **kwargs): return [], {}\n"
+        "def extract_at_timestamps(*args, **kwargs): return [], {}\n"
         "def main(): print(format_time(3.333333))\n"
     )
     result = subprocess.run(
@@ -101,3 +103,27 @@ def test_fractional_report_timestamp_survives_manifest_parsing(tmp_path):
         f"- `{frame}` (t=3.333333, reason=uniform)", tmp_path, "full"
     )
     assert parsed[0]["timestamp_seconds"] == 3.333333
+
+
+def test_uniform_samples_use_exact_cues_without_overwriting_pinned_frames(tmp_path):
+    from types import SimpleNamespace
+    from editor_cli.adapters.watch_runner import install_exact_uniform_sampling
+
+    calls = []
+
+    def exact(video, out, times, **kwargs):
+        calls.append((out, times))
+        return [{"timestamp_seconds": 3.0, "path": "exact.jpg"}], {}
+
+    module = SimpleNamespace(
+        extract_scene_or_uniform=lambda *a, **kw: (
+            [{"timestamp_seconds": 3.0, "path": "late.jpg", "reason": "uniform"}],
+            {},
+        ),
+        extract_at_timestamps=exact,
+    )
+    install_exact_uniform_sampling(module)
+    frames, _ = module.extract_scene_or_uniform("preview.mov", tmp_path)
+    assert frames[0]["path"] == "exact.jpg"
+    assert frames[0]["reason"] == "uniform-exact"
+    assert calls == [(tmp_path / "uniform-exact", [3.0])]

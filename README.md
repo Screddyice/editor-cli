@@ -149,8 +149,9 @@ The native setup builds and signs the project-owned Swift helper and registers
 the MCP server. Run `editor-cli permissions request` to request macOS
 Accessibility and Automation permissions, then check `editor-cli doctor`.
 Doctor is read-only. The native controller does not require CommandPost or a
-paid LateNite application. Its live Final Cut acceptance remains pending; direct
-editing has its own readiness checks and does not use those permissions.
+paid LateNite application. The generated-media live canary passed on
+2026-09-13, including preview export and crash recovery. Direct editing has its
+own readiness checks and does not use those permissions.
 
 If you already configured your agent hosts, install the helper without changing
 their MCP registrations or skills:
@@ -281,7 +282,7 @@ folder basename alone is insufficient: every session has a `source` folder.
 The path field must hold focus before Return can confirm the folder. The
 bridge reacquires the panel after navigation and waits for Save to dismiss it
 before checking the bundle. A live generated-project XML export passed on
-2026-09-13; full edit and preview acceptance remains pending.
+2026-09-13. The full native edit and preview canary also passed that day.
 
 An open menu or save panel owns Final Cut's event stream, so a run that failed
 and left one on screen blocked every later Apple Event, and `doctor` reported
@@ -393,8 +394,9 @@ Task names and status values must belong to the same accessibility row.
 
 Rendered evidence retains fractional timestamps from watch and pins the
 boundaries and interior points of each changed range. This keeps short
-transitions visible when scene sampling would skip them. The installed watch
-skill stays unchanged.
+transitions visible when scene sampling would skip them. Uniform samples are re-extracted at their labeled source timestamps, avoiding
+the upstream fps filter's half-interval offset. The installed watch skill stays
+unchanged.
 
 Source preservation compares canonical XML after removing only opaque
 `media-rep/bookmark` payloads, which Final Cut regenerates on export. It still
@@ -409,9 +411,18 @@ All ten preview and final frame windows were inspected. Decoded tone audio
 contained no clipped samples; this does not establish speech transcription or
 listening quality. The run used only generated test media.
 
-PR #18 stays draft until the complete native edit, preview, and recovery canary
-passes. A successful project-open check does not establish those outcomes.
-No real user footage has been edited.
+The full native canary passed all nine checks on 2026-09-13: original source
+content and media preservation, gap removal, title, dissolve, reaction insert,
+rendered preview, watched evidence, valid candidate XML, and Share recovery
+without replay. Fresh Claude Code and Codex sessions both reported doctor ready
+and independently computed the same preview SHA-256:
+`244052b4ab3a419d4251081fb4c10b416d5f3c43ec510935337e8ca0b8ecfc51`.
+
+Local validation passed 572 Python tests and 150 Swift tests. The wheel passed
+isolated setup planning, native compilation, and stdio MCP initialization. See
+[the acceptance report](docs/acceptance/2026-09-13-editor.md) for evidence and
+reproduction commands. No real user footage has been edited; the final master
+export remains the editor's action in Final Cut.
 
 See
 [`docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md`](docs/superpowers/specs/2026-09-05-native-final-cut-controller-design.md)

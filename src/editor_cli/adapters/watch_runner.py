@@ -14,6 +14,38 @@ def precise_time(seconds: float) -> str:
     return f"{seconds:.6f}"
 
 
+def install_exact_uniform_sampling(module) -> None:
+    original = getattr(module, "extract_scene_or_uniform", None)
+    exact = getattr(module, "extract_at_timestamps", None)
+    if not callable(original) or not callable(exact):
+        raise RuntimeError("watch does not expose its pinned frame extractors")
+
+    def extract(video_path, out_dir, **kwargs):
+        frames, metadata = original(video_path, out_dir, **kwargs)
+        uniform = [frame for frame in frames if frame.get("reason") == "uniform"]
+        if uniform:
+            timestamps = sorted({frame["timestamp_seconds"] for frame in uniform})
+            replacements, _ = exact(
+                video_path,
+                Path(out_dir) / "uniform-exact",
+                timestamps,
+                resolution=kwargs.get("resolution", 512),
+                max_frames=None,
+            )
+            by_time = {frame["timestamp_seconds"]: frame for frame in replacements}
+            if set(by_time) != set(timestamps):
+                raise RuntimeError("watch could not extract every uniform timestamp")
+            frames = [
+                {**by_time[frame["timestamp_seconds"]], "reason": "uniform-exact"}
+                if frame.get("reason") == "uniform"
+                else frame
+                for frame in frames
+            ]
+        return frames, metadata
+
+    module.extract_scene_or_uniform = extract
+
+
 def main() -> None:
     script = Path(sys.argv[1]).expanduser().resolve(strict=True)
     sys.path.insert(0, str(script.parent))
@@ -30,6 +62,9 @@ def main() -> None:
     # underlying frame timestamp so review cannot mistake a nearby scene for
     # a short transition. The installed script itself stays unchanged.
     module.format_time = precise_time
+    # The upstream fps filter labels output slots rather than source-frame PTS.
+    # Re-extract its selected uniform moments through the exact cue extractor.
+    install_exact_uniform_sampling(module)
     sys.argv = [str(script), *sys.argv[2:]]
     module.main()
 
