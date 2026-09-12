@@ -389,6 +389,7 @@ Native session previews use `.mov`, matching Final Cut Export File. The bridge
 recognizes the `Next…` button and reads the explicit Idle states in Creator
 Studio's Background Tasks window before accepting a stable output. It closes
 only the status window it opened; missing or busy status blocks completion.
+Task names and status values must belong to the same accessibility row.
 Existing sessions retain their recorded preview paths during recovery.
 
 The generated-media direct acceptance run on 2026-09-13 completed preview,

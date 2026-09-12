@@ -1610,30 +1610,37 @@ final class LiveFinalCutAX {
 
   func backgroundTasksComplete(timeout: TimeInterval) throws -> Bool {
     let deadline = try deadline(after: timeout)
-    let indicators = try allElements(beneath: root).filter {
-      try role(of: $0) == kAXProgressIndicatorRole as String
-        && stringAttribute(kAXIdentifierAttribute as String, of: $0)
-          == FinalCutAXIdentifier.backgroundTaskProgress
-        && isVisible($0)
-    }
-    try requireTime(before: deadline)
-    if !indicators.isEmpty {
-      guard indicators.count == 1, let indicator = indicators.first,
-        let value = numberAttribute(kAXValueAttribute as String, of: indicator),
-        let maximum = numberAttribute(kAXMaxValueAttribute as String, of: indicator),
-        value.isFinite, maximum.isFinite, maximum > 0
-      else { return false }
-      return value == maximum
-    }
-    guard let window = try backgroundTasksWindow() else { return false }
-    let labels = try allElements(beneath: window).filter {
-      try role(of: $0) == kAXStaticTextRole as String && isVisible($0)
-    }.compactMap { stringAttribute(kAXValueAttribute as String, of: $0) }
-    let categories = ["Transcoding and Analysis", "Importing Media", "Media Management",
-      "Rendering", "Thumbnails and Waveforms", "Sharing", "Backup", "Validation", "Downloads"]
-    return categories.allSatisfy { category in
-      let matches = labels.filter { $0.hasPrefix(category + " ") }
-      return matches == [category + " Idle"]
+    return try pollUntil(deadline: deadline) {
+      let indicators = try allElements(beneath: root).filter {
+        try role(of: $0) == kAXProgressIndicatorRole as String
+          && stringAttribute(kAXIdentifierAttribute as String, of: $0)
+            == FinalCutAXIdentifier.backgroundTaskProgress
+          && isVisible($0)
+      }
+      try requireTime(before: deadline)
+      if !indicators.isEmpty {
+        guard indicators.count == 1, let indicator = indicators.first,
+          let value = numberAttribute(kAXValueAttribute as String, of: indicator),
+          let maximum = numberAttribute(kAXMaxValueAttribute as String, of: indicator),
+          value.isFinite, maximum.isFinite, maximum > 0
+        else { return false }
+        return value == maximum
+      }
+      guard let window = try backgroundTasksWindow() else { return false }
+      let groups = try allElements(beneath: window).filter {
+        try role(of: $0) == kAXGroupRole as String && isVisible($0)
+      }
+      let labels = try groups.map { group in
+        try directChildren(of: group).filter {
+          try role(of: $0) == kAXStaticTextRole as String && isVisible($0)
+        }.compactMap { stringAttribute(kAXValueAttribute as String, of: $0) }
+      }
+      let categories = ["Transcoding and Analysis", "Importing Media", "Media Management",
+        "Rendering", "Thumbnails and Waveforms", "Sharing", "Backup", "Validation", "Downloads"]
+      return categories.allSatisfy { category in
+        let matches = labels.filter { $0.first == category }
+        return matches == [[category, "Idle"]]
+      }
     }
   }
 
@@ -1641,7 +1648,7 @@ final class LiveFinalCutAX {
   /// Open it only for the read, and close only the window this call opened.
   func inspectBackgroundTaskCompletion(timeout: TimeInterval) throws -> Bool {
     let deadline = try deadline(after: timeout)
-    if try backgroundTasksWindow() != nil {
+    if try pollUntil(deadline: deadline, operation: { try backgroundTasksWindow() }) != nil {
       return try backgroundTasksComplete(timeout: deadline - ProcessInfo.processInfo.systemUptime)
     }
     try pressMenu(path: ["Window", "Background Tasks"], timeout: deadline - ProcessInfo.processInfo.systemUptime)
@@ -1649,12 +1656,15 @@ final class LiveFinalCutAX {
       guard let window = try self.backgroundTasksWindow() else { throw AccessibilityDiscoveryError.noMatch }
       return window
     }
-    let closes = try allElements(beneath: window).filter {
-      try role(of: $0) == kAXButtonRole as String
-        && stringAttribute(kAXSubroleAttribute as String, of: $0) == kAXCloseButtonSubrole as String
-        && isVisible($0) && isEnabled($0)
+    let close = try pollUntil(deadline: deadline) {
+      let closes = try allElements(beneath: window).filter {
+        try role(of: $0) == kAXButtonRole as String
+          && stringAttribute(kAXSubroleAttribute as String, of: $0) == kAXCloseButtonSubrole as String
+          && isVisible($0) && isEnabled($0)
+      }
+      guard let close = try exactlyOne(closes) else { throw AccessibilityDiscoveryError.noMatch }
+      return close
     }
-    guard let close = try exactlyOne(closes) else { throw AccessibilityDiscoveryError.noMatch }
     defer { _ = close.accessibilityPress() }
     return try backgroundTasksComplete(timeout: deadline - ProcessInfo.processInfo.systemUptime)
   }

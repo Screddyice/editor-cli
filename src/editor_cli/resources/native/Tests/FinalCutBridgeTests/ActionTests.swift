@@ -1183,8 +1183,10 @@ final class ActionTests: XCTestCase {
       "Rendering", "Thumbnails and Waveforms", "Sharing", "Backup", "Validation", "Downloads"]
     let labels = categories.map { category in
       let text = FakeFinalCutAXElement(role: "AXStaticText")
-      text.setTestAttribute("AXValue", category + " " + (category == "Sharing" ? sharing : "Idle"))
-      return text
+      text.setTestAttribute("AXValue", category)
+      let status = FakeFinalCutAXElement(role: "AXStaticText")
+      status.setTestAttribute("AXValue", category == "Sharing" ? sharing : "Idle")
+      return FakeFinalCutAXElement.group(children: [text, status])
     }
     return FakeFinalCutAXElement(role: "AXWindow", title: "Background Tasks", subrole: "AXDialog",
       modal: false, children: [FakeFinalCutAXElement(role: "AXScrollArea", description: "Background Task Module", children: labels),
