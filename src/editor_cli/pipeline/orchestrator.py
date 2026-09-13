@@ -114,17 +114,23 @@ def run_edit(
         # by the EDL, not a manual overlay step.
         if edl.titles and deps.apply_titles is not None:
             titled = str(out_dir / "final_titled.mp4")
-            deps.apply_titles(final_mp4, edl.titles, titled, preview, engine=titles_engine)
+            deps.apply_titles(
+                final_mp4, edl.titles, titled, preview, engine=titles_engine
+            )
             os.replace(titled, final_mp4)
         if fcpxml_path:
-            Path(fcpxml_path).write_text(deps.edl_to_fcpxml(edl, "Editor CLI", durations))
+            Path(fcpxml_path).write_text(
+                deps.edl_to_fcpxml(edl, "Editor CLI", durations)
+            )
         result = deps.evaluate(final_mp4, style, prompt)
         score = result.score
         if score >= threshold or passes >= max_eval:
             break
         feedback = "\n".join(result.issues)
 
-    return EditResult(final_mp4=final_mp4, fcpxml=fcpxml_path, passes=passes, score=score)
+    return EditResult(
+        final_mp4=final_mp4, fcpxml=fcpxml_path, passes=passes, score=score
+    )
 
 
 def build_deps(cfg: Any, out_dir: str, fetch_opts: Any = None) -> Deps:

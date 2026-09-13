@@ -17,20 +17,50 @@ from editor_cli.render.ffmpeg import render_edl
 
 def _make_clip(path, size="320x240", seconds=2):
     subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size={size}:rate=30",
-         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-shortest", str(path)],
-        check=True, capture_output=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={seconds}:size={size}:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
     )
 
 
 def _dims(path):
-    info = json.loads(subprocess.run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json", "-show_streams", str(path)],
-        check=True, capture_output=True, text=True,
-    ).stdout)
+    info = json.loads(
+        subprocess.run(
+            [
+                "ffprobe",
+                "-v",
+                "quiet",
+                "-print_format",
+                "json",
+                "-show_streams",
+                str(path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout
+    )
     v = next(s for s in info["streams"] if s["codec_type"] == "video")
     return int(v["width"]), int(v["height"])
 
@@ -80,21 +110,29 @@ def test_final_render_uses_quality_encode_not_ultrafast(tmp_path, monkeypatch):
 
         class R:
             stdout = json.dumps(
-                {"streams": [{"codec_type": "video", "width": 432, "height": 768}],
-                 "format": {"duration": "2.0"}}
+                {
+                    "streams": [{"codec_type": "video", "width": 432, "height": 768}],
+                    "format": {"duration": "2.0"},
+                }
             )
+
         return R()
 
     monkeypatch.setattr(ffmpeg, "_run", fake_run)
-    edl = EDL(fps=30.0, resolution=(432, 768),
-              segments=[Segment(src="x.mp4", in_=0.0, out=1.0)])
+    edl = EDL(
+        fps=30.0,
+        resolution=(432, 768),
+        segments=[Segment(src="x.mp4", in_=0.0, out=1.0)],
+    )
     render_edl(edl, str(tmp_path / "o.mp4"), preview=False)
 
     encode_cmds = [c for c in calls if "-c:v" in c]
     assert encode_cmds, "expected an encode command"
     enc = encode_cmds[0]
     assert "-crf" in enc, "final render must set an explicit CRF for quality"
-    assert "ultrafast" not in enc, "final render must not use the preview ultrafast preset"
+    assert "ultrafast" not in enc, (
+        "final render must not use the preview ultrafast preset"
+    )
 
 
 def test_preview_render_stays_fast(tmp_path, monkeypatch):
@@ -105,14 +143,20 @@ def test_preview_render_stays_fast(tmp_path, monkeypatch):
 
         class R:
             stdout = json.dumps(
-                {"streams": [{"codec_type": "video", "width": 432, "height": 768}],
-                 "format": {"duration": "2.0"}}
+                {
+                    "streams": [{"codec_type": "video", "width": 432, "height": 768}],
+                    "format": {"duration": "2.0"},
+                }
             )
+
         return R()
 
     monkeypatch.setattr(ffmpeg, "_run", fake_run)
-    edl = EDL(fps=30.0, resolution=(432, 768),
-              segments=[Segment(src="x.mp4", in_=0.0, out=1.0)])
+    edl = EDL(
+        fps=30.0,
+        resolution=(432, 768),
+        segments=[Segment(src="x.mp4", in_=0.0, out=1.0)],
+    )
     render_edl(edl, str(tmp_path / "o.mp4"), preview=True)
 
     enc = next(c for c in calls if "-c:v" in c)

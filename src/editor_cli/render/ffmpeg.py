@@ -14,7 +14,7 @@ import os
 import subprocess
 import tempfile
 
-from editor_cli.domain.edl import EDL
+from editor_cli.domain.edl import EDL, Segment
 
 
 class RenderError(RuntimeError):
@@ -24,15 +24,25 @@ class RenderError(RuntimeError):
 def _run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     res = subprocess.run(cmd, capture_output=True, text=True)
     if res.returncode != 0:
-        raise RenderError(f"{cmd[0]} failed (exit {res.returncode}): {res.stderr[-2000:]}")
+        raise RenderError(
+            f"{cmd[0]} failed (exit {res.returncode}): {res.stderr[-2000:]}"
+        )
     return res
 
 
 def probe(path: str) -> dict:
     """ffprobe manifest: format + streams as a dict."""
     res = _run(
-        ["ffprobe", "-v", "quiet", "-print_format", "json",
-         "-show_format", "-show_streams", path]
+        [
+            "ffprobe",
+            "-v",
+            "quiet",
+            "-print_format",
+            "json",
+            "-show_format",
+            "-show_streams",
+            path,
+        ]
     )
     return json.loads(res.stdout)
 
@@ -59,8 +69,21 @@ def sample_frames(src: str, n: int, out_dir: str) -> list[tuple[float, str]]:
     for i in range(n):
         t = dur * 0.05 + (span * i / (n - 1) if n > 1 else span / 2)
         img = os.path.join(out_dir, f"{stem}_{i:02d}.jpg")
-        _run(["ffmpeg", "-y", "-ss", f"{t:.3f}", "-i", src,
-              "-frames:v", "1", "-q:v", "3", img])
+        _run(
+            [
+                "ffmpeg",
+                "-y",
+                "-ss",
+                f"{t:.3f}",
+                "-i",
+                src,
+                "-frames:v",
+                "1",
+                "-q:v",
+                "3",
+                img,
+            ]
+        )
         frames.append((t, img))
     return frames
 
@@ -229,14 +252,29 @@ def _render_with_transitions(
         cur_v, cur_a = nv, na
         prev_d = d
 
-    _run([
-        "ffmpeg", "-y", *inputs,
-        "-filter_complex", ";".join(chains),
-        "-map", cur_v, "-map", cur_a,
-        *venc, "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ac", "2", "-ar", "48000",
-        out,
-    ])
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(chains),
+            "-map",
+            cur_v,
+            "-map",
+            cur_a,
+            *venc,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            out,
+        ]
+    )
     return out
 
 
@@ -261,11 +299,27 @@ def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
         cmd = [
             # input-side trim so motion filters (e.g. speed/setpts) re-time the
             # output freely instead of -t clamping it as an output limit
-            "ffmpeg", "-y",
-            "-ss", str(seg.in_), "-t", str(seg.duration), "-i", seg.src,
-            "-vf", vf, "-r", str(fps),
-            *venc, "-pix_fmt", "yuv420p",
-            "-c:a", "aac", "-ac", "2", "-ar", "48000",
+            "ffmpeg",
+            "-y",
+            "-ss",
+            str(seg.in_),
+            "-t",
+            str(seg.duration),
+            "-i",
+            seg.src,
+            "-vf",
+            vf,
+            "-r",
+            str(fps),
+            *venc,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
         ]
         if af:
             cmd += ["-af", af]
@@ -276,7 +330,21 @@ def render_edl(edl: EDL, out: str, preview: bool = False) -> str:
     with open(list_file, "w") as fh:
         for p in parts:
             fh.write(f"file '{p}'\n")
-    _run(["ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", list_file, "-c", "copy", out])
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "concat",
+            "-safe",
+            "0",
+            "-i",
+            list_file,
+            "-c",
+            "copy",
+            out,
+        ]
+    )
     return out
 
 
@@ -294,7 +362,9 @@ def _title_layout(title: dict) -> dict | None:
     Tolerant of the shape Gemini emits: text|label|content, start, end|duration,
     position (top|center|bottom).
     """
-    text = (title.get("text") or title.get("label") or title.get("content") or "").strip()
+    text = (
+        title.get("text") or title.get("label") or title.get("content") or ""
+    ).strip()
     if not text:
         return None
     start = float(title.get("start", 0.0) or 0.0)
@@ -305,14 +375,27 @@ def _title_layout(title: dict) -> dict | None:
     if end <= start:
         end = start + 3.0
     pos = str(title.get("position") or "bottom").lower()
-    region = "top" if "top" in pos else ("center" if ("cent" in pos or "mid" in pos) else "bottom")
-    return {"text": text, "start": start, "end": end, "region": region, "style": title.get("style")}
+    region = (
+        "top"
+        if "top" in pos
+        else ("center" if ("cent" in pos or "mid" in pos) else "bottom")
+    )
+    return {
+        "text": text,
+        "start": start,
+        "end": end,
+        "region": region,
+        "style": title.get("style"),
+    }
 
 
 def _load_font(style, size: int):
     from PIL import ImageFont
 
-    for path, idx in [(style.font_file, style.face_index), *((f, 0) for f in _FALLBACK_FONTS)]:
+    for path, idx in [
+        (style.font_file, style.face_index),
+        *((f, 0) for f in _FALLBACK_FONTS),
+    ]:
         if os.path.exists(path):
             try:
                 return ImageFont.truetype(path, size, index=idx)
@@ -349,8 +432,12 @@ def _render_title_png(layout: dict, w: int, h: int, out_png: str) -> None:
     else:
         y = h - th - round(h * 0.10) - bbox[1]
     draw.text(
-        (x, y), text, font=font, fill=(255, 255, 255, 255),
-        stroke_width=stroke, stroke_fill=(0, 0, 0, 210),
+        (x, y),
+        text,
+        font=font,
+        fill=(255, 255, 255, 255),
+        stroke_width=stroke,
+        stroke_fill=(0, 0, 0, 210),
     )
     img.save(out_png)
 
@@ -399,12 +486,25 @@ def apply_titles(
         if preview
         else ["-c:v", "libx264", "-preset", "medium", "-crf", "18"]
     )
-    _run([
-        "ffmpeg", "-y", *inputs,
-        "-filter_complex", ";".join(chains),
-        "-map", cur, "-map", "0:a?",
-        *venc, "-pix_fmt", "yuv420p", "-c:a", "copy", out,
-    ])
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            *inputs,
+            "-filter_complex",
+            ";".join(chains),
+            "-map",
+            cur,
+            "-map",
+            "0:a?",
+            *venc,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "copy",
+            out,
+        ]
+    )
     return out
 
 
@@ -436,12 +536,30 @@ def overlay_onto(
         f"[1:v]setpts=PTS+{start:.6g}/TB[ov];"
         f"[0:v][ov]overlay={x}:{y}:eof_action=pass:format=auto[v]"
     )
-    _run([
-        "ffmpeg", "-y", "-i", base, "-i", overlay,
-        "-filter_complex", fc,
-        "-map", "[v]", "-map", "0:a?",
-        *venc, "-pix_fmt", "yuv420p",
-        "-c:a", "aac", "-ac", "2", "-ar", "48000",
-        out,
-    ])
+    _run(
+        [
+            "ffmpeg",
+            "-y",
+            "-i",
+            base,
+            "-i",
+            overlay,
+            "-filter_complex",
+            fc,
+            "-map",
+            "[v]",
+            "-map",
+            "0:a?",
+            *venc,
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-ac",
+            "2",
+            "-ar",
+            "48000",
+            out,
+        ]
+    )
     return out

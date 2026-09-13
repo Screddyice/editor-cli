@@ -34,7 +34,9 @@ def _style():
 
 
 def test_analyze_style_parses_into_domain():
-    gc = GeminiClient(generate=lambda p, f: "```json\n" + json.dumps(STYLE_JSON) + "\n```")
+    gc = GeminiClient(
+        generate=lambda p, f: "```json\n" + json.dumps(STYLE_JSON) + "\n```"
+    )
     sp = gc.analyze_style(["ref.mp4"])
     assert isinstance(sp, StyleProfile)
     assert sp.vibe == "punchy"
@@ -101,9 +103,13 @@ def test_reason_edl_parses_model_chosen_effects():
         "fps": 30.0,
         "resolution": [1080, 1920],
         "segments": [
-            {"src": "a.mp4", "in": 0.0, "out": 2.0,
-             "motion": {"type": "ken_burns", "zoom": 1.1, "direction": "in"},
-             "transition": {"crossfade": 0.5, "crossfade_style": "fade"}},
+            {
+                "src": "a.mp4",
+                "in": 0.0,
+                "out": 2.0,
+                "motion": {"type": "ken_burns", "zoom": 1.1, "direction": "in"},
+                "transition": {"crossfade": 0.5, "crossfade_style": "fade"},
+            },
         ],
     }
     edl = GeminiClient(generate=_Capture(payload)).reason_edl("m", "t", _style(), "go")
@@ -124,7 +130,9 @@ def test_retry_on_bad_json_then_succeeds():
 
     def gen(p, f):
         calls["n"] += 1
-        return "not json" if calls["n"] == 1 else json.dumps({"score": 0.5, "issues": []})
+        return (
+            "not json" if calls["n"] == 1 else json.dumps({"score": 0.5, "issues": []})
+        )
 
     gc = GeminiClient(generate=gen)
     res = gc.evaluate("o.mp4", _style(), "p")
@@ -166,7 +174,11 @@ def test_retry_succeeds_after_transient():
 
 def test_retry_gives_up_after_attempts():
     with pytest.raises(_Transient):
-        _retry(lambda: (_ for _ in ()).throw(_Transient()), attempts=2, sleep=lambda s: None)
+        _retry(
+            lambda: (_ for _ in ()).throw(_Transient()),
+            attempts=2,
+            sleep=lambda s: None,
+        )
 
 
 def test_retry_non_retryable_raises_immediately():
@@ -182,6 +194,7 @@ def test_retry_non_retryable_raises_immediately():
 
 
 # --- FileUploader -----------------------------------------------------------
+
 
 def _fake_files(seqs, uploaded):
     """Fake Gemini files API. ``seqs`` maps a path/name to a list of states the
@@ -206,6 +219,7 @@ def _stat_from(table):
     def stat(path):
         size, mtime = table[path]
         return SimpleNamespace(st_size=size, st_mtime_ns=mtime)
+
     return stat
 
 
@@ -243,8 +257,11 @@ def test_uploader_distinct_paths_each_uploaded_in_order():
 
 def test_uploader_waits_for_active():
     uploaded: list[str] = []
-    up = _uploader({"/x/a.mp4": ["PROCESSING", "PROCESSING", "ACTIVE"]},
-                   uploaded, {"/x/a.mp4": (1, 1)})
+    up = _uploader(
+        {"/x/a.mp4": ["PROCESSING", "PROCESSING", "ACTIVE"]},
+        uploaded,
+        {"/x/a.mp4": (1, 1)},
+    )
     handles = up.upload_all(["/x/a.mp4"])
     assert handles[0].state == "ACTIVE"
 
@@ -258,8 +275,13 @@ def test_uploader_poll_timeout_raises():
         clock["v"] += 100.0
         return v
 
-    up = _uploader({"/x/a.mp4": ["PROCESSING"]}, uploaded, {"/x/a.mp4": (1, 1)},
-                   poll_timeout=180.0, now=now)
+    up = _uploader(
+        {"/x/a.mp4": ["PROCESSING"]},
+        uploaded,
+        {"/x/a.mp4": (1, 1)},
+        poll_timeout=180.0,
+        now=now,
+    )
     with pytest.raises(TimeoutError):
         up.upload_all(["/x/a.mp4"])
 

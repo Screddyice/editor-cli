@@ -20,6 +20,9 @@ references/
 /edit/
 /out/
 /renders/
+/sessions/
+/canary-output/
+/work/
 
 # fcp interchange artifacts (generated)
 *.fcpxmld/
@@ -32,3 +35,9 @@ legion.toml
 
 # build metadata
 *.egg-info/
+dist/
+.ruff_cache/
+.pytest_cache/
+/native/final-cut-bridge/.build/
+.worktrees/
+.superpowers/

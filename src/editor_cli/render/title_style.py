@@ -58,22 +58,32 @@ _ACCENT_HINTS = ("accent", "cursive", "script", "italic", "soft")
 class TitleStyle:
     """A concrete, renderable caption treatment."""
 
-    emphasis: str          # "declarative" | "accent"
+    emphasis: str  # "declarative" | "accent"
     family: str
     font_file: str
     face_index: int
-    uppercase: bool        # force upper? (no — the reference preserves source case)
-    tracking: float        # extra letter-spacing as a fraction of font size
-    gradient: bool         # apply the reference's white→ice-blue vertical sheen
+    uppercase: bool  # force upper? (no — the reference preserves source case)
+    tracking: float  # extra letter-spacing as a fraction of font size
+    gradient: bool  # apply the reference's white→ice-blue vertical sheen
 
 
 DECLARATIVE = TitleStyle(
-    emphasis="declarative", family=SANS_FAMILY, font_file=SANS_FILE,
-    face_index=SANS_INDEX, uppercase=False, tracking=0.04, gradient=False,
+    emphasis="declarative",
+    family=SANS_FAMILY,
+    font_file=SANS_FILE,
+    face_index=SANS_INDEX,
+    uppercase=False,
+    tracking=0.04,
+    gradient=False,
 )
 ACCENT = TitleStyle(
-    emphasis="accent", family=SCRIPT_FAMILY, font_file=SCRIPT_FILE,
-    face_index=SCRIPT_INDEX, uppercase=False, tracking=0.0, gradient=True,
+    emphasis="accent",
+    family=SCRIPT_FAMILY,
+    font_file=SCRIPT_FILE,
+    face_index=SCRIPT_INDEX,
+    uppercase=False,
+    tracking=0.0,
+    gradient=True,
 )
 
 

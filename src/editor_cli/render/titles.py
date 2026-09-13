@@ -31,7 +31,8 @@ def render(
         return ffmpeg.apply_titles(video, titles, out, preview=preview)
 
     want_hf = engine == "hyperframes" or (
-        engine == "auto" and overlays.runtime_status(runner or overlays._default_runner)["ok"]
+        engine == "auto"
+        and overlays.runtime_status(runner or overlays._default_runner)["ok"]
     )
     if not want_hf:
         return ffmpeg.apply_titles(video, titles, out, preview=preview)
@@ -40,7 +41,10 @@ def render(
     dur = ffmpeg.duration_of(video)
     webm = os.path.join(tempfile.mkdtemp(prefix="editor_cli_titles_"), "titles.webm")
     try:
-        if hyperframes.render_titles_overlay(titles, w, h, dur, webm, runner=runner) is None:
+        if (
+            hyperframes.render_titles_overlay(titles, w, h, dur, webm, runner=runner)
+            is None
+        ):
             # nothing drawable -> pass through untouched
             return ffmpeg.apply_titles(video, titles, out, preview=preview)
         return ffmpeg.overlay_onto(video, webm, out, preview=preview)

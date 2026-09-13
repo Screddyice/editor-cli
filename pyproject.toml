@@ -1,17 +1,21 @@
 [project]
 name = "editor-cli"
 version = "0.1.0"
-description = "Editor CLI — AI video editing where Final Cut Pro is the engine and Gemini is the visual brain"
+description = "Agent-driven video editing from selected files, with optional Final Cut control"
 readme = "README.md"
-license = { file = "LICENSE" }
+license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "Screddyice" }]
 keywords = ["video-editing", "final-cut-pro", "fcpxml", "gemini", "cli"]
 dependencies = [
+    "fcp-mcp-server==0.22.1",
     "google-genai>=2.8.0",
+    "mcp>=1.3.0,<3",
+    "pillow>=10",
+    "requests>=2.32",
+    "tomli>=2; python_version < '3.11'",
     "typer>=0.12",
     "yt-dlp>=2026.6.9",
-    "pillow>=10",
 ]
 
 [project.urls]
@@ -23,6 +27,7 @@ dev = ["pytest>=8"]
 
 [project.scripts]
 editor-cli = "editor_cli.cli:app"
+editor-cli-mcp = "editor_cli.mcp_server:main"
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -34,8 +39,30 @@ package-dir = { "" = "src" }
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+"editor_cli.resources" = [
+    "native/Package.swift",
+    "native/Sources/FinalCutBridge/*.swift",
+    "native/Tests/FinalCutBridgeTests/*.swift",
+    "skills/final-cut-editor/SKILL.md",
+    "skills/direct-video-editor/SKILL.md",
+    "canary/fcp_live_canary.py",
+]
+
 [tool.pytest.ini_options]
 # Only our own tests — never recurse into the vendored OpenMontage submodule,
 # which ships its own (differently-configured) test suite.
 testpaths = ["tests"]
 norecursedirs = ["vendor", ".venv", "references"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 88
+
+[tool.ruff.lint]
+# Keep the repository gate independent of each contributor's global settings.
+select = ["E4", "E7", "E9", "F"]
+
+[tool.ruff.lint.per-file-ignores]
+# Small injected callbacks keep test fixtures readable.
+"tests/**" = ["E731"]

@@ -29,9 +29,9 @@ def test_two_contrasting_families_not_one():
 
 
 def test_declarative_is_tracked_grotesque_accent_is_plain_script():
-    assert ts.DECLARATIVE.tracking > 0      # tracked caps hook
+    assert ts.DECLARATIVE.tracking > 0  # tracked caps hook
     assert ts.ACCENT.tracking == 0
-    assert ts.ACCENT.gradient is True       # reference's ice-blue sheen
+    assert ts.ACCENT.gradient is True  # reference's ice-blue sheen
     assert ts.DECLARATIVE.gradient is False
 
 

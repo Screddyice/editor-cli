@@ -9,7 +9,11 @@ SAMPLE = {
     "transitions": ["hard cut", "whip"],
     "automations": ["auto-captions", "zoom punch"],
     "color": {"description": "warm, high contrast", "lut": None},
-    "captions": {"style": "bold-uppercase", "position": "lower-third", "font": "Helvetica"},
+    "captions": {
+        "style": "bold-uppercase",
+        "position": "lower-third",
+        "font": "Helvetica",
+    },
     "sound": {"name": "trending beat", "energy": "high", "genre": "edm", "bpm": 128},
     "vibe": "fast-paced launch hype",
 }

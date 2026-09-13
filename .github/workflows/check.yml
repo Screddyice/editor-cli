@@ -1,0 +1,59 @@
+name: Check
+
+on:
+  pull_request:
+  push:
+    branches: [main, codex/final-cut-closed-loop-controller]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: check-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  python-minimum:
+    runs-on: macos-15
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.15'
+      - name: Verify Python 3.10 imports and setup contracts
+        run: |
+          uv python install 3.10
+          uv sync --python 3.10 --locked --extra dev
+          uv run --no-sync python -m editor_cli.mcp_server --help
+          uv run --no-sync pytest -q tests/test_native_setup.py tests/session/test_locking.py
+  check:
+    runs-on: macos-15
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.15'
+          enable-cache: true
+      - name: Install Python and media dependencies
+        run: |
+          uv python install 3.13
+          uv sync --python 3.13 --locked --extra dev
+          brew install ffmpeg
+      - name: Native helper tests
+        run: swift test --package-path native/final-cut-bridge
+      - name: Python lint
+        run: |
+          uvx ruff check src tests scripts
+          uvx ruff format --check src tests scripts
+      - name: Python and generated-media tests
+        run: uv run --no-sync pytest -q
+        env:
+          EDITOR_CLI_OPENMONTAGE_ROOT: ${{ github.workspace }}/vendor/OpenMontage
+      - name: Build distributions and check MCP entry point
+        run: |
+          uv build
+          uv run --no-sync python -m editor_cli.mcp_server --help

@@ -50,7 +50,8 @@ class Transcript:
 def _extract_audio(video_path: str, out_wav: str) -> str:
     subprocess.run(
         ["ffmpeg", "-y", "-i", video_path, "-vn", "-ac", "1", "-ar", "16000", out_wav],
-        check=True, capture_output=True,
+        check=True,
+        capture_output=True,
     )
     return out_wav
 

@@ -4,7 +4,6 @@ The bridge only ever shells out (subprocess), so command construction and the
 doctor are tested with an injected runner. The compositor is real ffmpeg.
 """
 
-import json
 import subprocess
 from types import SimpleNamespace
 
@@ -32,30 +31,36 @@ def _runner(table):
 
 # --- doctor ------------------------------------------------------------------
 
+
 def test_runtime_status_ok_when_all_present():
-    run = _runner({
-        "node --version": (0, "v22.3.0"),
-        "ffmpeg -version": (0, "ffmpeg version 8"),
-        "npx --version": (0, "10.0.0"),
-        "hyperframes --version": (0, "1.2.3"),
-    })
+    run = _runner(
+        {
+            "node --version": (0, "v22.3.0"),
+            "ffmpeg -version": (0, "ffmpeg version 8"),
+            "npx --version": (0, "10.0.0"),
+            "hyperframes --version": (0, "1.2.3"),
+        }
+    )
     st = overlays.runtime_status(runner=run)
     assert st["ok"] is True
     assert st["node"] == "v22.3.0" and st["hyperframes"] == "1.2.3"
 
 
 def test_runtime_status_not_ok_without_hyperframes():
-    run = _runner({
-        "node --version": (0, "v22.3.0"),
-        "ffmpeg -version": (0, "ffmpeg version 8"),
-        "npx --version": (0, "10.0.0"),
-        # hyperframes probe falls through -> rc 1
-    })
+    run = _runner(
+        {
+            "node --version": (0, "v22.3.0"),
+            "ffmpeg -version": (0, "ffmpeg version 8"),
+            "npx --version": (0, "10.0.0"),
+            # hyperframes probe falls through -> rc 1
+        }
+    )
     st = overlays.runtime_status(runner=run)
     assert st["ok"] is False and st["hyperframes"] is None
 
 
 # --- submodule ---------------------------------------------------------------
+
 
 def test_submodule_root_resolves_to_checked_out_vendor():
     root = overlays.submodule_root()
@@ -64,16 +69,19 @@ def test_submodule_root_resolves_to_checked_out_vendor():
 
 # --- render command shape ----------------------------------------------------
 
+
 def test_render_overlay_shells_npx_hyperframes_render(tmp_path):
     proj = tmp_path / "proj"
     proj.mkdir()
-    run = _runner({
-        "node --version": (0, "v22.3.0"),
-        "ffmpeg -version": (0, "ffmpeg version 8"),
-        "npx --version": (0, "10.0.0"),
-        "hyperframes --version": (0, "1.2.3"),
-        "hyperframes render": (0, "rendered"),
-    })
+    run = _runner(
+        {
+            "node --version": (0, "v22.3.0"),
+            "ffmpeg -version": (0, "ffmpeg version 8"),
+            "npx --version": (0, "10.0.0"),
+            "hyperframes --version": (0, "1.2.3"),
+            "hyperframes render": (0, "rendered"),
+        }
+    )
     overlays.render_overlay(proj, strict=True, runner=run)
     render_call = next(c for c, kw in run.calls if "render" in c)
     assert render_call[:3] == ["npx", "hyperframes", "render"]
@@ -99,24 +107,52 @@ def test_render_overlay_raises_on_missing_project(tmp_path):
 
 # --- real ffmpeg compositing -------------------------------------------------
 
+
 def _base(path, size="640x360", seconds=2):
     subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size={size}:rate=30",
-         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-shortest", str(path)],
-        check=True, capture_output=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={seconds}:size={size}:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
     )
 
 
 def _alpha_overlay(path, seconds=1):
     # a semi-transparent box with alpha (mov/qtrle preserves alpha)
     subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"color=c=red@0.5:s=120x80:d={seconds}:r=30,format=rgba",
-         "-c:v", "qtrle", str(path)],
-        check=True, capture_output=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"color=c=red@0.5:s=120x80:d={seconds}:r=30,format=rgba",
+            "-c:v",
+            "qtrle",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
     )
 
 

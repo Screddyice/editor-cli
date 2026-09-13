@@ -26,8 +26,12 @@ def test_discover_genre_returns_urls_and_uses_ytsearch():
 
 
 def test_fetch_sound_meta_parses_json():
-    payload = {"title": "Big Launch", "track": "Pump It", "artist": "DJ X",
-               "uploader": "ChannelY"}
+    payload = {
+        "title": "Big Launch",
+        "track": "Pump It",
+        "artist": "DJ X",
+        "uploader": "ChannelY",
+    }
 
     def runner(cmd, **kwargs):
         return _Res(json.dumps(payload))

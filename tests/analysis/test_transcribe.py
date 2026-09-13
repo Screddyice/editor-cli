@@ -22,18 +22,30 @@ def test_transcribe_parses_words_and_filters_events(tmp_path):
     def fake_post(url, headers, data, files):
         captured.update(url=url, headers=headers, data=data)
         return _FakeResp(
-            {"words": [
-                {"text": "hello", "start": 0.0, "end": 0.4, "type": "word"},
-                {"text": "world", "start": 0.5, "end": 0.9, "type": "word"},
-                {"text": "(laughs)", "start": 0.9, "end": 1.0, "type": "audio_event"},
-            ]}
+            {
+                "words": [
+                    {"text": "hello", "start": 0.0, "end": 0.4, "type": "word"},
+                    {"text": "world", "start": 0.5, "end": 0.9, "type": "word"},
+                    {
+                        "text": "(laughs)",
+                        "start": 0.9,
+                        "end": 1.0,
+                        "type": "audio_event",
+                    },
+                ]
+            }
         )
 
     def fake_extract(video, out_wav):
         return str(audio)
 
-    t = transcribe("video.mp4", "KEY", out_dir=str(tmp_path),
-                   post=fake_post, extract_audio=fake_extract)
+    t = transcribe(
+        "video.mp4",
+        "KEY",
+        out_dir=str(tmp_path),
+        post=fake_post,
+        extract_audio=fake_extract,
+    )
     assert isinstance(t, Transcript)
     assert [w.text for w in t.words] == ["hello", "world"]  # event filtered out
     assert captured["headers"]["xi-api-key"] == "KEY"
@@ -45,11 +57,15 @@ def test_transcribe_uses_cache(tmp_path):
     tdir = tmp_path / "transcripts"
     tdir.mkdir()
     (tdir / "video.json").write_text(
-        json.dumps({"words": [{"text": "cached", "start": 0, "end": 1, "type": "word"}]})
+        json.dumps(
+            {"words": [{"text": "cached", "start": 0, "end": 1, "type": "word"}]}
+        )
     )
 
     def boom(*a, **k):
         raise AssertionError("network/ffmpeg should not run on cache hit")
 
-    t = transcribe("video.mp4", "K", out_dir=str(tmp_path), post=boom, extract_audio=boom)
+    t = transcribe(
+        "video.mp4", "K", out_dir=str(tmp_path), post=boom, extract_audio=boom
+    )
     assert [w.text for w in t.words] == ["cached"]

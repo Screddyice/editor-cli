@@ -90,8 +90,15 @@ def scaffold(
     ``render_overlay``.
     """
     project_dir = Path(project_dir)
-    cmd = ["npx", "hyperframes", "init", str(project_dir),
-           "--example", template, "--non-interactive"]
+    cmd = [
+        "npx",
+        "hyperframes",
+        "init",
+        str(project_dir),
+        "--example",
+        template,
+        "--non-interactive",
+    ]
     if video:
         cmd += ["--video", str(video)]
     res = runner(cmd)
@@ -122,7 +129,13 @@ def render_overlay(
             "HyperFrames runtime unavailable — need Node >= 22 and the "
             "hyperframes CLI (npx hyperframes). Run `editor-cli motion-doctor`."
         )
-    cmd = ["npx", "hyperframes", "render", *(["--strict"] if strict else []), *extra_args]
+    cmd = [
+        "npx",
+        "hyperframes",
+        "render",
+        *(["--strict"] if strict else []),
+        *extra_args,
+    ]
     res = runner(cmd, cwd=str(project_dir))
     if res.returncode != 0:
         raise OverlayError(f"hyperframes render failed: {res.stderr[-800:]}")

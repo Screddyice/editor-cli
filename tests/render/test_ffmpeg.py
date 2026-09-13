@@ -8,12 +8,30 @@ from editor_cli.render.ffmpeg import duration_of, probe, render_edl
 
 def _make_clip(path, seconds=3):
     subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size=320x240:rate=30",
-         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-shortest", str(path)],
-        check=True, capture_output=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={seconds}:size=320x240:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
     )
 
 

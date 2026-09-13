@@ -9,12 +9,30 @@ from editor_cli.render.ffmpeg import _title_layout, apply_titles, duration_of, p
 
 def _clip(path, size="640x360", seconds=3):
     subprocess.run(
-        ["ffmpeg", "-y",
-         "-f", "lavfi", "-i", f"testsrc=duration={seconds}:size={size}:rate=30",
-         "-f", "lavfi", "-i", f"sine=frequency=440:duration={seconds}",
-         "-c:v", "libx264", "-preset", "ultrafast", "-pix_fmt", "yuv420p",
-         "-c:a", "aac", "-shortest", str(path)],
-        check=True, capture_output=True,
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"testsrc=duration={seconds}:size={size}:rate=30",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:v",
+            "libx264",
+            "-preset",
+            "ultrafast",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-shortest",
+            str(path),
+        ],
+        check=True,
+        capture_output=True,
     )
 
 
@@ -27,7 +45,9 @@ def test_layout_tolerant_shape_and_positions():
     assert top["text"] == "Hi" and top["start"] == 1 and top["end"] == 3
     assert top["region"] == "top"
 
-    assert _title_layout({"label": "Yo"})["region"] == "bottom"  # label alias, default region
+    assert (
+        _title_layout({"label": "Yo"})["region"] == "bottom"
+    )  # label alias, default region
     assert _title_layout({"content": "C", "position": "center"})["region"] == "center"
 
     # duration -> end, and end<=start guard

@@ -21,15 +21,20 @@ def test_empty_text_returns_empty():
 def test_count_mismatch_falls_back_to_overlay_style_and_reports():
     gen = lambda p: '{"tags": ["script"]}'  # 1 tag, 3 words
     errors = []
-    out = ce.tag_words("Run Run Run", gen, overlay_style="cursive",
-                       on_error=lambda t, e: errors.append(t))
+    out = ce.tag_words(
+        "Run Run Run",
+        gen,
+        overlay_style="cursive",
+        on_error=lambda t, e: errors.append(t),
+    )
     assert out == [("Run", "accent"), ("Run", "accent"), ("Run", "accent")]
     assert errors == ["Run Run Run"]
 
 
 def test_bad_json_falls_back_to_plain_for_declarative_overlay():
-    out = ce.tag_words("POV: YOU LOCKED IN", lambda p: "not json",
-                       overlay_style="bold-white-uppercase")
+    out = ce.tag_words(
+        "POV: YOU LOCKED IN", lambda p: "not json", overlay_style="bold-white-uppercase"
+    )
     assert {e for _, e in out} == {"declarative"}
 
 
@@ -41,5 +46,7 @@ def test_runs_collapses_consecutive_same_emphasis():
 def test_runs_preserves_alternation_order():
     tagged = [("my", "declarative"), ("Wrist", "accent"), ("now", "declarative")]
     assert ce.runs(tagged) == [
-        ("declarative", ["my"]), ("accent", ["Wrist"]), ("declarative", ["now"]),
+        ("declarative", ["my"]),
+        ("accent", ["Wrist"]),
+        ("declarative", ["now"]),
     ]
