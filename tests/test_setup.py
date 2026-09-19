@@ -19,6 +19,7 @@ def test_watch_install_command_pins_shared_skill_release():
         "--agent",
         "claude-code",
         "codex",
+        "qwen-code",
         "--skill",
         "watch",
         "-y",
@@ -40,7 +41,7 @@ class FakePlatform:
             binary.write_bytes(b"native helper")
 
     def install_watch(self, paths):
-        for root in (paths.codex_skills, paths.claude_skills):
+        for root in (paths.codex_skills, paths.claude_skills, paths.qwen_skills):
             skill = root / "watch"
             skill.mkdir(parents=True, exist_ok=True)
             (skill / "SKILL.md").write_text(
@@ -64,6 +65,8 @@ def setup_paths(tmp_path: Path) -> SetupPaths:
         claude_config=tmp_path / "claude.json",
         codex_skills=tmp_path / "codex" / "skills",
         claude_skills=tmp_path / "claude" / "skills",
+        qwen_config=tmp_path / "qwen" / "settings.json",
+        qwen_skills=tmp_path / "qwen" / "skills",
         application_support=tmp_path / "Library/Application Support/Editor CLI",
     )
 
@@ -85,6 +88,18 @@ def test_setup_second_run_has_no_changes(tmp_path):
     second = run_setup(paths, platform=platform)
     assert first.changed
     assert second.changed == []
+
+
+def test_setup_registers_qwen_mcp_and_skill(tmp_path):
+    paths = setup_paths(tmp_path)
+    run_setup(paths, platform=FakePlatform())
+
+    config = json.loads(paths.qwen_config.read_text(encoding="utf-8"))
+    server = config["mcpServers"]["editor-cli"]
+    assert server["args"] == ["-m", "editor_cli.mcp_server"]
+    assert server["cwd"] == str(paths.repo_root)
+    assert server["managed_by"] == setup_lib.MCP_MANAGED_BY
+    assert paths.qwen_skills.joinpath("final-cut-editor").is_symlink()
 
 
 def test_setup_dry_run_does_not_write_outside_repo(tmp_path):

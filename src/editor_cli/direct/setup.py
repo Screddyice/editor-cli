@@ -21,7 +21,7 @@ def install_skills(home: Path | None = None) -> dict:
     content = template.replace("@PYTHON@", shlex.quote(sys.executable))
     targets = [
         home / host / "skills" / "direct-video-editor" / "SKILL.md"
-        for host in (".codex", ".claude")
+        for host in (".codex", ".claude", ".qwen")
     ]
     # Validate both destinations before making changes. Existing managed copies
     # receive a backup; unrelated skills and symlink destinations are untouched.

@@ -35,7 +35,7 @@ def test_mcp_direct_does_not_construct_final_cut_services(monkeypatch):
 
 def test_skill_install_idempotent_and_preserves_unmanaged_content(tmp_path):
     result = install_skills(tmp_path)
-    assert len(result["changed"]) == 2
+    assert len(result["changed"]) == 3
     assert "@PYTHON@" not in open(result["installed"][0]).read()
     assert install_skills(tmp_path)["changed"] == []
     path = tmp_path / ".codex/skills/direct-video-editor/SKILL.md"

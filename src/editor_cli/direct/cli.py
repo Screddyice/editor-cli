@@ -60,7 +60,7 @@ def run_action(
 
 @app.command()
 def setup():
-    """Install the direct-video-editor skill for Codex and Claude Code."""
+    """Install the direct-video-editor skill for Codex, Claude Code, and Qwen Code."""
     from editor_cli.direct.setup import install_skills
 
     try:
