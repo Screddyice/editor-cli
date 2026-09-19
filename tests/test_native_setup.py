@@ -31,7 +31,7 @@ class FakePlatform:
         )
 
     def install_watch(self, paths: SetupPaths) -> None:
-        for root in (paths.codex_skills, paths.claude_skills):
+        for root in (paths.codex_skills, paths.claude_skills, paths.qwen_skills):
             skill = root / "watch"
             skill.mkdir(parents=True, exist_ok=True)
             (skill / "SKILL.md").write_text(
@@ -54,6 +54,8 @@ def setup_paths(tmp_path: Path) -> SetupPaths:
         claude_config=tmp_path / "claude.json",
         codex_skills=tmp_path / "codex" / "skills",
         claude_skills=tmp_path / "claude" / "skills",
+        qwen_config=tmp_path / "qwen" / "settings.json",
+        qwen_skills=tmp_path / "qwen" / "skills",
         application_support=tmp_path / "Library/Application Support/Editor CLI",
     )
 
@@ -255,6 +257,8 @@ def test_setup_uses_packaged_resources_instead_of_repo_paths(tmp_path):
         claude_config=paths.claude_config,
         codex_skills=paths.codex_skills,
         claude_skills=paths.claude_skills,
+        qwen_config=paths.qwen_config,
+        qwen_skills=paths.qwen_skills,
         application_support=paths.application_support,
     )
     platform = FakePlatform()

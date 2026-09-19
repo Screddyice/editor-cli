@@ -51,6 +51,12 @@ class SetupPaths:
     claude_config: Path
     codex_skills: Path
     claude_skills: Path
+    qwen_config: Path = field(
+        default_factory=lambda: Path("~/.qwen/settings.json").expanduser()
+    )
+    qwen_skills: Path = field(
+        default_factory=lambda: Path("~/.qwen/skills").expanduser()
+    )
     application_support: Path = field(
         default_factory=lambda: Path(
             "~/Library/Application Support/Editor CLI"
@@ -105,6 +111,7 @@ def watch_install_command() -> tuple[str, ...]:
         "--agent",
         "claude-code",
         "codex",
+        "qwen-code",
         "--skill",
         "watch",
         "-y",
@@ -397,19 +404,21 @@ def _merge_codex_config(path: Path, python: Path, repo_root: Path) -> str | None
     return None if updated == existing else updated
 
 
-def _merge_claude_config(path: Path, python: Path, repo_root: Path) -> str | None:
+def _merge_json_mcp_config(
+    path: Path, python: Path, repo_root: Path, *, host: str
+) -> str | None:
     if path.is_file():
         try:
             value = json.loads(path.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
-            raise SetupError(f"Claude config is invalid JSON: {path}") from exc
+            raise SetupError(f"{host} config is invalid JSON: {path}") from exc
     else:
         value = {}
     if not isinstance(value, dict):
-        raise SetupError("Claude config must contain a JSON object")
+        raise SetupError(f"{host} config must contain a JSON object")
     servers = value.setdefault("mcpServers", {})
     if not isinstance(servers, dict):
-        raise SetupError("Claude mcpServers must contain a JSON object")
+        raise SetupError(f"{host} mcpServers must contain a JSON object")
     desired = {
         "type": "stdio",
         "command": str(python),
@@ -425,7 +434,7 @@ def _merge_claude_config(path: Path, python: Path, repo_root: Path) -> str | Non
             or current.get("managed_by") != MCP_MANAGED_BY
         ):
             raise SetupError(
-                "Claude already has an unmanaged editor-cli entry; remove or rename it"
+                f"{host} already has an unmanaged editor-cli entry; remove or rename it"
             )
         updated = {**current, **desired}
         if current == updated:
@@ -434,6 +443,14 @@ def _merge_claude_config(path: Path, python: Path, repo_root: Path) -> str | Non
     else:
         servers["editor-cli"] = desired
     return json.dumps(value, indent=2, ensure_ascii=False) + "\n"
+
+
+def _merge_claude_config(path: Path, python: Path, repo_root: Path) -> str | None:
+    return _merge_json_mcp_config(path, python, repo_root, host="Claude")
+
+
+def _merge_qwen_config(path: Path, python: Path, repo_root: Path) -> str | None:
+    return _merge_json_mcp_config(path, python, repo_root, host="Qwen")
 
 
 def _fsync_directory(path: Path) -> None:
@@ -981,6 +998,12 @@ def _validate_claude_managed_config(path: Path, python: Path, repo_root: Path) -
         raise SetupError("Installed Claude config lost its managed MCP registration")
 
 
+def _validate_qwen_managed_config(path: Path, python: Path, repo_root: Path) -> None:
+    _validate_config_file(path)
+    if _merge_qwen_config(path, python, repo_root) is not None:
+        raise SetupError("Installed Qwen config lost its managed MCP registration")
+
+
 def _write_config(
     path: Path,
     content: str | None,
@@ -1355,18 +1378,25 @@ def run_setup(
     legacy_skill_source = (paths.repo_root / "skills/final-cut-editor").resolve()
     codex_skill = paths.codex_skills / "final-cut-editor"
     claude_skill = paths.claude_skills / "final-cut-editor"
+    qwen_skill = paths.qwen_skills / "final-cut-editor"
     codex_skill_plan = _symlink_plan(codex_skill, skill_source, legacy_skill_source)
     claude_skill_plan = _symlink_plan(claude_skill, skill_source, legacy_skill_source)
+    qwen_skill_plan = _symlink_plan(qwen_skill, skill_source, legacy_skill_source)
     codex_original = _snapshot_regular_file(paths.codex_config, label="Codex config")
     claude_original = _snapshot_regular_file(paths.claude_config, label="Claude config")
+    qwen_original = _snapshot_regular_file(paths.qwen_config, label="Qwen config")
     codex_backup_path = paths.codex_config.with_suffix(
         paths.codex_config.suffix + ".editor-cli.bak"
     )
     claude_backup_path = paths.claude_config.with_suffix(
         paths.claude_config.suffix + ".editor-cli.bak"
     )
+    qwen_backup_path = paths.qwen_config.with_suffix(
+        paths.qwen_config.suffix + ".editor-cli.bak"
+    )
     codex_backup = _snapshot_regular_file(codex_backup_path, label="Codex backup")
     claude_backup = _snapshot_regular_file(claude_backup_path, label="Claude backup")
+    qwen_backup = _snapshot_regular_file(qwen_backup_path, label="Qwen backup")
     if codex_backup is not None:
         _parse_config_bytes(
             codex_backup,
@@ -1379,8 +1409,15 @@ def run_setup(
             json.loads,
             error=f"Config backup is invalid: {claude_backup_path}",
         )
+    if qwen_backup is not None:
+        _parse_config_bytes(
+            qwen_backup,
+            json.loads,
+            error=f"Config backup is invalid: {qwen_backup_path}",
+        )
     codex_content = _merge_codex_config(paths.codex_config, python, paths.repo_root)
     claude_content = _merge_claude_config(paths.claude_config, python, paths.repo_root)
+    qwen_content = _merge_qwen_config(paths.qwen_config, python, paths.repo_root)
     helper = paths.application_support / "bin" / NATIVE_HELPER_NAME
     packaged_source_sha256 = _resource_tree_sha256(native_source())
     _native_helper_ownership(
@@ -1393,7 +1430,7 @@ def run_setup(
 
     watch_ready = all(
         _watch_version(root) == WATCH_RELEASE.removeprefix("v")
-        for root in (paths.codex_skills, paths.claude_skills)
+        for root in (paths.codex_skills, paths.claude_skills, paths.qwen_skills)
     )
     if not watch_ready:
         result.planned.append(f"install watch {WATCH_RELEASE}")
@@ -1402,7 +1439,7 @@ def run_setup(
             result.changed.append(f"install watch {WATCH_RELEASE}")
     result.checks["watch"] = dry_run or all(
         _watch_version(root) == WATCH_RELEASE.removeprefix("v")
-        for root in (paths.codex_skills, paths.claude_skills)
+        for root in (paths.codex_skills, paths.claude_skills, paths.qwen_skills)
     )
 
     _ensure_symlink(
@@ -1416,6 +1453,13 @@ def run_setup(
         claude_skill,
         skill_source,
         claude_skill_plan,
+        result,
+        dry_run,
+    )
+    _ensure_symlink(
+        qwen_skill,
+        skill_source,
+        qwen_skill_plan,
         result,
         dry_run,
     )
@@ -1439,6 +1483,17 @@ def run_setup(
         expected=claude_original,
         expected_backup=claude_backup,
         verify=lambda path: _validate_claude_managed_config(
+            path, python, paths.repo_root
+        ),
+    )
+    _write_config(
+        paths.qwen_config,
+        qwen_content,
+        result,
+        dry_run,
+        expected=qwen_original,
+        expected_backup=qwen_backup,
+        verify=lambda path: _validate_qwen_managed_config(
             path, python, paths.repo_root
         ),
     )

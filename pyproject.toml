@@ -6,7 +6,7 @@ readme = "README.md"
 license = "MIT"
 requires-python = ">=3.10"
 authors = [{ name = "Screddyice" }]
-keywords = ["video-editing", "final-cut-pro", "fcpxml", "gemini", "cli"]
+keywords = ["video-editing", "final-cut-pro", "fcpxml", "gemini", "qwen", "cli"]
 dependencies = [
     "fcp-mcp-server==0.22.1",
     "google-genai>=2.8.0",

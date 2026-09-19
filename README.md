@@ -1,6 +1,6 @@
 # Editor CLI
 
-Edit selected footage with Codex or Claude Code and receive a finished MP4.
+Edit selected footage with Codex, Claude Code, or Qwen Code and receive a finished MP4.
 The direct workflow handles transcription, cut decisions, rendering, and review
 without Final Cut. A separate controller supports projects in Final Cut Pro.
 
@@ -20,9 +20,9 @@ uv run editor-cli direct start --file /path/to/clip1.mov --file /path/to/clip2.m
   --file /path/to/brief.md --prompt 'Make a travel vlog with captions'
 ```
 
-`direct setup` installs the `direct-video-editor` skill for Codex and Claude
-Code. Existing Editor CLI MCP registrations expose the new `editor_direct` tool
-after an agent restart. The skill also includes the installed Python command,
+`direct setup` installs the `direct-video-editor` skill for Codex, Claude Code,
+and Qwen Code. Existing Editor CLI MCP registrations expose the new
+`editor_direct` tool after an agent restart. The skill also includes the installed Python command,
 so the workflow works through the CLI before tools refresh. New MCP clients can
 register `editor-cli-mcp` as a stdio server; direct editing needs no native helper.
 
@@ -138,7 +138,7 @@ temporary previews and never exports, publishes, or uploads the final master.
 #### Host setup and readiness
 
 Run setup once to install the pinned dependencies and register the MCP server
-for both hosts:
+for Codex, Claude Code, and Qwen Code:
 
 ```bash
 uv run editor-cli setup
