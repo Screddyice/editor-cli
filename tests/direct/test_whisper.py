@@ -51,11 +51,14 @@ def test_model_path_must_exist_when_set(monkeypatch, tmp_path):
 
 
 def test_doctor_reports_local_transcription_without_scribe_key(monkeypatch, tmp_path):
+    from editor_cli.direct import session
     from editor_cli.direct.session import DirectSession
 
     model = tmp_path / "ggml-small.en.bin"
     model.write_bytes(b"x")
     monkeypatch.setenv("EDITOR_CLI_WHISPER_MODEL", str(model))
+    # CI runners have no whisper-cli; the doctor check should not depend on the host.
+    monkeypatch.setattr(session, "whisper_binary", lambda: "/usr/bin/true")
     monkeypatch.delenv("ELEVENLABS_API_KEY", raising=False)
     monkeypatch.setenv("EDITOR_CLI_ENV_FILE", str(tmp_path / "none.env"))
 
