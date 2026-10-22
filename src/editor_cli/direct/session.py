@@ -26,6 +26,12 @@ from editor_cli.direct.media import (
     window,
 )
 from editor_cli.direct.models import EditPlan
+from editor_cli.direct.whisper import (
+    run_whisper,
+    whisper_binary,
+    whisper_model,
+    words_from_whisper,
+)
 
 
 def now() -> str:
@@ -124,8 +130,9 @@ class DirectSession:
     def doctor() -> dict:
         binaries = {name: shutil.which(name) for name in ("ffmpeg", "ffprobe")}
         try:
-            scribe_key()
-            transcription = True
+            transcription = bool(whisper_model() and whisper_binary()) or bool(
+                scribe_key()
+            )
         except ValueError:
             transcription = False
         return {
@@ -328,9 +335,8 @@ class DirectSession:
             if not has_audio(asset["metadata"]):
                 payload = {"text": "", "words": []}
             else:
-                import requests
-
-                key = scribe_key()
+                model = whisper_model()
+                key = None if model is not None else scribe_key()
                 work = self.root / "transcripts" / uuid.uuid4().hex
                 work.mkdir(mode=0o700)
                 audio = work / "audio.wav"
@@ -351,27 +357,35 @@ class DirectSession:
                         str(audio),
                     ]
                 )
-                with requests.Session() as client, audio.open("rb") as handle:
-                    client.trust_env = False
-                    response = client.post(
-                        "https://api.elevenlabs.io/v1/speech-to-text",
-                        headers={"xi-api-key": key},
-                        files={"file": ("audio.wav", handle, "audio/wav")},
-                        data={
-                            "model_id": "scribe_v1",
-                            "diarize": "true",
-                            "tag_audio_events": "true",
-                            "timestamps_granularity": "word",
-                        },
-                        timeout=(30, 1800),
+                if model is not None:
+                    payload = validate_transcript(
+                        words_from_whisper(run_whisper(audio, model, work)),
+                        duration(asset["metadata"]),
                     )
-                if response.status_code != 200:
-                    raise RuntimeError(
-                        f"Word transcription failed: HTTP {response.status_code}"
+                else:
+                    import requests
+
+                    with requests.Session() as client, audio.open("rb") as handle:
+                        client.trust_env = False
+                        response = client.post(
+                            "https://api.elevenlabs.io/v1/speech-to-text",
+                            headers={"xi-api-key": key},
+                            files={"file": ("audio.wav", handle, "audio/wav")},
+                            data={
+                                "model_id": "scribe_v1",
+                                "diarize": "true",
+                                "tag_audio_events": "true",
+                                "timestamps_granularity": "word",
+                            },
+                            timeout=(30, 1800),
+                        )
+                    if response.status_code != 200:
+                        raise RuntimeError(
+                            f"Word transcription failed: HTTP {response.status_code}"
+                        )
+                    payload = validate_transcript(
+                        response.json(), duration(asset["metadata"])
                     )
-                payload = validate_transcript(
-                    response.json(), duration(asset["metadata"])
-                )
             target = self.root / "transcripts" / f"{asset_id}.json"
             atomic_json(target, payload)
             state["transcripts"][asset_id] = {

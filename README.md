@@ -43,10 +43,14 @@ accept public HTTPS media URLs (500 MB maximum), validate and pin public IPs on
 each redirect, and record provenance. Website extraction and browser cookies
 are outside this workflow.
 
-FFmpeg and ffprobe provide local rendering. Optional verbatim word transcription uses
-ElevenLabs Scribe: set `ELEVENLABS_API_KEY` in the process or point
-`EDITOR_CLI_ENV_FILE` at your credential file. The source checkout also checks
-its own `.env` and the machine's `~/projects/.env` for that one key. No Gemini
+FFmpeg and ffprobe provide local rendering. Optional verbatim word transcription
+runs locally when a whisper.cpp model is available: install `whisper-cli` and a
+`ggml` model such as `ggml-small.en.bin`, then either place it at
+`~/.cache/whisper-cpp/ggml-small.en.bin` or set `EDITOR_CLI_WHISPER_MODEL` to its
+path. Without a local model, transcription uses ElevenLabs Scribe: set
+`ELEVENLABS_API_KEY` in the process or point `EDITOR_CLI_ENV_FILE` at your
+credential file. The source checkout also checks its own `.env` and the machine's
+`~/projects/.env` for that one key. No Gemini
 key is required for direct editing. `direct doctor` reports rendering and
 transcription readiness separately. Source audio and narration render without a
 key. Word-aware trimming and timed captions require transcripts; caption plans
