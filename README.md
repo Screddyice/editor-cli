@@ -43,10 +43,14 @@ accept public HTTPS media URLs (500 MB maximum), validate and pin public IPs on
 each redirect, and record provenance. Website extraction and browser cookies
 are outside this workflow.
 
-FFmpeg and ffprobe provide local rendering. Optional verbatim word transcription uses
-ElevenLabs Scribe: set `ELEVENLABS_API_KEY` in the process or point
-`EDITOR_CLI_ENV_FILE` at your credential file. The source checkout also checks
-its own `.env` and the machine's `~/projects/.env` for that one key. No Gemini
+FFmpeg and ffprobe provide local rendering. Optional verbatim word transcription
+runs locally when a whisper.cpp model is available: install `whisper-cli` and a
+`ggml` model such as `ggml-small.en.bin`, then either place it at
+`~/.cache/whisper-cpp/ggml-small.en.bin` or set `EDITOR_CLI_WHISPER_MODEL` to its
+path. Without a local model, transcription uses ElevenLabs Scribe: set
+`ELEVENLABS_API_KEY` in the process or point `EDITOR_CLI_ENV_FILE` at your
+credential file. The source checkout also checks its own `.env` and the machine's
+`~/projects/.env` for that one key. No Gemini
 key is required for direct editing. `direct doctor` reports rendering and
 transcription readiness separately. Source audio and narration render without a
 key. Word-aware trimming and timed captions require transcripts; caption plans
@@ -219,6 +223,15 @@ The `Check` GitHub workflow runs the Python and native tests, lint, distribution
 build, and MCP entry-point check on macOS. A separate Python 3.10 job checks
 the minimum supported version. Offline tests include generated-media
 renders and simulated crash recovery. They do not prove live Final Cut control.
+
+QA Assist uses `.shawns-qa.toml` to create the same `.venv` layout, install
+locked development tools, and initialize the OpenMontage submodule before
+running Python tests, distribution builds, and the MCP startup check. Its lint
+gate checks `src`, `tests`, and `scripts`, matching CI rather than scanning
+vendored projects. The worker must have FFmpeg and ffprobe on `PATH` (`apt-get
+install ffmpeg` on Ubuntu, `brew install ffmpeg` on macOS); setup checks both
+before running tests. Both macOS checks must pass before an automated merge;
+Linux verification does not replace the native-helper checks.
 
 Local verification on 2026-09-07: 546 Python tests, 105 Swift tests, and 22
 Python 3.10 setup/locking tests passed. Ruff lint/format, wheel/sdist builds,

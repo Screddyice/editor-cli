@@ -23,7 +23,7 @@ Homepage = "https://github.com/Screddyice/editor-cli"
 Repository = "https://github.com/Screddyice/editor-cli"
 
 [project.optional-dependencies]
-dev = ["pytest>=8"]
+dev = ["pytest>=8", "ruff>=0.13", "uv==0.8.15"]
 
 [project.scripts]
 editor-cli = "editor_cli.cli:app"

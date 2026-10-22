@@ -1,0 +1,28 @@
+[verify]
+timeout_seconds = 900
+# Match CI's environment layout: setup ownership tests use .venv/bin/python.
+setup = '''
+set -eu
+command -v ffmpeg
+command -v ffprobe
+python3 -m venv .venv
+.venv/bin/python -m pip install uv==0.8.15
+.venv/bin/python -m uv sync --locked --extra dev
+git submodule update --init --recursive
+'''
+lint = '''
+set -eu
+.venv/bin/python -m ruff check src tests scripts
+.venv/bin/python -m ruff format --check src tests scripts
+'''
+test = '''
+set -eu
+export PATH="$PWD/.venv/bin:$PATH"
+.venv/bin/python -m pytest -q
+.venv/bin/python -m uv build
+.venv/bin/python -m editor_cli.mcp_server --help
+'''
+
+# Linux QA cannot replace the macOS native-helper and minimum-Python gates.
+[merge]
+required_checks = ["python-minimum", "check"]
