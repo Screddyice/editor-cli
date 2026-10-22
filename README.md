@@ -224,6 +224,15 @@ build, and MCP entry-point check on macOS. A separate Python 3.10 job checks
 the minimum supported version. Offline tests include generated-media
 renders and simulated crash recovery. They do not prove live Final Cut control.
 
+QA Assist uses `.shawns-qa.toml` to create the same `.venv` layout, install
+locked development tools, and initialize the OpenMontage submodule before
+running Python tests, distribution builds, and the MCP startup check. Its lint
+gate checks `src`, `tests`, and `scripts`, matching CI rather than scanning
+vendored projects. The worker must have FFmpeg and ffprobe on `PATH` (`apt-get
+install ffmpeg` on Ubuntu, `brew install ffmpeg` on macOS); setup checks both
+before running tests. Both macOS checks must pass before an automated merge;
+Linux verification does not replace the native-helper checks.
+
 Local verification on 2026-09-07: 546 Python tests, 105 Swift tests, and 22
 Python 3.10 setup/locking tests passed. Ruff lint/format, wheel/sdist builds,
 and MCP startup checks passed. Code review covered interruption recovery,
