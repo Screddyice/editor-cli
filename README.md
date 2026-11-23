@@ -535,3 +535,9 @@ and is **not** linked into or imported by editor-cli's code — so it does not
 change editor-cli's MIT license. If you ever import OpenMontage as a library
 rather than shelling out to it, AGPL's copyleft would extend to the combined
 work; keep the boundary at the process level to stay MIT.
+
+## CI
+
+Pull requests and pushes to `main` run on Crow CI, a Woodpecker-based server on Shawn's Mac whose agent is Linux arm64. The pipeline in `.woodpecker.yaml` covers the Linux-capable part of `.github/workflows/check.yml`: the Python 3.10 import and setup checks, then on Python 3.13 with FFmpeg the ruff lint and format checks, the full pytest suite, `uv build` and the MCP entry point. A green `ci/crow/...` status on the pull request's head commit is the merge check for that part.
+
+Two things need macOS and always run on GitHub's macOS runner in the `macos-only` job: the Swift Final Cut bridge tests and the title-style tests that use macOS system fonts. The other GitHub jobs sit behind a `crow-gate` job, which waits up to three minutes for a Crow status. If one appears, they are skipped. If none appears (the Mac was asleep or offline), they run on GitHub as before. A manual run (`gh workflow run check.yml`) always runs them.

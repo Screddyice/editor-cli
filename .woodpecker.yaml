@@ -1,0 +1,32 @@
+# Mirrors the Linux-capable parts of .github/workflows/check.yml on the arm64 Crow agent.
+# The Swift Final Cut bridge and the macOS-font title tests stay on GitHub (macos-only job).
+steps:
+  python-minimum:
+    image: python:3.10-bookworm
+    depends_on: []
+    environment:
+      # Both steps share the workspace and run in parallel, so each keeps its own venv.
+      UV_PROJECT_ENVIRONMENT: /tmp/venv-py310
+    commands:
+      - pip install -q uv==0.8.15
+      - uv sync --python /usr/local/bin/python3.10 --locked --extra dev
+      - uv run --no-sync python -m editor_cli.mcp_server --help
+      - uv run --no-sync pytest -q tests/test_native_setup.py tests/session/test_locking.py
+  check:
+    image: python:3.13-bookworm
+    depends_on: []
+    environment:
+      UV_PROJECT_ENVIRONMENT: /tmp/venv-py313
+    commands:
+      - git submodule update --init --recursive
+      - apt-get update -qq
+      - apt-get install --yes -qq ffmpeg
+      - pip install -q uv==0.8.15
+      - uv sync --python /usr/local/bin/python3.13 --locked --extra dev
+      - uvx ruff check src tests scripts
+      - uvx ruff format --check src tests scripts
+      - EDITOR_CLI_OPENMONTAGE_ROOT="$PWD/vendor/OpenMontage" uv run --no-sync pytest -q
+      - uv build
+      - uv run --no-sync python -m editor_cli.mcp_server --help
+when:
+  event: [push, pull_request, manual]

@@ -4,6 +4,7 @@ on:
   pull_request:
   push:
     branches: [main, codex/final-cut-closed-loop-controller]
+  workflow_dispatch:
 
 permissions:
   contents: read
@@ -13,7 +14,43 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  # Crow CI on Shawn's Mac runs the same checks (.woodpecker.yaml) and posts a
+  # ci/crow/... status within seconds of a push. This job waits up to 3 minutes for
+  # one: found, the gated jobs below are skipped and Crow's result is the merge check;
+  # none (Mac asleep or offline, webhook lost), they run here as before. A manual
+  # run (workflow_dispatch) always runs them.
+  crow-gate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      statuses: read
+    outputs:
+      run: ${{ steps.check.outputs.run }}
+    steps:
+      - id: check
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          EVENT: ${{ github.event_name }}
+        run: |
+          if [ "$EVENT" = workflow_dispatch ]; then
+            echo "Manual run: running GitHub CI."; echo run=true >> "$GITHUB_OUTPUT"; exit 0
+          fi
+          for _ in $(seq 1 12); do
+            n=$(gh api "repos/$GITHUB_REPOSITORY/commits/$SHA/statuses" \
+              --jq '[.[] | select(.context | startswith("ci/crow/"))] | length' || echo 0)
+            if [ "${n:-0}" -gt 0 ]; then
+              echo "Crow picked up $SHA; skipping GitHub CI (Crow's status is the check)."
+              echo run=false >> "$GITHUB_OUTPUT"; exit 0
+            fi
+            sleep 15
+          done
+          echo "No Crow status on $SHA after 3 minutes (Mac asleep or offline); running GitHub CI."
+          echo run=true >> "$GITHUB_OUTPUT"
+
   python-minimum:
+    needs: crow-gate
+    if: needs.crow-gate.outputs.run == 'true'
     runs-on: macos-15
     timeout-minutes: 15
     steps:
@@ -27,7 +64,28 @@ jobs:
           uv sync --python 3.10 --locked --extra dev
           uv run --no-sync python -m editor_cli.mcp_server --help
           uv run --no-sync pytest -q tests/test_native_setup.py tests/session/test_locking.py
+
+  # The Swift Final Cut bridge builds only on macOS, and the title-style tests need
+  # macOS system fonts, so Crow's Linux agent cannot run them. This job always runs
+  # on GitHub, whatever crow-gate finds.
+  macos-only:
+    runs-on: macos-15
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          version: '0.8.15'
+      - name: Native helper tests
+        run: swift test --package-path native/final-cut-bridge
+      - name: Title-style tests that need macOS fonts
+        run: |
+          uv python install 3.13
+          uv sync --python 3.13 --locked --extra dev
+          uv run --no-sync pytest -q tests/render/test_title_style.py
   check:
+    needs: crow-gate
+    if: needs.crow-gate.outputs.run == 'true'
     runs-on: macos-15
     timeout-minutes: 30
     steps:
@@ -43,8 +101,6 @@ jobs:
           uv python install 3.13
           uv sync --python 3.13 --locked --extra dev
           brew install ffmpeg
-      - name: Native helper tests
-        run: swift test --package-path native/final-cut-bridge
       - name: Python lint
         run: |
           uvx ruff check src tests scripts
