@@ -5,7 +5,8 @@ steps:
     image: python:3.10-bookworm
     depends_on: []
     environment:
-      # Both steps share the workspace and run in parallel, so each keeps its own venv.
+      # Both steps share the workspace and run in parallel. This one keeps its venv
+      # outside the repo; check uses <repo>/.venv like GitHub, which test_setup.py expects.
       UV_PROJECT_ENVIRONMENT: /tmp/venv-py310
     commands:
       - pip install -q uv==0.8.15
@@ -15,8 +16,6 @@ steps:
   check:
     image: python:3.13-bookworm
     depends_on: []
-    environment:
-      UV_PROJECT_ENVIRONMENT: /tmp/venv-py313
     commands:
       - git submodule update --init --recursive
       - apt-get update -qq
